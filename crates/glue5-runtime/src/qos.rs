@@ -6,9 +6,9 @@
 pub enum Qos {
     /// A frame waits on it (the engine's main thread, the renderer).
     Interactive,
-    /// Work the game needs soon (engine workers, pipeline compiles).
+    /// Work the game needs soon (engine workers, shaders being prepared).
     Initiated,
-    /// Background work (logs).
+    /// Background work (logs, pipelines compiled while playing).
     Utility,
 }
 

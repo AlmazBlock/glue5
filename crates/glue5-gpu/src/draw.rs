@@ -3,6 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use glue5_runtime::gpu::Command;
+use glue5_runtime::qos::{self, Qos};
 use rustc_hash::FxHashMap;
 use wgpu::{TextureFormat, TextureViewDimension};
 
@@ -371,7 +372,15 @@ impl Gpu {
         if self.settings.sync_pipelines {
             job();
         } else {
-            self.pool.urgent(job);
+            // Its draws are skipped meanwhile, nothing waits: in a lower
+            // class (efficiency cores, where there are some) it leaves the
+            // engine's threads their cores. A new pipeline takes ~200 ms
+            // of CPU on an A15, which has two performance cores.
+            self.pool.urgent(move || {
+                qos::set(Qos::Utility);
+                job();
+                qos::set(Qos::Initiated);
+            });
         }
         cell
     }
