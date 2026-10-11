@@ -182,10 +182,12 @@ fn run(
         let t = Instant::now();
         let submission = queue.submit(buffers);
         crate::uploads::recycle(batch.staging, &free);
-        let mut works = batch.works;
-        for (buffer, make) in batch.maps {
-            works.push(make(Staging::map(buffer)));
-        }
+        // Readbacks first: a fence of the batch then means the readbacks
+        // asked before it are in wasm memory (the engine waits on one
+        // before freeing staging memory in bulk, see glue5-runtime's
+        // device_reset.rs).
+        let mut works: Vec<Work> = batch.maps.into_iter().map(|(buffer, make)| make(Staging::map(buffer))).collect();
+        works.extend(batch.works);
         done.after(submission.clone(), works);
         stats.submit_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if let (Some(frame), Some(out)) = (frame, output.as_mut()) {

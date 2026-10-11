@@ -6,6 +6,7 @@
 //! threads, each with its own instance over the shared memory.
 
 pub mod audio;
+mod device_reset;
 pub mod exit;
 pub mod game_settings;
 mod gamelog;
@@ -203,6 +204,9 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         settings_load: Some(msaa::settings_load),
         settings_request: Some(msaa::settings_request),
         settings_instance: None,
+        device_lost: Some(device_reset::device_lost),
+        gpu_fence: None,
+        sprite_depth_texture: None,
     };
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;

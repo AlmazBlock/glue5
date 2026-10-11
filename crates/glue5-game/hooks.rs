@@ -40,4 +40,11 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("settings_load", "CSettingsManager::Load()"),
     ("settings_request", "CSettingsManager::RequestNewSettings(Settings)"),
     ("settings_instance", "CSettingsManager::GetInstance()"),
+    // A device reset (the window resized) frees staging memory a readback
+    // may still be writing and the depth target the 2D sprite shader may
+    // still hold: the host waits for the GPU first and takes the depth
+    // target away after (device_reset.rs).
+    ("device_lost", "rage::grcDevice::DeviceLost()"),
+    ("gpu_fence", "wasm_gpu::Fence()"),
+    ("sprite_depth_texture", "CSprite2d::SetDepthTexture(rage::grcTexture*)"),
 ];
