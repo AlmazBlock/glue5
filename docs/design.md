@@ -269,6 +269,13 @@ iOS lowers it to 60 Hz when the phone is hot, and 40 then becomes 33 ms.
 The engine's own limiter (`-frameLimit`, in 60 Hz intervals) stays: it
 saves the CPU time of frames that would wait anyway.
 
+Behind loading screens and black screens neither limits frames: the
+loading there goes at the pace of the frames (story mode's first load took
+16 s at 60 fps and 22 s at 30 on a Mac). A hook on `CSystem::EndRender`,
+where the engine's limiter waits, runs it with the game's VSync setting at
+0 while `CLoadingScreens::AreActive()` or `camInterface::IsFadedOut()`, and
+the application stops pacing meanwhile (`glue5_runtime::loading`).
+
 ## Input
 
 Input is routed through the game's PC interfaces to preserve controller
