@@ -48,6 +48,25 @@ pub(super) fn install(ctx: &Context) {
     });
 }
 
+/// Density follows available space, including landscape phones and split views.
+pub(super) fn layout_scale(rect: Rect) -> f32 {
+    (rect.height() / 560.0).min(rect.width() / 780.0).clamp(0.75, 1.0)
+}
+
+pub(super) fn density(ui: &Ui) -> f32 {
+    ui.style().text_styles[&TextStyle::Body].size / 14.0
+}
+
+pub(super) fn apply_density(ui: &mut Ui, scale: f32) {
+    let style = ui.style_mut();
+    for font in style.text_styles.values_mut() {
+        font.size *= scale;
+    }
+    style.spacing.item_spacing *= scale;
+    style.spacing.button_padding *= scale;
+    style.spacing.interact_size *= scale;
+}
+
 pub(super) fn background(ctx: &Context) -> Option<TextureHandle> {
     let decode = || -> Result<ColorImage, png::DecodingError> {
         let mut decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../../assets/ui/home.png")));
@@ -73,7 +92,8 @@ pub(super) fn background(ctx: &Context) -> Option<TextureHandle> {
 
 pub(super) fn backdrop(ctx: &Context, texture: Option<&TextureHandle>) {
     let r = ctx.viewport_rect();
-    let p = ctx.layer_painter(LayerId::background());
+    let mut p = ctx.layer_painter(LayerId::background());
+    p.set_clip_rect(r);
     p.rect_filled(r, 0, INK);
     if let Some(texture) = texture {
         let image_aspect = texture.size_vec2().x / texture.size_vec2().y;
@@ -95,5 +115,33 @@ pub(super) fn backdrop(ctx: &Context, texture: Option<&TextureHandle>) {
         mesh.add_triangle(0, 1, 2);
         mesh.add_triangle(0, 2, 3);
         p.add(mesh);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backdrop_is_not_clipped_to_the_safe_area() {
+        let ctx = Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, vec2(874.0, 402.0));
+        let mut output = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(viewport),
+                safe_area_insets: Some(SafeAreaInsets(egui::epaint::MarginF32 {
+                    left: 62.0,
+                    right: 62.0,
+                    top: 0.0,
+                    bottom: 21.0,
+                })),
+                ..Default::default()
+            },
+            |ui| backdrop(ui.ctx(), None),
+        );
+        output.textures_delta.clear();
+        let background = output.shapes.iter().find(|s| matches!(&s.shape, Shape::Rect(r) if r.fill == INK)).unwrap();
+        assert_eq!(background.clip_rect, viewport);
+        output.textures_delta.clear();
     }
 }

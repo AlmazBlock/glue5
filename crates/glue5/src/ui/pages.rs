@@ -17,107 +17,105 @@ pub(super) fn start_page(
     actions: &mut Vec<Action>,
     go: &mut Option<Option<Page>>,
 ) -> bool {
-    let r = ctx.content_rect();
-    let width = (r.width() - 48.0).clamp(1.0, 1100.0);
-    let top = (r.height() * 0.1).clamp(24.0, 90.0).min(r.height() * 0.25);
-    let height = (r.height() - top - 24.0).max(1.0);
-    let wide = width >= 780.0;
-    let menu_width = if wide { 360.0 } else { width };
-    let status_width = if wide { width - menu_width - 40.0 } else { width };
+    let safe = ctx.content_rect();
+    let scale = theme::layout_scale(safe);
+    let width = (safe.width() - 32.0 * scale).clamp(1.0, 1100.0).floor();
+    let top = (safe.height() * 0.1).clamp(12.0 * scale, 90.0 * scale).ceil();
+    let height = (safe.height() - top).max(1.0).floor();
+    let gap = 40.0 * scale;
+    let menu_width = (360.0 * scale).min((width - gap) * 0.42);
+    let status_width = (width - menu_width - gap).max(1.0);
     let mut play = false;
     egui::Area::new(Id::new("start"))
         .default_size(vec2(width, height))
-        .fixed_pos(pos2(r.center().x - width * 0.5, r.top() + top))
+        .constrain(false)
+        .fixed_pos(pos2(safe.center().x - width * 0.5, safe.top() + top))
         .show(ctx, |ui| {
+            theme::apply_density(ui, scale);
             ui.set_width(width);
             ui.set_height(height);
-            egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
-                ui.label(theme::heading("GLUE 5", 48.0));
-                ui.add_space(28.0);
-                egui::Grid::new("home-columns").num_columns(if wide { 2 } else { 1 }).spacing(vec2(40.0, 24.0)).show(
-                    ui,
+            ui.label(theme::heading("GLUE 5", 48.0 * scale));
+            ui.add_space(20.0 * scale);
+            let remaining = (ui.max_rect().bottom() - ui.cursor().top()).max(1.0).floor();
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.allocate_ui_with_layout(
+                    vec2(menu_width, remaining),
+                    egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        ui.vertical(|ui| {
-                            ui.set_width(menu_width);
-                            ui.spacing_mut().item_spacing.y = 6.0;
-                            let label = if starting { "STARTING…" } else { "PLAY" };
-                            ui.add_enabled_ui(status.game_dir.is_some() && !starting, |ui| {
-                                play = focus(
-                                    ui.add_sized(
-                                        [menu_width, 58.0],
-                                        egui::Button::new(theme::heading(label, 22.0).color(theme::INK))
-                                            .fill(Color32::WHITE)
-                                            .corner_radius(18),
-                                    ),
-                                )
-                                .clicked();
-                            });
-                            for (label, action) in [
-                                ("SETTINGS", None),
-                                (
-                                    if MOBILE { "FIND FILES" } else { "GAME FOLDER" },
-                                    Some(if MOBILE { Action::FindGame } else { Action::ChooseGame }),
-                                ),
-                            ] {
-                                if focus(
-                                    ui.add_sized(
-                                        [menu_width, 58.0],
-                                        egui::Button::new(theme::heading(label, 22.0))
-                                            .fill(Color32::from_black_alpha(215))
-                                            .corner_radius(18),
-                                    ),
-                                )
-                                .clicked()
-                                {
-                                    if let Some(action) = action {
-                                        actions.push(action);
-                                    } else {
-                                        *go = Some(Some(Page::Settings));
-                                    }
+                        ui.set_width(menu_width);
+                        egui::ScrollArea::vertical()
+                            .content_margin(0)
+                            .id_salt("home-menu")
+                            .max_height(remaining)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 6.0 * scale;
+                                ui.add_enabled_ui(status.game_dir.is_some() && !starting, |ui| {
+                                    play =
+                                        menu_button(ui, menu_width, if starting { "STARTING…" } else { "PLAY" }, true)
+                                            .clicked();
+                                });
+                                if menu_button(ui, menu_width, "SETTINGS", false).clicked() {
+                                    *go = Some(Some(Page::Settings));
                                 }
-                            }
-                            if !MOBILE
-                                && focus(
-                                    ui.add_sized(
-                                        [menu_width, 58.0],
-                                        egui::Button::new(theme::heading("QUIT", 22.0))
-                                            .fill(Color32::from_black_alpha(215))
-                                            .corner_radius(18),
-                                    ),
-                                )
-                                .clicked()
-                            {
-                                actions.push(Action::Quit);
-                            }
-                        });
-                        if !wide {
-                            ui.end_row();
-                        }
-                        ui.vertical(|ui| {
-                            ui.set_width(status_width);
-                            card(ui, |ui| game_files(ui, status));
-                            if let Some(why) = status.last_failure {
-                                card(ui, |ui| last_failure(ui, why, status.graphics_reset, actions));
-                            }
-                            ui.label(RichText::new(open_hint()).small().color(theme::MUTED));
-                        });
-                        ui.end_row();
+                                if menu_button(ui, menu_width, if MOBILE { "FIND FILES" } else { "GAME FOLDER" }, false)
+                                    .clicked()
+                                {
+                                    actions.push(if MOBILE { Action::FindGame } else { Action::ChooseGame });
+                                }
+                                if !MOBILE && menu_button(ui, menu_width, "QUIT", false).clicked() {
+                                    actions.push(Action::Quit);
+                                }
+                            });
                     },
                 );
-                ui.add_space(24.0);
-                ui.label(
-                    RichText::new("D-pad  Navigate   Enter / A  Select   Esc / B  Back").small().color(theme::MUTED),
+                ui.allocate_ui_with_layout(
+                    vec2(status_width, remaining),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(status_width);
+                        egui::ScrollArea::vertical()
+                            .content_margin(0)
+                            .id_salt("home-status")
+                            .max_height(remaining)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                card(ui, |ui| game_files(ui, status));
+                                if let Some(why) = status.last_failure {
+                                    card(ui, |ui| last_failure(ui, why, status.graphics_reset, actions));
+                                }
+                                ui.label(RichText::new(open_hint()).small().color(theme::MUTED));
+                            });
+                    },
                 );
             });
         });
     play
 }
 
+fn menu_button(ui: &mut egui::Ui, width: f32, label: &str, primary: bool) -> egui::Response {
+    let scale = theme::density(ui);
+    focus(
+        ui.add_sized(
+            [width, 58.0 * scale],
+            egui::Button::new(theme::heading(label, 22.0 * scale).color(if primary {
+                theme::INK
+            } else {
+                Color32::WHITE
+            }))
+            .fill(if primary { Color32::WHITE } else { Color32::from_black_alpha(215) })
+            .corner_radius((18.0 * scale) as u8),
+        ),
+    )
+}
+
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let scale = theme::density(ui);
     egui::Frame::new()
         .fill(Color32::from_black_alpha(210))
-        .corner_radius(18)
-        .inner_margin(18)
+        .corner_radius((18.0 * scale) as u8)
+        .inner_margin((18.0 * scale) as i8)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
@@ -133,9 +131,15 @@ fn game_files(ui: &mut egui::Ui, status: &Status) {
             egui::Frame::new()
                 .fill(Color32::from_gray(42))
                 .corner_radius(8)
-                .inner_margin(egui::Margin::symmetric(10, 4))
+                .inner_margin(egui::Margin::symmetric(
+                    (10.0 * theme::density(ui)) as i8,
+                    (4.0 * theme::density(ui)) as i8,
+                ))
                 .show(ui, |ui| {
-                    ui.label(RichText::new(if status.game_dir.is_some() { "Ready" } else { "Missing" }).size(11.0));
+                    ui.label(
+                        RichText::new(if status.game_dir.is_some() { "Ready" } else { "Missing" })
+                            .size(11.0 * theme::density(ui)),
+                    );
                 });
         });
     });
@@ -177,10 +181,15 @@ pub(super) fn settings_page(
     actions: &mut Vec<Action>,
 ) -> bool {
     let area = ctx.content_rect();
-    // Sizes describe the content; include padding and stroke when fitting to
-    // the safe area. This remains a floating window even on narrow screens.
-    let size = vec2((area.width() - 72.0).clamp(1.0, 680.0), (area.height() - 104.0).clamp(1.0, 520.0));
-    let frame = egui::Frame::window(&ctx.global_style()).inner_margin(20);
+    let scale = theme::layout_scale(area);
+    let edge = 6.0 * scale;
+    let padding = (20.0 * scale) as i8;
+    let size = vec2(
+        (area.width() - 2.0 * edge - 2.0).clamp(1.0, 718.0),
+        (area.height() - 2.0 * edge - 2.0).clamp(1.0, if scale < 1.0 { f32::INFINITY } else { 558.0 }),
+    );
+    // Padding lives in the scroll content, so rows scroll to the window edge.
+    let frame = egui::Frame::window(&ctx.global_style()).inner_margin(0).corner_radius((22.0 * scale) as u8);
     let mut close = false;
     egui::Window::new("Settings")
         .id(Id::new("settings-window"))
@@ -193,52 +202,81 @@ pub(super) fn settings_page(
         .fixed_size(size)
         .frame(frame)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(theme::heading("SETTINGS", 28.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = close_button(ui).clicked();
+            theme::apply_density(ui, scale);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::Frame::new()
+                .inner_margin(egui::Margin {
+                    left: padding,
+                    right: padding,
+                    top: (12.0 * scale) as i8,
+                    bottom: (8.0 * scale) as i8,
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::heading("SETTINGS", 28.0 * scale));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            close = close_button(ui).clicked();
+                        });
+                    });
                 });
-            });
-            let height = (size.y - ui.min_rect().height() - ui.spacing().item_spacing.y).max(1.0);
+            let height = (size.y - ui.min_rect().height()).max(1.0);
             egui::ScrollArea::vertical()
+                .content_margin(0)
                 .id_salt("settings-scroll")
                 .max_height(height)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    egui::Frame::new().fill(Color32::from_gray(24)).corner_radius(16).inner_margin(4).show(ui, |ui| {
-                        let w = (ui.available_width() - 8.0) / 3.0;
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            for (value, label) in [
-                                (SettingsTab::Video, "VIDEO"),
-                                (SettingsTab::Controls, "CONTROLS"),
-                                (SettingsTab::Game, "GAME"),
-                            ] {
-                                let active = *tab == value;
-                                if focus(
-                                    ui.add_sized(
-                                        [w, 40.0],
-                                        egui::Button::new(theme::heading(label, 16.0).color(if active {
-                                            theme::INK
-                                        } else {
-                                            theme::MUTED
-                                        }))
-                                        .fill(if active { Color32::WHITE } else { Color32::TRANSPARENT })
-                                        .corner_radius(12),
-                                    ),
-                                )
-                                .clicked()
-                                {
-                                    *tab = value;
-                                }
+                    ui.spacing_mut().item_spacing.y = 10.0 * scale;
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin {
+                            left: padding,
+                            right: padding,
+                            top: (4.0 * scale) as i8,
+                            bottom: (12.0 * scale) as i8,
+                        })
+                        .show(ui, |ui| {
+                            egui::Frame::new()
+                                .fill(Color32::from_gray(24))
+                                .corner_radius((16.0 * scale) as u8)
+                                .inner_margin((4.0 * scale) as i8)
+                                .show(ui, |ui| {
+                                    let w = (ui.available_width() - 8.0 * scale) / 3.0;
+                                    ui.spacing_mut().interact_size.y = 40.0 * scale;
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 4.0 * scale;
+                                        for (value, label) in [
+                                            (SettingsTab::Video, "VIDEO"),
+                                            (SettingsTab::Controls, "CONTROLS"),
+                                            (SettingsTab::Game, "GAME"),
+                                        ] {
+                                            let active = *tab == value;
+                                            if focus(
+                                                ui.add_sized(
+                                                    [w, 40.0 * scale],
+                                                    egui::Button::new(
+                                                        theme::heading(label, 16.0 * scale).color(if active {
+                                                            theme::INK
+                                                        } else {
+                                                            theme::MUTED
+                                                        }),
+                                                    )
+                                                    .fill(if active { Color32::WHITE } else { Color32::TRANSPARENT })
+                                                    .corner_radius((12.0 * scale) as u8),
+                                                ),
+                                            )
+                                            .clicked()
+                                            {
+                                                *tab = value;
+                                            }
+                                        }
+                                    });
+                                });
+                            ui.add_space(10.0 * scale);
+                            if let Some(note) = note {
+                                ui.label(RichText::new(note).small().color(WARN));
                             }
+                            settings_items(ui, settings, status, *tab, scale_edit, actions);
                         });
-                    });
-                    ui.add_space(10.0);
-                    if let Some(note) = note {
-                        ui.label(RichText::new(note).small().color(WARN));
-                    }
-                    settings_items(ui, settings, status, *tab, scale_edit, actions);
                 });
         });
     close
@@ -419,6 +457,51 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn phone_settings_use_the_height_and_show_all_video_options() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut settings = Settings::default();
+        let mut tab = SettingsTab::Video;
+        for pass in 0..4 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(874.0, 402.0))),
+                    time: Some(pass as f64),
+                    safe_area_insets: Some(SafeAreaInsets(egui::epaint::MarginF32 {
+                        left: 62.0,
+                        right: 62.0,
+                        top: 0.0,
+                        bottom: 21.0,
+                    })),
+                    ..Default::default()
+                },
+                |root| {
+                    settings_page(root.ctx(), &mut settings, &status(), None, &mut tab, &mut None, &mut Vec::new());
+                },
+            );
+            output.textures_delta.clear();
+            if pass == 3 {
+                let rows: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::Rect(r) if r.fill == egui::Color32::from_gray(28) => Some((r.rect, s.clip_rect)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(rows.len(), 4);
+                for (rect, clip) in rows {
+                    assert!(clip.contains_rect(rect), "clipped option: {rect:?} in {clip:?}");
+                }
+            }
+        }
+        let window = ctx.memory(|m| m.area_rect(Id::new("settings-window"))).unwrap();
+        let safe = ctx.content_rect();
+        assert!(safe.contains_rect(window));
+        assert!(safe.height() - window.height() <= 12.0, "wasted height: {window:?} in {safe:?}");
+    }
+
     #[test]
     fn home_reflows_when_the_same_window_is_resized() {
         let ctx = egui::Context::default();

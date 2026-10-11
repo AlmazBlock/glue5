@@ -134,10 +134,10 @@ The application uses [egui] for:
 
 All pages share the game's window. SDL's mobile backends restrict multiple
 windows, while a second desktop window would add another surface and
-separate focus and input routing. One responsive home layout stacks the
-menu and status on narrow screens and places them side by side when space
-allows. Settings use a centered, fixed floating window fitted to the safe
-area. Its tabs scroll with the options; each option shares the same rounded
+separate focus and input routing. One home layout keeps the menu and status in two columns, with independent
+scrolling. Text, controls and padding scale together on smaller screens. Settings use a centered, fixed floating window fitted to the safe
+area, using almost its full height on compact screens. Scroll padding moves
+with the content so items reach the window edges. Its tabs scroll with the options; each option shares the same rounded
 row and right-aligned control. Home and pre-game settings share an embedded
 image and gradient; in-game settings leave the game frame visible.
 
