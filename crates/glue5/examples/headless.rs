@@ -24,7 +24,8 @@ it stops working (an engine thread's trap).
                         space, grave, shift, up, down, left, right, a letter
                         or a digit)
   --stdin               also take commands from standard input, one per line:
-                        press <button>, key <key>, hold <key> <s>, text <text>
+                        press <button>, key <key>, hold <key> <s>, text <text>,
+                        size <w>x<h> (the back buffer, as a window resize)
   --shots <n> <dir>     every n-th presented frame to a PNG in dir
   --size <w>x<h>        back buffer size (1280x720)
   --low                 the low-memory profile (smaller pools, its graphics
@@ -176,7 +177,11 @@ fn command(line: &str, t: f64, game: &Game, presses: &mut Vec<(f64, u16)>, keys:
         ["key", name] => keys.push((t, parse_key(name)?, false, HOLD)),
         ["hold", name, secs] => keys.push((t, parse_key(name)?, false, secs.parse()?)),
         ["text", ..] => game.input().context("no input yet")?.text(line.trim_start()["text".len()..].trim()),
-        _ => bail!("expected `press <button>`, `key <key>`, `hold <key> <s>` or `text <text>`"),
+        ["size", size] => {
+            let (w, h) = size.split_once('x').context("size <width>x<height>")?;
+            game.input().context("no input yet")?.resize(w.parse()?, h.parse()?);
+        }
+        _ => bail!("expected `press <button>`, `key <key>`, `hold <key> <s>`, `text <text>` or `size <w>x<h>`"),
     }
     Ok(())
 }
