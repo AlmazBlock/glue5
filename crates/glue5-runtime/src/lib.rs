@@ -13,7 +13,6 @@ mod gamelog;
 pub mod gpu;
 mod imports;
 pub mod input;
-pub mod loading;
 pub mod memory;
 mod msaa;
 pub mod qos;
@@ -201,9 +200,6 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         heap_size: None,
         memory_available: Some(memory::memory_available),
         largest_block: Some(memory::largest_block),
-        end_render: Some(loading::end_render),
-        loading_screens_active: None,
-        faded_out: None,
         skin_light_pass: Some(skin::skin_light_pass),
         get_settings: Some(skin::get_settings),
         settings_load: Some(msaa::settings_load),

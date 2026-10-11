@@ -32,11 +32,6 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("largest_block", "rage::sysMemGrowBuddyAllocator::GetLargestAvailableBlock()"),
     // At PostFX Ultra the skin pass asks for a pass the game's shaders do not
     // have; it is shown settings with PostFX at Very High (see skin.rs).
-    // The engine's frame limiter, lifted while it loads behind a loading
-    // screen or a black screen (loading.rs).
-    ("end_render", "CSystem::EndRender()"),
-    ("loading_screens_active", "CLoadingScreens::AreActive()"),
-    ("faded_out", "camInterface::IsFadedOut()"),
     ("skin_light_pass", "DeferredLighting::ExecuteSkinLightPass(rage::grcRenderTarget*, bool)"),
     ("get_settings", "CSettingsManager::GetSettings()"),
     // MSAA stays off: the game's shaders cannot draw it (see msaa.rs). The

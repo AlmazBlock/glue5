@@ -367,10 +367,7 @@ impl App {
         // What applies at once (the engine's own frame limiter at its next start).
         self.presentation.set_vsync(self.settings.vsync);
         self.presentation.set_metal_hud(self.settings.metal_hud);
-        // Loading screens and black screens are not paced: the loading
-        // behind them waits for frames.
-        let paced = !(in_game && glue5_runtime::loading::active());
-        self.presentation.set_frame_rate(if paced { self.settings.max_fps } else { 0 });
+        self.presentation.set_frame_rate(self.settings.max_fps);
         self.presentation.set_upscaler(upscaler(&self.settings));
         self.resize_game();
 
