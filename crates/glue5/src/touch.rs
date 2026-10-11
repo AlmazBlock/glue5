@@ -259,20 +259,21 @@ impl Touch {
             }
         }
 
-        // The D-pad: a cross, an arrow in each arm.
+        // Four separate arms keep the translucent fill and outlines from
+        // overlapping at the centre.
         let c = self.pos(DPAD);
         let (arm, half) = (DPAD_ARM * self.scale, DPAD_HALF * self.scale);
-        let long = 2.0 * (arm + half);
         let round = CornerRadius::same((half * 0.5) as u8);
-        for size in [vec2(long, 2.0 * half), vec2(2.0 * half, long)] {
-            painter.rect(Rect::from_center_size(c, size), round, fill, stroke, egui::StrokeKind::Middle);
-        }
         let held_dir = self.fingers.values().find_map(|f| if let Finger::Dpad(bit) = f { Some(*bit) } else { None });
         for (bit, d) in DPAD_DIRS {
             let centre = c + d * arm;
-            if held_dir == Some(bit) {
-                painter.rect_filled(Rect::from_center_size(centre, Vec2::splat(2.0 * half)), round, pressed);
-            }
+            painter.rect(
+                Rect::from_center_size(centre, Vec2::splat(2.0 * half)),
+                round,
+                if held_dir == Some(bit) { pressed } else { fill },
+                stroke,
+                egui::StrokeKind::Middle,
+            );
             let (tip, side) = (d * half * 0.6, d.rot90() * half * 0.55);
             let base = centre - d * half * 0.35;
             painter.add(Shape::convex_polygon(vec![centre + tip, base + side, base - side], text, Stroke::NONE));
