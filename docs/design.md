@@ -104,6 +104,20 @@ next start, in the background while the game loads. Metal keeps compiled
 shaders in the system cache; on Vulkan the pipeline cache is saved to
 `cache/`.
 
+The radar's antialiased pixel shader expects edge distances from a geometry
+shader, which WebGPU cannot run. Its load-time adapter supplies full coverage
+instead; the texture, depth and clip-plane calculations stay intact. This is
+specific to the radar: missing outputs in other stage pairs still fail
+validation. Triangle-edge antialiasing from the geometry stage is not emulated.
+
+The minimap's HUD mask uses normalized vertices, a five-tap texture filter
+and the engine's mask constants. It has a separate cached pixel program,
+reflected bindings and pipeline recipe flag; its vertex variant converts
+normalized coordinates to clip space. Pause-map exploration is identified
+by its MIN alpha blend and keeps the original depth pixel program with the
+world-space transform vertex shader. Neither correction changes game assets.
+The same mask variant is selected when compiling recorded recipes ahead.
+
 We cannot enumerate every pipeline in advance. Each combines a shader
 pair, vertex layout, blend/depth/raster states and target formats; actual
 combinations are discovered during play. Compiling all shaders would take

@@ -169,6 +169,10 @@ pub struct Program {
     /// Textures read as depth textures (bit: binding - SRVS): depth buffers
     /// the shader reads as floats, read directly (see [`with_depth_reads`]).
     pub depth: u128,
+    /// This pixel program draws the HUD's normalized minimap mask; its
+    /// blit vertex stage needs normalized coordinates converted to clip space.
+    pub hud_mask: bool,
+    mask: OnceLock<Option<Arc<Program>>>,
     /// Copies for other bindings, made once each: (unfiltered, depth).
     copies: Mutex<Vec<((u128, u128), Arc<Program>)>>,
 }
@@ -282,6 +286,12 @@ impl Library {
         self.index.get(&hash).map_or_else(|| format!("{hash:016x}"), |e| e.label.clone())
     }
 
+    /// A named translated program, prepared once like engine-created shaders.
+    pub fn named(&self, device: &wgpu::Device, label: &str, stage: Stage) -> Option<Arc<Program>> {
+        let hash = *self.index.iter().find(|(_, e)| e.label == label)?.0;
+        self.slot(hash).get_or_init(|| self.prepare(device, hash, stage)).clone()
+    }
+
     /// Takes out, to be dropped elsewhere, up to `max` shader modules
     /// unused for `idle` seconds.
     pub fn take_idle_modules(&self, idle: u64, max: usize, out: &mut Vec<wgpu::ShaderModule>) {
@@ -382,6 +392,8 @@ impl Library {
             pairs: sampling_pairs(&text),
             unfiltered: 0,
             depth: 0,
+            hud_mask: false,
+            mask: OnceLock::new(),
             copies: Mutex::default(),
             text,
         };
@@ -447,8 +459,40 @@ impl Program {
             pairs: self.pairs.clone(),
             unfiltered: self.unfiltered,
             depth: self.depth,
+            hud_mask: self.hud_mask,
+            mask: OnceLock::new(),
             copies: Mutex::default(),
         }
+    }
+
+    /// The HUD mask reads a filtered neighbourhood of the radar texture.
+    /// The original program remains available for pause-map exploration.
+    pub fn for_hud_mask(self: &Arc<Self>, device: &wgpu::Device) -> Option<Arc<Program>> {
+        self.mask
+            .get_or_init(|| {
+                let (text, pack) = pack_uniforms(include_str!("minimap_mask.wgsl"));
+                let module = create_module(device, "minimap mask", &text).ok()?;
+                let mut p = self.copy();
+                p.hud_mask = true;
+                p.text = text;
+                p.pack = pack;
+                p.bindings = stage_bindings(&p.text, p.stage);
+                p.textures = p
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| matches!(b.kind, Kind::Texture { .. }))
+                    .map(|(i, _)| i)
+                    .collect();
+                p.pairs = sampling_pairs(&p.text);
+                p.locations = ps_input_locations(&p.text);
+                p.interpolation = interpolations(&p.text);
+                p.outputs = fragment_outputs(&p.text);
+                p.modules = Arc::new(Modules::with(module));
+                p.layout = p.make_layout(device);
+                Some(Arc::new(p))
+            })
+            .clone()
     }
 
     /// Whether the sampler at `binding` is used with an unfilterable texture.
@@ -566,6 +610,9 @@ impl Program {
         self.modules.take_idle(idle, max, out);
         for (_, p) in self.copies.lock().unwrap().iter() {
             p.modules.take_idle(idle, max, out);
+        }
+        if let Some(Some(p)) = self.mask.get() {
+            p.take_idle_modules(idle, max, out);
         }
     }
 }
@@ -787,6 +834,21 @@ fn with_radar_coverage(text: &str) -> Option<String> {
         return None;
     }
     Some(RE_MAIN_INNER_CALL.replace(&text, "\n  let v5 = vec4<f32>(1.0f);$1").into_owned())
+}
+
+/// HUD mask vertices are in [0, 1], with y pointing down. Other blits
+/// already use clip space and must keep their original vertex program.
+pub fn with_hud_coordinates(text: &str) -> Option<String> {
+    let from = "o0 = vec4<f32>(v0.xyz, o0.w);";
+    text.contains(from)
+        .then(|| text.replace(from, "o0 = vec4<f32>(v0.x * 2.0f - 1.0f, 1.0f - v0.y * 2.0f, v0.z, o0.w);"))
+}
+
+/// D3D blend words: enabled, MIN colour/alpha operations, alpha-only writes.
+/// This distinguishes world-space pause-map exploration from the HUD mask
+/// even though the engine binds the same blit programs for both.
+pub fn pause_map_blend(words: &[u32]) -> bool {
+    words.get(2) == Some(&1) && words.get(5) == Some(&4) && words.get(8) == Some(&4) && words.get(9) == Some(&8)
 }
 
 /// Vertex shader outputs take the pixel shader's interpolation attributes
@@ -1171,6 +1233,60 @@ fn main(@location(1u) v1 : vec4<f32>, @location(5u) v5 : vec4<f32>) -> @location
             .unwrap();
         assert!(with_radar_coverage(&text).is_none());
         assert!(with_radar_coverage(&source.replace("vec4<f32>) -> @location", "vec4<u32>) -> @location")).is_none());
+    }
+
+    #[test]
+    fn hud_mask_has_its_own_bindings_and_constants() {
+        let (text, pack) = pack_uniforms(include_str!("minimap_mask.wgsl"));
+        let pack = pack.unwrap();
+        assert_eq!(pack.size, 64);
+        assert_eq!((pack.members[0].slot, pack.members[0].offset), (5, 0));
+        assert_eq!(stage_bindings(&text, Stage::Pixel).iter().map(|b| b.binding).collect::<Vec<_>>(), [0, 18, 34]);
+        assert_eq!(ps_input_locations(&text), [1, 2]);
+        let module = naga::front::wgsl::parse_str(&text).unwrap();
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap();
+        assert!(with_hud_coordinates(VS).is_none());
+        assert!(!pause_map_blend(&[]));
+        assert!(pause_map_blend(&[0, 0, 1, 2, 2, 4, 2, 2, 4, 8]));
+        assert!(!pause_map_blend(&[0, 0, 1, 2, 2, 4, 2, 2, 4, 15]));
+    }
+
+    #[test]
+    #[ignore = "requires the game shaders and a GPU"]
+    fn minimap_mask_pipeline_compiles() {
+        use crate::pipeline::{Compiler, Recipe, SigElement};
+        let game = std::env::var_os("GLUE5_GAME_DIR").expect("GLUE5_GAME_DIR");
+        let library = Library::open(&glue5_runtime::layout::shader_dir(Path::new(&game))).unwrap();
+        let gpu = crate::Device::open(&crate::instance(), None).unwrap();
+        let vs = library.named(&gpu.device, "im::VS_Blit", Stage::Vertex).unwrap();
+        let original = library.named(&gpu.device, "im::PS_BlitDepthToAlpha", Stage::Pixel).unwrap();
+        let ps = original.for_hud_mask(&gpu.device).unwrap();
+        assert!(!original.hud_mask);
+        assert!(ps.hud_mask);
+        assert_ne!(ps.id, original.id);
+        assert_eq!(ps.id, original.for_hud_mask(&gpu.device).unwrap().id);
+        assert_eq!(original.textures.len(), 2);
+        assert_eq!(ps.textures.len(), 1);
+        let recipe = Recipe::from_json(&serde_json::json!({
+            "vs": format!("{:016x}", vs.hash), "ps": format!("{:016x}", ps.hash),
+            "el": [[1, 0, 6, 0, 0, 0, 0], [2, 0, 2, 0, 12, 0, 0], [3, 0, 16, 0, 28, 0, 0]],
+            "st": [36], "tp": 4, "sf": "", "b": null, "d": null, "r": null,
+            "rt": ["rgba8unorm"], "n": 1, "ds": "", "ro": 0, "hud_mask": true
+        }))
+        .unwrap();
+        assert_eq!(recipe, Recipe::from_json(&recipe.to_json()).unwrap());
+        let sig = [
+            SigElement { semantic: 1, index: 0, register: 0 },
+            SigElement { semantic: 2, index: 0, register: 2 },
+            SigElement { semantic: 3, index: 0, register: 3 },
+        ];
+        let compiler = Compiler::new(gpu.device.clone(), crate::format::Caps::new(&gpu.adapter, gpu.features), None);
+        assert!(compiler.compile(&vs, &sig, Some(&ps), &recipe).is_some());
+        let pause = library.named(&gpu.device, "im::VS_TransformUnlit_IM", Stage::Vertex).unwrap();
+        assert!(!pause.bindings.is_empty(), "world-space map keeps its transform constants");
+        assert!(compiler.compile(&pause, &sig, Some(&original), &recipe).is_some());
     }
 
     /// Reproduces the failing stage pair without depending on a save, a

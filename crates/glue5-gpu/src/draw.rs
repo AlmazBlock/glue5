@@ -343,6 +343,7 @@ impl Gpu {
                     depth_format: info.depth,
                     read_only: info.read_only,
                     variant: [vs.unfiltered, vs.depth, ps.map_or(0, |p| p.unfiltered), ps.map_or(0, |p| p.depth)],
+                    hud_mask: ps.is_some_and(|p| p.hud_mask),
                 };
                 let sig = self.objs.shader(self.s.shader[0]).map(|s| s.sig.clone()).unwrap_or_default();
                 let cell = self.pipeline_for(Arc::new(recipe), vs.clone(), ps.cloned(), sig, true);
@@ -431,6 +432,14 @@ impl Gpu {
                     continue;
                 }
                 Some(Ready::Never) => continue,
+            };
+            let ps = if r.hud_mask {
+                let Some(ps) = ps.and_then(|p| p.for_hud_mask(&self.device)) else {
+                    continue;
+                };
+                Some(ps)
+            } else {
+                ps
             };
             self.pipeline_for(r, vs, ps, sig, false);
             self.stats.pipelines_ahead += 1;
@@ -883,6 +892,27 @@ impl Gpu {
                 Some(p) => Some(p),
                 None => return self.skip("pixel shader unusable"),
             },
+        };
+        let (vs, ps) = if vs.label == "im::VS_Blit" && ps.as_ref().is_some_and(|p| p.label == "im::PS_BlitDepthToAlpha")
+        {
+            // Pause-map exploration uses world-space tiles and MIN alpha
+            // blending. The HUD mask instead uses normalized vertices and
+            // filtered coverage. Choose programs before reflecting bindings
+            // and making pipeline keys, including the mask's distinct id.
+            let pause = self.objs.state(self.s.blend).is_some_and(|s| shader::pause_map_blend(&s.words));
+            if pause {
+                let Some(vs) = self.library.named(&self.device, "im::VS_TransformUnlit_IM", Stage::Vertex) else {
+                    return self.skip("pause-map vertex shader unusable");
+                };
+                (vs, ps)
+            } else {
+                let Some(ps) = ps.unwrap().for_hud_mask(&self.device) else {
+                    return self.skip("minimap mask unusable");
+                };
+                (vs, Some(ps))
+            }
+        } else {
+            (vs, ps)
         };
         // D3D draws without an input layout when the vertex shader reads no
         // vertex attributes (a full-screen triangle from SV_VertexID, as the

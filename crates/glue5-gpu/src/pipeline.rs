@@ -48,6 +48,8 @@ pub struct Recipe {
     /// vertex unfiltered and depth, pixel unfiltered and depth. Not recorded:
     /// the recipes compiled ahead are for the programs as loaded.
     pub variant: [u128; 4],
+    /// Uses the HUD coverage program rather than the original depth blit.
+    pub hud_mask: bool,
 }
 
 /// The slots an input layout uses, each once, in element order, with the
@@ -162,15 +164,24 @@ impl Compiler {
         let features = self.caps.features;
         let remap = shader::remap_locations(vs, ps, self.max_inter_stage);
         let interpolation = ps.map_or(&[][..], |p| &p.interpolation);
+        let hud_mask = ps.is_some_and(|p| p.hud_mask);
 
         // Vertex stage: outputs take the pixel shader's interpolation, and move
         // below the device's inter-stage limit if needed.
-        let vs_module = if interpolation.is_empty() && remap.is_none() {
+        let vs_module = if !hud_mask && interpolation.is_empty() && remap.is_none() {
             vs.module(&self.device).ok_or_else(|| anyhow::anyhow!("vertex module failed"))?
         } else {
-            let key = format!("{interpolation:?}|{remap:?}");
+            let key = format!("{interpolation:?}|{remap:?}|{hud_mask}");
+            let hud_text = if hud_mask {
+                Some(
+                    shader::with_hud_coordinates(&vs.text)
+                        .ok_or_else(|| anyhow::anyhow!("unexpected HUD mask vertices"))?,
+                )
+            } else {
+                None
+            };
             vs.variant(&self.device, &key, |text| {
-                let text = shader::with_interpolation(text, interpolation);
+                let text = shader::with_interpolation(hud_text.as_deref().unwrap_or(text), interpolation);
                 match &remap {
                     Some(map) => shader::with_locations(&text, Stage::Vertex, map),
                     None => text,
@@ -440,6 +451,7 @@ impl Recipe {
             "n": self.samples,
             "ds": self.depth_format.map(format::name).unwrap_or(""),
             "ro": self.read_only,
+            "hud_mask": self.hud_mask,
         })
     }
 
@@ -486,6 +498,7 @@ impl Recipe {
             samples: u("n").unwrap_or(1),
             depth_format: v.get("ds").and_then(Value::as_str).and_then(format::by_name),
             read_only: u("ro").unwrap_or(0) as u8,
+            hud_mask: v.get("hud_mask").and_then(Value::as_bool).unwrap_or(false),
             variant: [0; 4],
         })
     }
