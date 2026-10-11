@@ -28,6 +28,8 @@ it stops working (an engine thread's trap).
                         size <w>x<h> (the back buffer, as a window resize)
   --shots <n> <dir>     every n-th presented frame to a PNG in dir
   --size <w>x<h>        back buffer size (1280x720)
+  --fps <n>             frames per second at most, as the app's setting (the
+                        engine's limiter; 0, the default: as fast as it can)
   --low                 the low-memory profile (smaller pools, its graphics
                         preset written into the game's settings)
   --audio               play the sound into a pretend device, as the app does
@@ -51,6 +53,7 @@ fn main() -> Result<()> {
     let mut game_dir = std::env::var_os("GLUE5_GAME_DIR").map(PathBuf::from);
     let (mut audio, mut stdin, mut low, mut sync_pipelines, mut no_gpu) = (false, false, false, false, false);
     let (mut width, mut height) = (1280, 720);
+    let mut max_fps = 0;
     let (mut presses, mut keys, mut run_for, mut shots) = (Vec::new(), Vec::new(), None, None);
     let mut args = std::env::args().skip(1);
     let mut next = || args.next().context(USAGE);
@@ -75,6 +78,7 @@ fn main() -> Result<()> {
                 let (w, h) = size.split_once('x').context("--size <width>x<height>")?;
                 (width, height) = (w.parse()?, h.parse()?);
             }
+            "--fps" => max_fps = next()?.parse()?,
             "--low" => low = true,
             "--audio" => audio = true,
             "--sync-pipelines" => sync_pipelines = true,
@@ -106,7 +110,7 @@ fn main() -> Result<()> {
         glue5_gpu::backend(settings, None)
     };
     let game = glue5_runtime::start(
-        glue5_runtime::Config { game_dir, user_dir, width, height, start_mode: 1, low_memory: low, max_fps: 0 },
+        glue5_runtime::Config { game_dir, user_dir, width, height, start_mode: 1, low_memory: low, max_fps },
         gpu,
     )?;
     if audio {
