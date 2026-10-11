@@ -131,17 +131,10 @@ unsafe fn init_tls(env: *mut Env) -> Result<(), Trap> {
 pub(crate) unsafe fn create(env: *mut Env, pthread: u64, start: u64, arg: u64) -> u32 {
     rt().threads.reap(env);
     let name = engine_name(rt().memory.mem(), arg);
-    // The threads a frame waits on: the render thread builds and sends it to
-    // the GPU, the mixer feeds the sound device. The engine's other threads
-    // (workers, streaming) just below, with the renderer's compile threads.
-    let qos = match &name {
-        Some(n) if n.contains("RenderThread") || n.contains("mixer") => crate::qos::Qos::Interactive,
-        _ => crate::qos::Qos::Initiated,
-    };
     let spawned = thread::Builder::new()
         .name(name.unwrap_or_else(|| format!("pthread {pthread:#x}")))
         .stack_size(PTHREAD_STACK)
-        .spawn(move || run_pthread(pthread, start, arg, qos));
+        .spawn(move || run_pthread(pthread, start, arg));
     match spawned {
         Ok(_) => 0,
         Err(e) => {
@@ -169,8 +162,11 @@ fn engine_name(mem: crate::memory::Mem, arg: u64) -> Option<String> {
     (name.len() >= 3 && name.len() < 48).then(|| String::from_utf8_lossy(&name).into_owned())
 }
 
-fn run_pthread(pthread: u64, start: u64, arg: u64, qos: crate::qos::Qos) {
-    crate::qos::set(qos);
+fn run_pthread(pthread: u64, start: u64, arg: u64) {
+    // Loading waits on the engine's workers and streaming threads: the render
+    // thread and the mixer above them (interactive) made a black screen after
+    // a cutscene take 6-10 s instead of 1-2 on an iPhone 13 Pro.
+    crate::qos::set(crate::qos::Qos::Initiated);
     let env = new_env();
     let mem = rt().memory.mem();
     let result = (|| -> Result<(), Trap> {
