@@ -52,6 +52,13 @@ pub fn run() -> Result<()> {
     sdl3::hint::set("SDL_VIDEO_METAL_AUTO_RESIZE_DRAWABLE", "0");
     let user_dir = paths::user_dir()?;
     let mut settings = Settings::load(&user_dir);
+    // Before the GPU opens; turned on later, it shows from the next launch.
+    let metal_hud = settings.metal_hud;
+    if metal_hud {
+        // SAFETY: Apple's libc locks the environment for getenv and setenv
+        // (elsewhere this does nothing).
+        unsafe { glue5_gpu::enable_metal_hud() };
+    }
     let args = Args::parse();
 
     let mut builder = video.window("Glue 5", 1280, 720);
@@ -116,6 +123,7 @@ pub fn run() -> Result<()> {
         last_failure: None,
         graphics_reset: false,
         metalfx: screen.has_metalfx(),
+        metal_hud,
         refresh_rate,
         screen: Some(screen),
         game: None,
@@ -186,6 +194,8 @@ struct App {
     /// The game's graphics settings went back to their defaults.
     graphics_reset: bool,
     metalfx: bool,
+    /// Apple's Metal HUD can show: it was on at launch.
+    metal_hud: bool,
     /// The display's refresh rate at most, in Hz.
     refresh_rate: f32,
     /// The renderer, until the game takes it over.
@@ -358,6 +368,7 @@ impl App {
                 graphics_reset: self.graphics_reset,
                 window: self.window.size_in_pixels(),
                 metalfx: self.metalfx,
+                metal_hud: self.metal_hud,
                 refresh_rate: self.refresh_rate,
             };
             // The settings button: on touch screens always, so that it stays

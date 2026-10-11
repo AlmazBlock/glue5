@@ -82,6 +82,8 @@ pub struct Status<'a> {
     /// The window, in pixels.
     pub window: (u32, u32),
     pub metalfx: bool,
+    /// Apple's Metal HUD can show (it was on at launch).
+    pub metal_hud: bool,
     /// The display's refresh rate at most, in Hz.
     pub refresh_rate: f32,
 }

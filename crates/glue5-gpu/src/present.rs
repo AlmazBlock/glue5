@@ -126,7 +126,8 @@ impl Presentation {
         self.0.vsync.store(on, Ordering::Relaxed);
     }
 
-    /// Shows Apple's Metal performance HUD at the next frame.
+    /// Shows or hides Apple's Metal performance HUD from the next frame, once
+    /// [`crate::enable_metal_hud`] has shown it.
     pub fn set_metal_hud(&self, on: bool) {
         self.0.metal_hud.store(on, Ordering::Relaxed);
     }
@@ -241,6 +242,7 @@ struct Display {
     surface_format: Option<TextureFormat>,
     format: Option<TextureFormat>,
     blit: Option<(wgpu::RenderPipeline, wgpu::Sampler)>,
+    /// Whether the layer last asked for the HUD shown.
     #[cfg(target_vendor = "apple")]
     metal_hud: Option<bool>,
 }
@@ -284,10 +286,6 @@ impl Display {
         self.surface_format = Some(format);
         self.format = Some(linear);
         self.configured = Some((w, h, vsync));
-        #[cfg(target_vendor = "apple")]
-        {
-            self.metal_hud = None;
-        }
         log::debug!("gpu: surface {w}x{h} {format:?} {present_mode:?}");
     }
 
@@ -336,17 +334,15 @@ impl Display {
         use objc2_metal::{MTLTexture, MTLTextureType};
         let (surface_format, format) = (self.surface_format?, self.format?);
         let layer = unsafe { self.surface.as_hal::<Metal>() }.map(|s| s.render_layer().lock().clone())?;
+        // Followed once the HUD `crate::enable_metal_hud` showed is attached.
         if self.metal_hud != Some(metal_hud) {
-            use objc2_foundation::{NSDictionary, NSString, ns_string};
-            // Clearing the mode key hides the HUD, including when globally enabled.
-            let properties = if metal_hud {
-                NSDictionary::from_slices(&[ns_string!("mode")], &[ns_string!("default")])
-            } else {
-                NSDictionary::<NSString, NSString>::new()
-            };
+            use objc2_foundation::{NSDictionary, ns_string};
+            let mode = if metal_hud { ns_string!("default") } else { ns_string!("disabled") };
+            let properties = NSDictionary::from_slices(&[ns_string!("mode")], &[mode]);
             // SAFETY: HUD properties are string keys and string values; the cast
             // only erases NSDictionary's generic types for the Objective-C API.
-            unsafe { layer.setDeveloperHUDProperties(Some(&Retained::cast_unchecked(properties))) };
+            let properties = unsafe { Retained::cast_unchecked(properties) };
+            autoreleasepool(|_| unsafe { layer.setDeveloperHUDProperties(Some(&properties)) });
             self.metal_hud = Some(metal_hud);
         }
         #[cfg(target_os = "macos")]

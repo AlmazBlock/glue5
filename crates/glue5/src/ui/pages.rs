@@ -332,7 +332,13 @@ fn settings_items(
             );
             setting(ui, "VSync", Control::Toggle, None, |ui| toggle(ui, &mut settings.vsync));
             #[cfg(target_vendor = "apple")]
-            setting(ui, "Metal HUD", Control::Toggle, None, |ui| toggle(ui, &mut settings.metal_hud));
+            setting(
+                ui,
+                "Metal HUD",
+                Control::Toggle,
+                (settings.metal_hud && !status.metal_hud).then_some("Next launch"),
+                |ui| toggle(ui, &mut settings.metal_hud),
+            );
         }
         SettingsTab::Controls => {
             setting(ui, "Touch controls", Control::Choice, None, |ui| {
@@ -418,6 +424,7 @@ mod tests {
             graphics_reset: false,
             window: (1440, 900),
             metalfx: true,
+            metal_hud: false,
             refresh_rate: 120.0,
         }
     }

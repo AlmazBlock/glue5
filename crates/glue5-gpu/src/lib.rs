@@ -67,20 +67,31 @@ impl Settings {
     }
 }
 
+/// Shows Apple's Metal performance HUD in windows opened from now on (on
+/// Apple platforms; elsewhere it does nothing); [`Presentation::set_metal_hud`]
+/// can then hide it and show it again.
+///
+/// Metal attaches the HUD to a layer a few frames after the layer's first
+/// drawable is on screen, visible whatever the layer asked before, and
+/// follows the layer's changes only after that. A HUD hidden from the start
+/// would need frames after it attaches, which a window drawn only when
+/// something changes doesn't have: enable it only to show it.
+///
+/// # Safety
+///
+/// It sets an environment variable, as [`std::env::set_var`].
+pub unsafe fn enable_metal_hud() {
+    // Metal's other switches don't fit: its MetalForceHudEnabled preference
+    // shows the HUD whatever the layer says (and logs every second), and the
+    // Info.plist key does nothing on macOS.
+    #[cfg(target_vendor = "apple")]
+    unsafe {
+        std::env::set_var("MTL_HUD_ENABLED", "1")
+    };
+}
+
 /// The wgpu instance for this platform (create surfaces with it).
 pub fn instance() -> wgpu::Instance {
-    // Enable the HUD machinery before Metal creates a device. Each layer's
-    // properties control visibility; this fallback is not saved to preferences.
-    #[cfg(target_vendor = "apple")]
-    {
-        use objc2::runtime::AnyObject;
-        use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults, ns_string};
-        let enabled = NSNumber::new_bool(true);
-        let defaults =
-            NSDictionary::<NSString, AnyObject>::from_slices(&[ns_string!("MetalForceHudEnabled")], &[&*enabled]);
-        // SAFETY: the dictionary contains a string key and a boolean preference.
-        unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
-    }
     let backends = if cfg!(target_vendor = "apple") { wgpu::Backends::METAL } else { wgpu::Backends::VULKAN };
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = backends;
