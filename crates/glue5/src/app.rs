@@ -90,12 +90,8 @@ pub fn run() -> Result<()> {
         }
     });
 
+    // Text input runs only while the game's text box is open (see `update`).
     let text_input = video.text_input();
-    // Desktop types into the game all the time; touch devices only while the
-    // game's text box is open (it brings up the system keyboard).
-    if !MOBILE {
-        text_input.start(&window);
-    }
     let refresh_rate = window_refresh_rate(&window);
     let mut app = App {
         pads: pads::Pads::new(sdl.gamepad().map_err(|e| anyhow!("SDL gamepad: {e}"))?),
@@ -104,7 +100,7 @@ pub fn run() -> Result<()> {
         sdl,
         window,
         text_input,
-        typing: !MOBILE,
+        typing: false,
         presentation,
         user_dir,
         settings,
@@ -164,8 +160,7 @@ struct App {
     events: sdl3::EventPump,
     mouse: sdl3::mouse::MouseUtil,
     text_input: sdl3::keyboard::TextInputUtil,
-    /// Typed text is on (desktop: always; touch devices: while the game's
-    /// text box is open).
+    /// Typed text is on: while the game's text box is open.
     typing: bool,
     pads: pads::Pads,
     presentation: Presentation,
@@ -404,7 +399,12 @@ impl App {
             }
         }
 
-        let want_typing = !MOBILE || glue5_runtime::input::text_box_open();
+        // Text input only while the game wants text: on touch devices it
+        // brings up the system keyboard; on desktop it hands every key to
+        // the system's input methods, whose accent menu (a held key, macOS),
+        // dead keys and IME windows would otherwise get in the way of play.
+        // Keys reach the game and the UI by scancode either way.
+        let want_typing = glue5_runtime::input::text_box_open();
         if want_typing != self.typing {
             self.typing = want_typing;
             if want_typing {

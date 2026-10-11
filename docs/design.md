@@ -288,11 +288,13 @@ prompts, aim assist and menu behaviour:
   Auto / Always / Off). Visibility follows the last input used, so an idle
   paired controller does not hide the touch controls.
 - **Text entry**: hooks on `CTextInputBox::Open/Close` tell the app when the
-  game wants text (save names, cheats). On touch devices that starts SDL
-  text input, which brings up the system keyboard; typed text goes into the
-  same input block as a physical keyboard. The system keyboard handles
-  languages, dictation and accessibility, and stays hidden when a hardware
-  keyboard is attached.
+  game wants text (save names, cheats). SDL text input runs only while the
+  box is open. On touch devices it brings up the system keyboard; typed text
+  goes into the same input block as a physical keyboard. The system keyboard
+  handles languages, dictation and accessibility, and stays hidden when a
+  hardware keyboard is attached. On desktop it hands keys to the system's
+  input methods: outside the box their accent menu (a held key on macOS),
+  dead keys and IME windows would get in the way of play.
 
 ## Known limits
 
