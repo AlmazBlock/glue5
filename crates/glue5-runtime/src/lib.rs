@@ -16,6 +16,7 @@ pub mod input;
 pub mod memory;
 mod msaa;
 pub mod qos;
+mod readback;
 mod skin;
 mod threads;
 mod time;
@@ -207,6 +208,15 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         device_lost: Some(device_reset::device_lost),
         gpu_fence: None,
         sprite_depth_texture: None,
+        wait_readback: None,
+        buffer_dtor: Some(readback::buffer_dtor),
+        buffer_delete: Some(readback::buffer_delete),
+        texture1d_dtor: Some(readback::texture1d_dtor),
+        texture1d_delete: Some(readback::texture1d_delete),
+        texture2d_dtor: Some(readback::texture2d_dtor),
+        texture2d_delete: Some(readback::texture2d_delete),
+        texture3d_dtor: Some(readback::texture3d_dtor),
+        texture3d_delete: Some(readback::texture3d_delete),
     };
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;
