@@ -37,7 +37,7 @@ See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
 | `crates/glue5-gpu` | The renderer: executes the engine's D3D11-style command ring with wgpu (Metal on Apple platforms, Vulkan elsewhere). |
 | `crates/glue5` | The application (SDL3), the same on every platform: window, input, audio, settings and touch controls (egui overlay). Its `headless` example runs the game without a window. |
 | `platform/ios` | What iOS needs around it: `main.c`, entitlements, the xcodegen spec. |
-| `mise.toml`, `.mise/tasks` | The toolchain and the developer tasks ([mise]): setup, desktop and iOS. |
+| `.mise` | [mise]: the toolchain (`config.toml`) and the developer tasks (`tasks/`): setup, desktop and iOS. |
 | `patches` | Our patches to wasm2c, wgpu-core and wgpu-hal, applied by `mise run setup` ([README](patches/README.md)). |
 | `third_party/wabt` | wasm2c's sources, pinned (a submodule). `third_party/wgpu-core` and `third_party/wgpu-hal`, the patched wgpu crates, are made by setup and not in git. |
 
@@ -49,7 +49,7 @@ build.
 ## Building
 
 Requirements: [mise] and a C/C++ compiler; for iOS, Xcode. mise installs
-Rust, CMake and [xcodegen] (`mise.toml`) on first use.
+Rust, CMake and [xcodegen] (`.mise/config.toml`) on first use.
 
 ```sh
 mise run play          # the first build compiles ~1 GB of generated C
@@ -75,7 +75,7 @@ debug and release builds; later builds only recompile what changed.
 | iOS: copy the game into the app's Documents/game | `mise run ios:game [device]` |
 
 `mise tasks` lists them all. iOS signing uses the team in `GLUE5_TEAM`:
-put it in `mise.local.toml` (ignored by git) under `[env]`. With several
+put it in `.mise/config.local.toml` (ignored by git) under `[env]`. With several
 phones connected, pass the device (name, identifier or UDID).
 
 The app and headless runner accept these environment variables.

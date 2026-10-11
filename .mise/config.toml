@@ -1,9 +1,9 @@
 # Toolchain and developer tasks, for everyone: `mise run <task>` (`mise
 # tasks` lists them) installs the tools below on first use; cargo by hand
 # goes through mise too (an activated shell, or `mise exec -- cargo ...`).
-# The tasks are scripts in .mise/tasks/.
-# Personal settings, such as GLUE5_TEAM for iOS signing, go in
-# mise.local.toml (ignored by git) under [env].
+# The tasks are scripts in tasks/, next to this file. Personal settings,
+# such as GLUE5_TEAM for iOS signing, go in config.local.toml here (ignored
+# by git) under [env].
 
 [tools]
 rust = { version = "stable", targets = "aarch64-apple-ios" }

@@ -6,7 +6,7 @@
 /third_party/wgpu-hal.tmp
 .DS_Store
 # Personal mise settings (e.g. GLUE5_TEAM).
-/mise.local.toml
+/.mise/config.local.toml
 
 # Local design drafts and screenshots may contain personal filesystem paths.
 /docs/mockups/
