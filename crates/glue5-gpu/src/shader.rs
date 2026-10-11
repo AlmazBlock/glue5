@@ -318,6 +318,11 @@ impl Library {
         }
         let name = format!("{hash:016x}");
         let source = std::fs::read_to_string(self.dir.join(format!("{name}.wgsl")))?;
+        let source = if stage == Stage::Pixel && entry.label == "radar::PS_TexturedUnlitAA" {
+            with_radar_coverage(&source).context("unexpected radar edge input")?
+        } else {
+            source
+        };
         let (text, pack) = pack_uniforms(&source);
         if let Some(pack) = &pack
             && pack.size > device.limits().max_uniform_buffer_binding_size as u32
@@ -767,6 +772,23 @@ fn ps_input_locations(text: &str) -> Vec<u32> {
         .map_or_else(Vec::new, |c| RE_LOCATION.captures_iter(&c[2]).map(|c| c[1].parse().unwrap()).collect())
 }
 
+/// The radar's geometry shader supplies three edge distances at location 5.
+/// WebGPU has no geometry stage: use full coverage, keeping the pixel
+/// shader's texture, depth and clipping calculations. Zero distances would
+/// make every fragment transparent. This is specific to the radar, not a
+/// default for other missing inter-stage inputs.
+fn with_radar_coverage(text: &str) -> Option<String> {
+    let sig = RE_PS_MAIN.captures(text)?;
+    let args = split_args(&sig[2]);
+    let edge = args.iter().position(|arg| arg.trim() == "@location(5u) v5 : vec4<f32>")?;
+    let args: Vec<_> = args.iter().enumerate().filter(|(i, _)| *i != edge).map(|(_, arg)| arg.trim()).collect();
+    let text = RE_PS_MAIN.replace(text, format!("{}{}{}", &sig[1], args.join(", "), &sig[3])).into_owned();
+    if !RE_MAIN_INNER_CALL.is_match(&text) {
+        return None;
+    }
+    Some(RE_MAIN_INNER_CALL.replace(&text, "\n  let v5 = vec4<f32>(1.0f);$1").into_owned())
+}
+
 /// Vertex shader outputs take the pixel shader's interpolation attributes
 /// (WGSL requires them to match; HLSL declares them on the pixel shader only).
 pub fn with_interpolation(text: &str, interpolation: &[(u32, String)]) -> String {
@@ -1126,5 +1148,54 @@ fn f(uv : vec2<f32>) {
         let moved = with_locations(&text, Stage::Vertex, &[(1, 0)]);
         assert!(moved.contains("@location(0u) @interpolate"));
         assert!(moved.contains("@location(0u) v0"), "inputs stay");
+    }
+
+    #[test]
+    fn radar_uses_full_coverage_without_a_geometry_stage() {
+        let source = "fn main_inner(v1 : vec4<f32>, v5 : vec4<f32>) -> vec4<f32> {
+  return vec4<f32>(v1.xyz, v1.w * clamp(min(v5.x, min(v5.y, v5.z)), 0.0f, 1.0f));
+}
+@fragment
+fn main(@location(1u) v1 : vec4<f32>, @location(5u) v5 : vec4<f32>) -> @location(0u) vec4<f32> {
+  main_inner(v1, v5);
+  return v1;
+}
+";
+        let text = with_radar_coverage(source).unwrap();
+        assert_eq!(ps_input_locations(&text), [1]);
+        assert!(text.contains("let v5 = vec4<f32>(1.0f);"));
+        assert!(text.contains("v1.w * clamp(min(v5.x, min(v5.y, v5.z)), 0.0f, 1.0f)"));
+        let module = naga::front::wgsl::parse_str(&text).unwrap();
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap();
+        assert!(with_radar_coverage(&text).is_none());
+        assert!(with_radar_coverage(&source.replace("vec4<f32>) -> @location", "vec4<u32>) -> @location")).is_none());
+    }
+
+    /// Reproduces the failing stage pair without depending on a save, a
+    /// window or the engine selecting its antialiased radar technique.
+    #[test]
+    #[ignore = "requires the game shaders and a GPU"]
+    fn radar_pipeline_compiles() {
+        use crate::pipeline::{Compiler, Recipe, SigElement};
+        let game = std::env::var_os("GLUE5_GAME_DIR").expect("GLUE5_GAME_DIR");
+        let library = Library::open(&glue5_runtime::layout::shader_dir(Path::new(&game))).unwrap();
+        let gpu = crate::Device::open(&crate::instance(), None).unwrap();
+        let vs = library.prepare(&gpu.device, 0x6e3b688101fd34ef, Stage::Vertex).unwrap();
+        let ps = library.prepare(&gpu.device, 0x5c5d5123dfb3dd00, Stage::Pixel).unwrap();
+        assert_eq!(vs.locations, [1, 2, 3, 4]);
+        assert_eq!(ps.locations, [1, 2, 3]);
+        assert!(!ps.text.contains("@location(5u)"));
+        let recipe = Recipe::from_json(&serde_json::json!({
+            "vs": "6e3b688101fd34ef", "ps": "5c5d5123dfb3dd00",
+            "el": [[1, 0, 6, 0, 0, 0, 0], [2, 0, 16, 0, 12, 0, 0], [3, 0, 2, 0, 20, 0, 0]],
+            "st": [36], "tp": 4, "sf": "", "b": null, "d": null, "r": null,
+            "rt": ["rgba8unorm"], "n": 1, "ds": "", "ro": 0
+        }))
+        .unwrap();
+        let sig: Vec<_> = (0..3).map(|register| SigElement { semantic: register + 1, index: 0, register }).collect();
+        let compiler = Compiler::new(gpu.device.clone(), crate::format::Caps::new(&gpu.adapter, gpu.features), None);
+        assert!(compiler.compile(&vs, &sig, Some(&ps), &recipe).is_some());
     }
 }
