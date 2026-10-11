@@ -47,8 +47,11 @@ pub fn main() -> i32 {
 #[cfg(target_os = "ios")]
 #[unsafe(no_mangle)]
 pub extern "C" fn glue5_main(argc: std::ffi::c_int, argv: *mut *mut std::ffi::c_char) -> std::ffi::c_int {
+    // SDL's UIKit backend keeps the process running once its main returns
+    // (for apps that leave the rest to the run loop), and the engine's
+    // threads never end: the window would stay black. Ends it, as desktop does.
     unsafe extern "C" fn sdl_main(_: std::ffi::c_int, _: *mut *mut std::ffi::c_char) -> std::ffi::c_int {
-        main()
+        std::process::exit(main())
     }
     unsafe { sdl3::sys::main::SDL_RunApp(argc, argv, Some(sdl_main), std::ptr::null_mut()) }
 }

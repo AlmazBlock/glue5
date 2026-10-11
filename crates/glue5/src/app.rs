@@ -220,6 +220,12 @@ impl App {
             if let Some(exit) = glue5_runtime::exit::requested() {
                 self.settings.save(&self.user_dir);
                 if exit == Exit::Restart {
+                    if MOBILE {
+                        // A phone app cannot start itself again: says so before it ends.
+                        let text = "The new settings apply when Glue 5 is opened again.";
+                        let flag = sdl3::messagebox::MessageBoxFlag::INFORMATION;
+                        let _ = sdl3::messagebox::show_simple_message_box(flag, "Glue 5", text, &self.window);
+                    }
                     relaunch(true);
                 }
                 return Ok(());
