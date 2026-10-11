@@ -207,11 +207,7 @@ impl Touch {
     pub fn gamepad(&mut self) -> Gamepad {
         let mut pad = Gamepad { connected: true, buttons: std::mem::take(&mut self.pressed), ..Default::default() };
         let radius = self.stick_radius();
-        let stick = |origin: Pos2, at: Pos2| {
-            let v = (at - origin) / radius;
-            let v = if v.length() > 1.0 { v / v.length() } else { v };
-            [v.x, v.y]
-        };
+        let stick = |origin: Pos2, at: Pos2| stick_value((at - origin) / radius);
         for finger in self.fingers.values() {
             match *finger {
                 Finger::Move { origin, at } => pad.left = stick(origin, at),
@@ -299,6 +295,21 @@ impl Touch {
     }
 }
 
+/// A stick's value for a thumb this far from where it landed (in stick
+/// radii): the circle of its reach stretched onto the square, so that the
+/// axis the thumb leans along reads as far as the thumb went. A thumb sliding
+/// sideways drifts up or down as well; on the circle, 30 degrees of drift
+/// left the steering at 0.87 at full reach.
+fn stick_value(v: Vec2) -> [f32; 2] {
+    let reach = v.length().min(1.0);
+    let lean = v.x.abs().max(v.y.abs());
+    if lean == 0.0 {
+        return [0.0, 0.0];
+    }
+    let v = v * (reach / lean);
+    [v.x, v.y]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +386,18 @@ mod tests {
         assert!((t.gamepad().right[0] - 0.5).abs() < 1e-3);
         t.finger_motion(3, x, y);
         assert!((t.gamepad().right[0] - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_thumb_drifting_off_the_axis_keeps_its_reach() {
+        let at = |deg: f32, reach: f32| stick_value(Vec2::angled(deg.to_radians()) * reach);
+        let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4;
+        // Sideways and 30 degrees up, all the way: full steering.
+        assert!(near(at(-150.0, 2.0), [-1.0, -(30f32.to_radians().tan())]));
+        // Half way: half.
+        assert!((at(-30.0, 0.5)[0] - 0.5).abs() < 1e-4);
+        assert!(near(at(90.0, 1.0), [0.0, 1.0]));
+        assert!(near(at(45.0, 1.0), [1.0, 1.0]));
+        assert_eq!(stick_value(Vec2::ZERO), [0.0, 0.0]);
     }
 }
