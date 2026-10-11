@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#MISE description="Build the macOS .app, without signing or game data"
+#MISE depends=["build"]
+set -euo pipefail
+
+[[ $(uname -s) == Darwin ]] || { echo "macos:build requires macOS and Xcode" >&2; exit 1; }
+
+# Compile the shared Icon Composer source, including the legacy .icns fallback.
+assets="$PWD/target/package/macos-assets"
+mkdir -p "$assets"
+xcrun actool platform/shared/Glue5.icon --compile "$assets" \
+    --platform macosx --minimum-deployment-target 14.0 --app-icon Glue5 \
+    --output-partial-info-plist "$assets/Info.plist" --output-format human-readable-text
+cargo packager --release --formats app
+echo "built $PWD/target/package/Glue 5.app"

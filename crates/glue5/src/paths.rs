@@ -32,6 +32,16 @@ pub fn default_game_dirs() -> Vec<PathBuf> {
             dirs.push(ext.join("game"));
         }
     } else {
+        // A distributed Mac app can sit beside an external game directory.
+        // SDL's base path is inside the bundle, not beside the .app.
+        #[cfg(target_os = "macos")]
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(bundle) = exe.parent().and_then(Path::parent).and_then(Path::parent)
+            && bundle.extension().is_some_and(|ext| ext == "app")
+            && let Some(parent) = bundle.parent()
+        {
+            dirs.push(parent.join("game"));
+        }
         // Next to the executable, the repository's ./game (target/<profile>/glue5),
         // and the working directory.
         if let Ok(base) = sdl3::filesystem::get_base_path() {

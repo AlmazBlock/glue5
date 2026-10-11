@@ -6,6 +6,22 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# Paths are relative to this manifest. Game data is deliberately external.
+# Version and executable are taken from Cargo by cargo-packager.
+[package.metadata.packager]
+product-name = "Glue 5"
+identifier = "local.glue5"
+category = "Game"
+formats = ["app"]
+out-dir = "../../target/package"
+icons = ["../../target/package/macos-assets/Glue5.icns"]
+resources = [{ src = "../../target/package/macos-assets/Assets.car", target = "Assets.car" }]
+
+[package.metadata.packager.macos]
+minimum-system-version = "14.0"
+info-plist-path = "../../platform/macos/Info.plist"
+# No signing identity: no bundle signing or notarization.
+
 [dependencies]
 glue5-runtime.workspace = true
 glue5-gpu.workspace = true

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Build a macOS DMG, without signing or game data"
+#MISE depends=["macos:build"]
+set -euo pipefail
+cargo packager --release --formats dmg
+echo "packaged DMG in $PWD/target/package"

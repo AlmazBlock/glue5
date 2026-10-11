@@ -1,7 +1,7 @@
 # Glue 5 app icon
 
-`Glue5.icon` is the shared Icon Composer source for iOS, iPadOS and a future
-macOS app target. Open this package with Icon Composer bundled with Xcode 26.
+`Glue5.icon` is the shared Icon Composer source for iOS, iPadOS and the
+macOS app bundle. Open this package with Icon Composer bundled with Xcode 26.
 
 The two 1024 × 1024 PNG layers live inside the package:
 
@@ -20,8 +20,8 @@ The iOS XcodeGen spec includes this package as a resource and sets the target
 app icon name to `Glue5`. Xcode compiles Liquid Glass assets and generates
 fallback icons for older systems (the deployment target remains iOS 16.4).
 Do not add rounded corners to the source PNGs or copy the package as a plain
-folder resource. A future macOS Xcode target should reference this same package
-and set `ASSETCATALOG_COMPILER_APPICON_NAME = Glue5`.
+folder resource. `mise run macos:build` compiles it with `actool` and packages
+both `Assets.car` and the fallback `Glue5.icns` in the Mac app.
 
 Verification: Xcode 26.3 Release iPhoneOS build with signing disabled succeeded.
 Standalone macOS asset compilation also produced `Assets.car` and `Glue5.icns`.

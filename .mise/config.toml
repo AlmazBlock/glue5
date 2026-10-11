@@ -9,3 +9,4 @@
 rust = { version = "stable", targets = "aarch64-apple-ios" }
 cmake = "4.4.1"
 xcodegen = { version = "2.46.0", os = ["macos"] }
+"cargo:cargo-packager" = { version = "0.11.8", os = ["macos"] }

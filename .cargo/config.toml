@@ -2,6 +2,8 @@
 # Directory with the game build (b/<build>/game.wasm, b/<build>/shaders, data/).
 # Override in the environment, or symlink ./game to the real location.
 GLUE5_GAME_DIR = { value = "game", relative = true }
+# Keep direct Cargo runs and packaged Mac builds on the same deployment target.
+MACOSX_DEPLOYMENT_TARGET = "14.0"
 
 # iOS devices: the oldest CPU iOS 16.4 runs on (A11) instead of the A7 default.
 [target.aarch64-apple-ios]

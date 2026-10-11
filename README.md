@@ -37,6 +37,7 @@ See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
 | `crates/glue5-gpu` | The renderer: executes the engine's D3D11-style command ring with wgpu (Metal on Apple platforms, Vulkan elsewhere). |
 | `crates/glue5` | The application (SDL3), the same on every platform: window, input, audio, settings and touch controls (egui overlay). Its `headless` example runs the game without a window. |
 | `platform/ios` | What iOS needs around it: `main.c`, entitlements, the xcodegen spec. |
+| `platform/macos` | Extra bundle metadata; cargo-packager configuration lives in `crates/glue5/Cargo.toml`. |
 | `.mise` | [mise]: the toolchain (`config.toml`) and the developer tasks (`tasks/`): setup, desktop and iOS. |
 | `patches` | Our patches to wasm2c, wgpu-core and wgpu-hal, applied by `mise run setup` ([README](patches/README.md)). |
 | `third_party/wabt` | wasm2c's sources, pinned (a submodule). `third_party/wgpu-core` and `third_party/wgpu-hal`, the patched wgpu crates, are made by setup and not in git. |
@@ -67,6 +68,10 @@ debug and release builds; later builds only recompile what changed.
 | What | Command |
 |---|---|
 | Play (desktop) | `mise run play` |
+| macOS: build and open the app bundle | `mise run macos` |
+| macOS: build only the app bundle | `mise run macos:build` |
+| macOS: open the built app again | `mise run macos:run` |
+| macOS: build a distributable disk image | `mise run macos:package` |
 | Run without a window: scripted input, PNG shots, statistics | `mise run headless --press 30 start --for 40 --shots 300 shots` (`mise run headless -- --help` lists the options) |
 | Tests | `mise run test`; every translated shader through the adapter and naga's validator: `mise run test:shaders` |
 | iOS: build, sign, install, launch on the connected device | `mise run ios [device]` |
@@ -77,6 +82,35 @@ debug and release builds; later builds only recompile what changed.
 `mise tasks` lists them all. iOS signing uses the team in `GLUE5_TEAM`:
 put it in `.mise/config.local.toml` (ignored by git) under `[env]`. With several
 phones connected, pass the device (name, identifier or UDID).
+
+### macOS packaging
+
+`mise run macos:build` creates `target/package/Glue 5.app` for the Mac's
+architecture; `mise run macos:package` also creates a DMG in `target/package`.
+These tasks require Xcode 26+ for the shared Icon Composer icon. mise manages
+cargo-packager alongside the other tools in `.mise/config.toml` on macOS.
+Direct Cargo builds and the packaged app both target macOS 14+, configured in
+`.cargo/config.toml`. There is no bundle signing, Developer ID or notarization
+step; the executable retains the linker-generated ad-hoc signature on Apple
+Silicon. Downloaded unsigned distributions may be blocked by Gatekeeper.
+
+Game data and shaders are **not bundled**. Choose the external game directory
+on the start page, or put a `game` directory beside `Glue 5.app`. The executable
+still contains the game code compiled from the build-time `game.wasm`.
+Saves and settings remain in the user's Application Support directory.
+
+`mise run macos` builds and opens the bundle through Launch Services; an
+already running instance is brought forward. For a fresh launch, quit it
+first. Arguments can be passed, e.g. `mise run macos --play /absolute/game`.
+`mise run play` remains the direct Cargo workflow with terminal logs.
+
+The bundle declares the Games category and Game Mode support. On Apple
+Silicon, enter native macOS fullscreen using the green window button and
+check Game Mode in the system game menu/overlay. The OS decides whether to
+activate it; the plist alone does not guarantee activation. See Apple's
+[Game Mode requirements](https://support.apple.com/en-us/105118).
+
+### Runtime options
 
 The app and headless runner accept these environment variables.
 `mise run ios` and `ios:run` forward `RUST_LOG` and `GLUE5_*` variables

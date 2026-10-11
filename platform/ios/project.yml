@@ -62,6 +62,7 @@ targets:
         # lowers Bluetooth controller latency while it is in front.
         LSApplicationCategoryType: public.app-category.games
         GCSupportsGameMode: true
+        LSSupportsGameMode: true
         UIStatusBarHidden: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
