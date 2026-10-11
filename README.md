@@ -38,8 +38,8 @@ See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
 | `crates/glue5` | The application (SDL3), the same on every platform: window, input, audio, settings and touch controls (egui overlay). Its `headless` example runs the game without a window. |
 | `platform/ios` | What iOS needs around it: `main.c`, entitlements, the xcodegen spec. |
 | `mise.toml`, `.mise/tasks` | The toolchain and the developer tasks ([mise]): setup, desktop and iOS. |
-| `patches` | Our patches to wasm2c and wgpu-core, applied by `mise run setup` ([README](patches/README.md)). |
-| `third_party/wabt` | wasm2c's sources, pinned (a submodule). `third_party/wgpu-core`, the patched wgpu-core, is made by setup and not in git. |
+| `patches` | Our patches to wasm2c, wgpu-core and wgpu-hal, applied by `mise run setup` ([README](patches/README.md)). |
+| `third_party/wabt` | wasm2c's sources, pinned (a submodule). `third_party/wgpu-core` and `third_party/wgpu-hal`, the patched wgpu crates, are made by setup and not in git. |
 
 Symlink your game directory
 (`b/<build>/game.wasm`, `b/<build>/shaders/`, `data/`) to `./game`, or point
@@ -55,8 +55,8 @@ Rust, CMake and [xcodegen] (`mise.toml`) on first use.
 mise run play          # the first build compiles ~1 GB of generated C
 ```
 
-Every task first runs `mise run setup`, which prepares wgpu-core and
-wasm2c with our patches (only when they change). Run cargo by hand
+Every task first runs `mise run setup`, which prepares wgpu-core, wgpu-hal
+and wasm2c with our patches (only when they change). Run cargo by hand
 through mise too: in a shell with `mise activate`, or `mise exec -- cargo ...`.
 
 Compiled C objects are cached in `target/glue5-tools/objcache`, shared by

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #MISE description="Prepare the third-party code with our patches (again only when patches/ change)"
-# wgpu-core from crates.io in third_party/<name> (ignored by git), where
-# the workspace's [patch.crates-io] takes it, and wasm2c built
+# wgpu-core and wgpu-hal from crates.io in third_party/<name> (ignored by
+# git), where the workspace's [patch.crates-io] takes them, and wasm2c built
 # from third_party/wabt for the game's build script. A stamp of the upstream
 # version and the patches skips what is already prepared.
 set -euo pipefail
@@ -10,6 +10,7 @@ set -euo pipefail
 # version and the sha256 of the crates.io archive.
 crates=(
     "wgpu-core 30.0.1 14c018fce9b6270aa203c2fdd56f3cce996713534bd757e4ea58c8560b121f14"
+    "wgpu-hal 30.0.1 b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
 )
 
 # Where the tools live; glue5-game/build.rs looks in the same place.

@@ -27,7 +27,7 @@ pub enum Work {
         copy: Copy,
         flag: u64,
     },
-    /// Occlusion results: per query, its slots' 8-byte counts.
+    /// Occlusion results: per query, the sum of its slots' 8-byte counts.
     Occlusion {
         staging: Staging,
         queries: Vec<OcclusionResult>,
@@ -50,6 +50,8 @@ pub enum Work {
 pub struct OcclusionResult {
     pub at: u64,
     pub seq: u32,
+    /// An occlusion predicate: its result is whether any sample passed.
+    pub predicate: bool,
     /// Byte offsets of the query's counts in the staging buffer.
     pub offsets: Vec<u32>,
 }
@@ -222,8 +224,12 @@ fn finish(device: &wgpu::Device, mem: Mem, pool: &StagingPool, work: Work) {
             });
             release(pool, staging);
             for (i, q) in queries.iter().enumerate() {
-                let visible = counts.as_ref().is_none_or(|c| c[i] != 0);
-                store_query(mem, q.at, if visible { OCCLUSION_VISIBLE_COUNT } else { 0 }, q.seq);
+                // Samples that passed (counted by the patched wgpu-hal): the
+                // engine divides them by an area (the sun's visibility) and
+                // compares them with pixel thresholds. A lost readback counts
+                // as visible.
+                let count = counts.as_ref().map_or(OCCLUSION_VISIBLE_COUNT, |c| c[i]);
+                store_query(mem, q.at, if q.predicate { (count != 0) as u64 } else { count }, q.seq);
             }
         }
         Work::Profile { staging, resolved } => {

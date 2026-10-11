@@ -7,6 +7,7 @@ sources.
 |---|---|---|
 | `wabt/` | wabt at the commit of the `third_party/wabt` submodule | `wasm2c`, built into `target/glue5-tools/bin` for the game's build script |
 | `wgpu-core/` | wgpu-core from crates.io, the version and checksum in `.mise/tasks/setup` (`crates`) | `third_party/wgpu-core` (ignored by git), used through `[patch.crates-io]` in the workspace manifest |
+| `wgpu-hal/` | wgpu-hal from crates.io, likewise | `third_party/wgpu-hal`, likewise |
 
 Each patch message explains the change and its reason. To update an
 upstream dependency, change the submodule commit or `crates` in

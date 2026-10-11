@@ -220,9 +220,9 @@ impl Reader {
     }
 }
 
-/// Occlusion queries that passed report this many samples: the engine
-/// compares counts with pixel thresholds, and backends report visibility
-/// only (the browser build does the same).
+/// The sample count of an occlusion query whose real count is unknown (the
+/// null backend draws nothing): visible, above any pixel threshold the
+/// engine compares counts with.
 pub const OCCLUSION_VISIBLE_COUNT: u64 = 65536;
 
 /// D3D11_QUERY types.

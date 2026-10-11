@@ -229,7 +229,8 @@ pub struct Occlusion {
     next: u32,
     active: Option<u32>,
     pass_slot: Option<u32>,
-    pub pending: Vec<(u64, u32, Vec<u32>)>,
+    /// Ended queries to resolve: result address, sequence, predicate, slots.
+    pub pending: Vec<(u64, u32, bool, Vec<u32>)>,
     resolve: Option<wgpu::Buffer>,
 }
 
@@ -963,7 +964,7 @@ impl Gpu {
                 self.occlusion.active = None;
             }
             let slots = std::mem::take(&mut self.objs.query_mut(id).unwrap().slots);
-            self.occlusion.pending.push((at, seq, slots));
+            self.occlusion.pending.push((at, seq, kind == query::OCCLUSION_PREDICATE, slots));
         } else {
             // Events complete when the GPU has done everything submitted before.
             let result = if kind == query::TIMESTAMP { self.started.elapsed().as_nanos() as u64 } else { 1 };
@@ -1010,7 +1011,7 @@ impl Gpu {
         let mut results = Vec::new();
         let mut ranges = Vec::new(); // (first slot, count, byte offset)
         let mut bytes = 0u32;
-        for (at, seq, slots) in pending {
+        for (at, seq, predicate, slots) in pending {
             if slots.is_empty() {
                 self.works.push(Work::Query { at, result: 0, seq });
                 continue;
@@ -1027,7 +1028,7 @@ impl Gpu {
                 bytes = (bytes + n as u32 * 8).next_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT as u32);
                 i += n;
             }
-            results.push(OcclusionResult { at, seq, offsets });
+            results.push(OcclusionResult { at, seq, predicate, offsets });
         }
         // Slots are reusable once resolved (resolves are recorded before any later pass).
         if self.occlusion.next > OCCLUSION_SLOTS - 512 && self.occlusion.active.is_none() {

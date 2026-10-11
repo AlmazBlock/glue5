@@ -52,16 +52,18 @@ decoding, png and serde_json. Project code implements the Emscripten system
 interface, translates the engine's command ring to wgpu, adapts the shaders
 and supplies touch controls.
 
-We patch wasm2c and wgpu-core. The patch files live in `patches/` and
-`mise run setup` applies them to pinned sources. Cargo cannot apply
-patch files directly to a dependency.
+We patch wasm2c, wgpu-core and wgpu-hal. The patch files live in
+`patches/` and `mise run setup` applies them to pinned sources. Cargo
+cannot apply patch files directly to a dependency.
 
 The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes
 and a fixed memory base. The wgpu-core patches clear usage scopes by their
 members, stop pipelines from retaining shader modules and let a device
 poll wait for the GPU without holding the device's resource lock,
 reducing CPU work during pass encoding, memory use and stalls between
-threads. We would like to submit both sets upstream.
+threads. The wgpu-hal patch makes occlusion queries count samples on Metal
+and Vulkan, as D3D11's do: the game measures the sun's visibility with
+them. We would like to submit these changes upstream.
 
 ## Game files are never in the app
 
