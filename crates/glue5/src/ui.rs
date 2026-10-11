@@ -244,9 +244,13 @@ impl Ui {
                 modifiers,
                 phase: egui::TouchPhase::Move,
             }),
-            // A finger is the pointer.
-            Event::FingerDown { x, y, .. } | Event::FingerUp { x, y, .. } => {
+            // A finger is a touch (egui scrolls by dragging only on a touch
+            // screen) and the pointer.
+            Event::FingerDown { touch_id, finger_id, x, y, pressure, .. }
+            | Event::FingerUp { touch_id, finger_id, x, y, pressure, .. } => {
                 let pressed = matches!(event, Event::FingerDown { .. });
+                let phase = if pressed { egui::TouchPhase::Start } else { egui::TouchPhase::End };
+                self.touch(*touch_id, *finger_id, phase, pos2(x * w as f32, y * h as f32), *pressure);
                 self.pointer_to(pos2(x * w as f32, y * h as f32));
                 self.events.push(egui::Event::PointerButton {
                     pos: self.pointer,
@@ -258,7 +262,11 @@ impl Ui {
                     self.events.push(egui::Event::PointerGone);
                 }
             }
-            Event::FingerMotion { x, y, .. } => self.pointer_to(pos2(x * w as f32, y * h as f32)),
+            Event::FingerMotion { touch_id, finger_id, x, y, pressure, .. } => {
+                let p = pos2(x * w as f32, y * h as f32);
+                self.touch(*touch_id, *finger_id, egui::TouchPhase::Move, p, *pressure);
+                self.pointer_to(p);
+            }
             Event::TextInput { text, .. } => self.events.push(egui::Event::Text(text.clone())),
             Event::KeyDown { scancode: Some(sc), keymod, .. } | Event::KeyUp { scancode: Some(sc), keymod, .. } => {
                 let pressed = matches!(event, Event::KeyDown { .. });
@@ -269,6 +277,16 @@ impl Ui {
             }
             _ => {}
         }
+    }
+
+    fn touch(&mut self, device: u64, finger: u64, phase: egui::TouchPhase, pos: Pos2, force: f32) {
+        self.events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(device),
+            id: egui::TouchId(finger),
+            phase,
+            pos,
+            force: Some(force),
+        });
     }
 
     fn pointer_to(&mut self, p: Pos2) {
@@ -443,40 +461,83 @@ fn start_page(
     go: &mut Option<Option<Page>>,
 ) -> bool {
     let mut play = false;
-    let width = 400f32.min(ctx.content_rect().width() - 32.0);
+    let area = ctx.content_rect().shrink(12.0);
+    // A phone held sideways is short: its buttons and its cards side by side.
+    let wide = area.height() < 560.0 && area.width() >= 2.0 * START_COLUMN + START_GAP;
+    let column = START_COLUMN.min(area.width());
     egui::Area::new(Id::new("start")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-        ui.set_width(width);
-        ui.vertical_centered(|ui| ui.label(RichText::new("Glue 5").size(34.0).strong()));
-        ui.add_space(12.0);
-        card(ui, |ui| game_files(ui, status));
-        if let Some(why) = status.last_failure {
-            ui.add_space(8.0);
-            card(ui, |ui| last_failure(ui, why, status.graphics_reset, actions));
-        }
-        ui.add_space(12.0);
-        let label = if starting { "Starting…" } else { "Play" };
-        let button = egui::Button::new(RichText::new(label).size(19.0).strong().color(Color32::WHITE)).fill(ACCENT);
-        ui.add_enabled_ui(status.game_dir.is_some() && !starting, |ui| {
-            play = focus(ui.add_sized([width, 50.0], button)).clicked();
-        });
-        let half = (width - ui.spacing().item_spacing.x) / 2.0;
-        ui.horizontal(|ui| {
-            if focus(ui.add_sized([half, 40.0], egui::Button::new("Settings"))).clicked() {
-                *go = Some(Some(Page::Settings));
-            }
-            let (label, action) =
-                if MOBILE { ("Look again", Action::FindGame) } else { ("Game folder…", Action::ChooseGame) };
-            if focus(ui.add_sized([half, 40.0], egui::Button::new(label))).clicked() {
-                actions.push(action);
+        egui::ScrollArea::vertical().max_height(area.height()).show(ui, |ui| {
+            if wide {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(column);
+                        play = start_buttons(ui, column, status, starting, actions, go);
+                    });
+                    ui.add_space(START_GAP);
+                    ui.vertical(|ui| {
+                        ui.set_width(column);
+                        start_cards(ui, status, actions);
+                    });
+                });
+            } else {
+                ui.set_width(column);
+                play = start_buttons(ui, column, status, starting, actions, go);
+                ui.add_space(12.0);
+                start_cards(ui, status, actions);
             }
         });
-        if !MOBILE && focus(ui.add_sized([width, 34.0], egui::Button::new("Quit"))).clicked() {
-            actions.push(Action::Quit);
-        }
-        ui.add_space(8.0);
-        ui.vertical_centered(|ui| ui.label(RichText::new(open_hint()).small().weak()));
     });
     play
+}
+
+/// Width of the start page's column (two of them on a short screen).
+const START_COLUMN: f32 = 360.0;
+const START_GAP: f32 = 20.0;
+
+/// The start page's title and buttons; true when Play is chosen.
+fn start_buttons(
+    ui: &mut egui::Ui,
+    width: f32,
+    status: &Status,
+    starting: bool,
+    actions: &mut Vec<Action>,
+    go: &mut Option<Option<Page>>,
+) -> bool {
+    let mut play = false;
+    ui.vertical_centered(|ui| ui.label(RichText::new("Glue 5").size(34.0).strong()));
+    ui.add_space(12.0);
+    let label = if starting { "Starting…" } else { "Play" };
+    let button = egui::Button::new(RichText::new(label).size(19.0).strong().color(Color32::WHITE)).fill(ACCENT);
+    ui.add_enabled_ui(status.game_dir.is_some() && !starting, |ui| {
+        play = focus(ui.add_sized([width, 50.0], button)).clicked();
+    });
+    let half = (width - ui.spacing().item_spacing.x) / 2.0;
+    ui.horizontal(|ui| {
+        if focus(ui.add_sized([half, 40.0], egui::Button::new("Settings"))).clicked() {
+            *go = Some(Some(Page::Settings));
+        }
+        let (label, action) =
+            if MOBILE { ("Look again", Action::FindGame) } else { ("Game folder…", Action::ChooseGame) };
+        if focus(ui.add_sized([half, 40.0], egui::Button::new(label))).clicked() {
+            actions.push(action);
+        }
+    });
+    if !MOBILE && focus(ui.add_sized([width, 34.0], egui::Button::new("Quit"))).clicked() {
+        actions.push(Action::Quit);
+    }
+    play
+}
+
+/// The start page's state: the game's files, the last game's failure, and
+/// how to come back here.
+fn start_cards(ui: &mut egui::Ui, status: &Status, actions: &mut Vec<Action>) {
+    card(ui, |ui| game_files(ui, status));
+    if let Some(why) = status.last_failure {
+        ui.add_space(8.0);
+        card(ui, |ui| last_failure(ui, why, status.graphics_reset, actions));
+    }
+    ui.add_space(8.0);
+    ui.vertical_centered(|ui| ui.label(RichText::new(open_hint()).small().weak()));
 }
 
 fn game_files(ui: &mut egui::Ui, status: &Status) {

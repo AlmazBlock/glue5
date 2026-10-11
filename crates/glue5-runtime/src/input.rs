@@ -65,10 +65,18 @@ pub fn rumble(slot: usize) -> (u16, u16) {
 static PADS: Mutex<[Gamepad; MAX_PADS]> =
     Mutex::new([Gamepad { connected: false, buttons: 0, left: [0.0; 2], right: [0.0; 2], l2: 0.0, r2: 0.0 }; MAX_PADS]);
 
+/// Buttons pressed since the engine last read each pad. The engine reads
+/// the pads once a frame; a press that begins and ends in between (a quick
+/// tap on a touch button: START, a face button) would never reach it, so
+/// it counts as held until the engine's next read.
+static PRESSED: Mutex<[u16; MAX_PADS]> = Mutex::new([0; MAX_PADS]);
+
 /// Sets what pad `slot` reports to the engine from its next update on.
 pub fn set_gamepad(slot: usize, pad: Gamepad) {
     if slot < MAX_PADS {
-        PADS.lock().unwrap()[slot] = pad;
+        let mut pads = PADS.lock().unwrap();
+        PRESSED.lock().unwrap()[slot] |= pad.buttons & !pads[slot].buttons;
+        pads[slot] = pad;
     }
 }
 
@@ -94,7 +102,8 @@ pub(crate) unsafe extern "C" fn pad_update(env: *mut Env, pad: u64) {
     if let Some(r) = RUMBLE.lock().unwrap().get_mut(slot) {
         *r = (mem.u16(pad + PAD_MOTORS), mem.u16(pad + PAD_MOTORS + 2));
     }
-    let Some(state) = PADS.lock().unwrap().get(slot).copied() else { return };
+    let Some(mut state) = PADS.lock().unwrap().get(slot).copied() else { return };
+    state.buttons |= std::mem::take(&mut PRESSED.lock().unwrap()[slot]);
     if !state.connected {
         return;
     }

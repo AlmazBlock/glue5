@@ -24,10 +24,12 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("want_to_exit", "CSystem::WantToExit()"),
     ("rl_shutdown", "rage::rlShutdown()"),
     // The resource heap grows whenever the streaming engine asks how much
-    // memory is left; the host caps it on low-memory devices (and only calls
-    // GetHeapSize, to know the heap's size).
+    // memory is left; on low-memory devices the host lets it grow only for
+    // allocations (and only calls GetHeapSize, to know the heap's size).
     ("grow_heap", "rage::sysMemGrowBuddyAllocator::GrowHeap()"),
     ("heap_size", "rage::sysMemGrowBuddyAllocator::GetHeapSize() const"),
+    ("memory_available", "rage::sysMemGrowBuddyAllocator::GetMemoryAvailable()"),
+    ("largest_block", "rage::sysMemGrowBuddyAllocator::GetLargestAvailableBlock()"),
     // At PostFX Ultra the skin pass asks for a pass the game's shaders do not
     // have; it is shown settings with PostFX at Very High (see skin.rs).
     ("skin_light_pass", "DeferredLighting::ExecuteSkinLightPass(rage::grcRenderTarget*, bool)"),

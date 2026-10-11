@@ -232,9 +232,11 @@ prompts, aim assist and menu behaviour:
   Android) feed the engine's own pad code: the `pad_update` hook writes RAGE's
   pad state after `rage::ioPad::Update`, where XInput would on PC. The game
   then shows controller prompts by itself.
-- **Touch controls** are a virtual controller in pad slot 0: a floating
-  stick on the left, camera drag and buttons on the right, laid out in the
-  safe area. They are shown on touch devices while touch is the input in use
+- **Touch controls** are a virtual controller in pad slot 0, laid out like
+  one held in landscape within the safe area: a floating movement stick and a
+  D-pad cross on the left, a camera stick (the right stick) and the face
+  buttons on the right, triggers and shoulder buttons in the top corners.
+  They are smaller on phones. They are shown on touch devices while touch is the input in use
   and hide as soon as a controller, keyboard or mouse is used (setting:
   Auto / Always / Off). Visibility follows the last input used, so an idle
   paired controller does not hide the touch controls.

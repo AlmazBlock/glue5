@@ -190,6 +190,8 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         rl_shutdown: Some(exit::rl_shutdown),
         grow_heap: Some(memory::grow_heap),
         heap_size: None,
+        memory_available: Some(memory::memory_available),
+        largest_block: Some(memory::largest_block),
         skin_light_pass: Some(skin::skin_light_pass),
         get_settings: Some(skin::get_settings),
     };

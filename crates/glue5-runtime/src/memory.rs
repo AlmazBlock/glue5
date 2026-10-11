@@ -224,27 +224,76 @@ pub fn footprint() -> (Option<u64>, Option<u64>) {
 
 // ---- the engine's resource heap ----------------------------------------------
 
-/// The resource heap's size at most, in bytes (0: no limit).
-static RESOURCE_CAP: AtomicU64 = AtomicU64::new(0);
+/// The resource heap's budget, in bytes (0: none).
+static RESOURCE_BUDGET: AtomicU64 = AtomicU64::new(0);
 
-/// Caps the resource heap at `mb` MiB (the engine's `gameResourceMB`).
-pub(crate) fn cap_resource_heap(mb: u32) {
-    RESOURCE_CAP.store((mb as u64) << 20, Ordering::Relaxed);
+thread_local! {
+    /// The streaming engine is asking how much memory is left.
+    static ASKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Budgets the resource heap at `mb` MiB (the engine's `gameResourceMB`).
+pub(crate) fn budget_resource_heap(mb: u32) {
+    RESOURCE_BUDGET.store((mb as u64) << 20, Ordering::Relaxed);
 }
 
 /// Hook for `rage::sysMemGrowBuddyAllocator::GrowHeap()`. The PC build's
-/// resource heap starts at `gameResourceMB` and grows by up to 256 MiB
-/// whenever the streaming engine asks how much memory is left (answering
-/// grows it), so it holds whatever the player has passed by: on a phone,
-/// past what the system allows. Capped, the streaming engine finds the heap
-/// full and evicts, as on consoles. -1: no growth.
+/// resource heap starts at `gameResourceMB` and grows by up to 256 MiB, for
+/// an allocation and also whenever the streaming engine asks how much memory
+/// is left (answering grows it), so it holds whatever the player has passed
+/// by: on a phone, past what the system allows. With a budget, answering no
+/// longer grows it past the budget, nor counts what lies past it as free:
+/// the streaming engine sees it full and evicts, as on consoles. Allocations
+/// still grow it, though: the streaming engine does not survive one failing
+/// ("read request ... using destination addresses, some of which are NULL",
+/// a fatal error). -1: no growth.
 pub(crate) unsafe extern "C" fn grow_heap(env: *mut Env, this: u64) -> u32 {
     // Heaps come a little short of whole MiB (255, 511, ...): within the
-    // smallest growth step of the cap counts as there.
+    // smallest growth step of the budget counts as there.
     const STEP: u64 = 16 << 20;
-    let cap = RESOURCE_CAP.load(Ordering::Relaxed);
-    if cap != 0 && unsafe { orig::heap_size(env, this) } + STEP > cap {
+    let budget = RESOURCE_BUDGET.load(Ordering::Relaxed);
+    if budget != 0 && ASKING.get() && unsafe { orig::heap_size(env, this) } + STEP > budget {
         return u32::MAX;
     }
     unsafe { orig::grow_heap(env, this) }
+}
+
+/// Hook for `rage::sysMemGrowBuddyAllocator::GetMemoryAvailable()`: past
+/// the budget (grown by allocations), what lies beyond it does not count as
+/// free, so the streaming engine evicts back under it.
+pub(crate) unsafe extern "C" fn memory_available(env: *mut Env, this: u64) -> u64 {
+    // The two ask each other: inner calls are answered as they are.
+    if ASKING.get() {
+        return unsafe { orig::memory_available(env, this) };
+    }
+    let available = asking(|| unsafe { orig::memory_available(env, this) });
+    available.saturating_sub(unsafe { over_budget(env, this) })
+}
+
+/// Hook for `rage::sysMemGrowBuddyAllocator::GetLargestAvailableBlock()`
+/// (no larger than what [`memory_available`] says is free).
+pub(crate) unsafe extern "C" fn largest_block(env: *mut Env, this: u64) -> u64 {
+    if ASKING.get() {
+        return unsafe { orig::largest_block(env, this) };
+    }
+    let largest = asking(|| unsafe { orig::largest_block(env, this) });
+    match unsafe { over_budget(env, this) } {
+        0 => largest,
+        over => largest.min(asking(|| unsafe { orig::memory_available(env, this) }).saturating_sub(over)),
+    }
+}
+
+/// How far the heap has grown past the budget, in bytes.
+unsafe fn over_budget(env: *mut Env, this: u64) -> u64 {
+    match RESOURCE_BUDGET.load(Ordering::Relaxed) {
+        0 => 0,
+        budget => unsafe { orig::heap_size(env, this) }.saturating_sub(budget),
+    }
+}
+
+fn asking<R>(f: impl FnOnce() -> R) -> R {
+    ASKING.set(true);
+    let r = f();
+    ASKING.set(false);
+    r
 }

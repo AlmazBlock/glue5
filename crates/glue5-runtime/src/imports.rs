@@ -103,9 +103,9 @@ pub unsafe extern "C" fn wasm_module_int_js(env: *mut Env, name: u64, default: u
         None if name == "gameResourceMB" && low => default.min(768),
         None => default,
     };
-    // Low memory: the resource heap stays at its starting size.
+    // Low memory: the resource heap's budget is its starting size.
     if name == "gameResourceMB" && low {
-        crate::memory::cap_resource_heap(value);
+        crate::memory::budget_resource_heap(value);
     }
     value
 }
