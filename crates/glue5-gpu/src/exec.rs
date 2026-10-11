@@ -1,7 +1,6 @@
 //! The command thread: executes the engine's ring in order, mirroring the
 //! D3D11 device state onto wgpu.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -146,7 +145,6 @@ pub struct Stats {
     pub submits: FxHashMap<&'static str, u64>,
     pub presents: u64,
     pub bind_groups: u64,
-    pub pipelines_ahead: u64,
     pub busy: Duration,
     /// Present-to-present intervals, in milliseconds.
     pub frame_ms: Vec<f32>,
@@ -202,11 +200,6 @@ pub struct Gpu {
     pub fast_pipes: FxHashMap<Box<[u32]>, Arc<pipeline::Cell>>,
     pub pipes: FxHashMap<Arc<Recipe>, Arc<pipeline::Cell>>,
     pub pass_tails: FxHashMap<(Vec<Option<TextureFormat>>, Option<TextureFormat>, u32, u8), u32>,
-    pub shaders_by_hash: FxHashMap<u64, (Arc<[SigElement]>, crate::objects::ProgramSlot)>,
-    pub ahead: VecDeque<Arc<Recipe>>,
-    pub ahead_waiting: Vec<Arc<Recipe>>,
-    /// Shaders known when the waiting recipes were last tried.
-    pub ahead_shaders: usize,
     pub recipes_new: Vec<Arc<Recipe>>,
     pub key: Vec<u32>,
 
@@ -279,7 +272,7 @@ impl Gpu {
         reader.release();
     }
 
-    /// Nothing to do: complete what the engine may be waiting on, compile ahead.
+    /// Nothing to do: complete what the engine may be waiting on.
     fn idle(&mut self) {
         // A readback the engine may be blocked on goes to the GPU now. Other
         // work once it has been gathering for a few milliseconds, else with
@@ -293,7 +286,6 @@ impl Gpu {
         } else if ripe {
             self.flush("idle");
         }
-        self.compile_ahead(Duration::from_millis(2));
         if self.last_save.elapsed() >= Duration::from_secs(20) {
             self.save_caches();
         }
@@ -849,7 +841,6 @@ impl Gpu {
                 }
             });
         }
-        self.shaders_by_hash.entry(hash).or_insert_with(|| (sig.clone(), slot.clone()));
         self.objs.insert(id, Obj::Shader(Box::new(Shader { stage, hash, sig, slot })));
     }
 
@@ -1028,7 +1019,7 @@ impl Gpu {
         skipped.sort();
         let c = &self.compiler;
         log::info!(
-            "gpu: {:.1} fps ({frames_line}), {} draws/frame, {} dispatches, {:.1} passes/frame (ended by {}), {:.1} submits/frame ({}), recording {:.0}% ({:.1} ms/frame), encoding {:.1} ms/frame, submitting {:.1}, presenting {:.1}, releasing {:.1}, waiting for the GPU {:.1}, for a drawable {:.1}; pipelines {} (+{} ahead, {} failed, {:.0} ms compiling), draws waiting for one {}, skipped [{}], clamped {}, bind groups +{} ({} cached), objects {} ({memory}), errors +{}",
+            "gpu: {:.1} fps ({frames_line}), {} draws/frame, {} dispatches, {:.1} passes/frame (ended by {}), {:.1} submits/frame ({}), recording {:.0}% ({:.1} ms/frame), encoding {:.1} ms/frame, submitting {:.1}, presenting {:.1}, releasing {:.1}, waiting for the GPU {:.1}, for a drawable {:.1}; pipelines {} ({} failed, {:.0} ms compiling), draws waiting for one {}, skipped [{}], clamped {}, bind groups +{} ({} cached), objects {} ({memory}), errors +{}",
             st.presents as f64 / secs,
             st.draws / frames,
             st.dispatches / frames,
@@ -1045,7 +1036,6 @@ impl Gpu {
             per_frame(gpu_wait),
             per_frame(drawable),
             c.compiled.load(std::sync::atomic::Ordering::Relaxed),
-            st.pipelines_ahead,
             c.failed.load(std::sync::atomic::Ordering::Relaxed),
             c.compile_us.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
             st.pending_skips,

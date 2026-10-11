@@ -1,7 +1,7 @@
 //! Compile threads: shader modules and pipelines are built off the command
 //! thread (a pipeline compile takes milliseconds; hundreds arrive when a new
 //! area streams in). Urgent jobs (something is waiting) run before
-//! background ones (pipelines compiled ahead from recipes).
+//! background ones (objects to free).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -56,10 +56,5 @@ impl Pool {
         let (lock, cv) = &*self.queues;
         lock.lock().unwrap().background.push_back(Box::new(job));
         cv.notify_one();
-    }
-
-    /// Background jobs not started yet.
-    pub fn background_queued(&self) -> usize {
-        self.queues.0.lock().unwrap().background.len()
     }
 }

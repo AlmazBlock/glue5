@@ -1256,7 +1256,7 @@ fn main(@location(1u) v1 : vec4<f32>, @location(5u) v5 : vec4<f32>) -> @location
     #[test]
     #[ignore = "requires the game shaders and a GPU"]
     fn minimap_mask_pipeline_compiles() {
-        use crate::pipeline::{Compiler, Recipe, SigElement};
+        use crate::pipeline::{Compiler, Recipe};
         let game = std::env::var_os("GLUE5_GAME_DIR").expect("GLUE5_GAME_DIR");
         let library = Library::open(&glue5_runtime::layout::shader_dir(Path::new(&game))).unwrap();
         let gpu = crate::Device::open(&crate::instance(), None).unwrap();
@@ -1271,22 +1271,18 @@ fn main(@location(1u) v1 : vec4<f32>, @location(5u) v5 : vec4<f32>) -> @location
         assert_eq!(ps.textures.len(), 1);
         let recipe = Recipe::from_json(&serde_json::json!({
             "vs": format!("{:016x}", vs.hash), "ps": format!("{:016x}", ps.hash),
+            "sig": [[1, 0, 0], [2, 0, 2], [3, 0, 3]],
             "el": [[1, 0, 6, 0, 0, 0, 0], [2, 0, 2, 0, 12, 0, 0], [3, 0, 16, 0, 28, 0, 0]],
             "st": [36], "tp": 4, "sf": "", "b": null, "d": null, "r": null,
             "rt": ["rgba8unorm"], "n": 1, "ds": "", "ro": 0, "hud_mask": true
         }))
         .unwrap();
         assert_eq!(recipe, Recipe::from_json(&recipe.to_json()).unwrap());
-        let sig = [
-            SigElement { semantic: 1, index: 0, register: 0 },
-            SigElement { semantic: 2, index: 0, register: 2 },
-            SigElement { semantic: 3, index: 0, register: 3 },
-        ];
         let compiler = Compiler::new(gpu.device.clone(), crate::format::Caps::new(&gpu.adapter, gpu.features), None);
-        assert!(compiler.compile(&vs, &sig, Some(&ps), &recipe).is_some());
+        assert!(compiler.compile(&vs, Some(&ps), &recipe).is_some());
         let pause = library.named(&gpu.device, "im::VS_TransformUnlit_IM", Stage::Vertex).unwrap();
         assert!(!pause.bindings.is_empty(), "world-space map keeps its transform constants");
-        assert!(compiler.compile(&pause, &sig, Some(&original), &recipe).is_some());
+        assert!(compiler.compile(&pause, Some(&original), &recipe).is_some());
     }
 
     /// Reproduces the failing stage pair without depending on a save, a
@@ -1294,7 +1290,7 @@ fn main(@location(1u) v1 : vec4<f32>, @location(5u) v5 : vec4<f32>) -> @location
     #[test]
     #[ignore = "requires the game shaders and a GPU"]
     fn radar_pipeline_compiles() {
-        use crate::pipeline::{Compiler, Recipe, SigElement};
+        use crate::pipeline::{Compiler, Recipe};
         let game = std::env::var_os("GLUE5_GAME_DIR").expect("GLUE5_GAME_DIR");
         let library = Library::open(&glue5_runtime::layout::shader_dir(Path::new(&game))).unwrap();
         let gpu = crate::Device::open(&crate::instance(), None).unwrap();
@@ -1305,13 +1301,13 @@ fn main(@location(1u) v1 : vec4<f32>, @location(5u) v5 : vec4<f32>) -> @location
         assert!(!ps.text.contains("@location(5u)"));
         let recipe = Recipe::from_json(&serde_json::json!({
             "vs": "6e3b688101fd34ef", "ps": "5c5d5123dfb3dd00",
+            "sig": [[1, 0, 0], [2, 0, 1], [3, 0, 2]],
             "el": [[1, 0, 6, 0, 0, 0, 0], [2, 0, 16, 0, 12, 0, 0], [3, 0, 2, 0, 20, 0, 0]],
             "st": [36], "tp": 4, "sf": "", "b": null, "d": null, "r": null,
             "rt": ["rgba8unorm"], "n": 1, "ds": "", "ro": 0
         }))
         .unwrap();
-        let sig: Vec<_> = (0..3).map(|register| SigElement { semantic: register + 1, index: 0, register }).collect();
         let compiler = Compiler::new(gpu.device.clone(), crate::format::Caps::new(&gpu.adapter, gpu.features), None);
-        assert!(compiler.compile(&vs, &sig, Some(&ps), &recipe).is_some());
+        assert!(compiler.compile(&vs, Some(&ps), &recipe).is_some());
     }
 }

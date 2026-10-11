@@ -617,7 +617,6 @@ impl Gpu {
         }
         self.uniforms.next_frame();
         self.stats.presents += 1;
-        self.compile_ahead(Duration::from_millis(1));
         if self.last_stats.elapsed() >= Duration::from_secs(10) {
             self.total_presents += self.stats.presents;
             self.log_stats();

@@ -126,6 +126,7 @@ pub fn run() -> Result<()> {
         metal_hud,
         refresh_rate,
         screen: Some(screen),
+        play_requested: false,
         game: None,
     };
     app.last_failure = std::fs::read_to_string(app.user_dir.join(FAILURE_FILE)).ok();
@@ -200,6 +201,8 @@ struct App {
     refresh_rate: f32,
     /// The renderer, until the game takes it over.
     screen: Option<Screen>,
+    /// Play was chosen: the game starts once its pipelines are prepared.
+    play_requested: bool,
     game: Option<Running>,
 }
 
@@ -379,6 +382,7 @@ impl App {
                 metalfx: self.metalfx,
                 metal_hud: self.metal_hud,
                 refresh_rate: self.refresh_rate,
+                preparing: self.play_requested.then(|| self.screen.as_ref().and_then(Screen::progress)).flatten(),
             };
             // The settings button: on touch screens always, so that it stays
             // with a controller in use or the touch controls off.
@@ -400,6 +404,9 @@ impl App {
                 Action::FindGame => self.find_game(None),
                 Action::ResetGraphics => self.reset_graphics(),
             }
+        }
+        if self.play_requested {
+            self.play()?;
         }
         if let Some(choice) = self.folder.as_ref().and_then(FolderPick::poll) {
             self.folder = None;
@@ -459,9 +466,18 @@ impl App {
         }
     }
 
-    /// Starts the game; the renderer takes the screen over.
+    /// Starts the game once the pipelines known for it are prepared (the
+    /// start page shows how far; called again until then); the renderer
+    /// takes the screen over.
     fn play(&mut self) -> Result<()> {
         let Some(game_dir) = self.game_dir.clone() else { return Ok(()) };
+        let mut gpu_settings = glue5_gpu::Settings::for_game(&game_dir);
+        gpu_settings.cache_dir = Some(self.user_dir.join("cache"));
+        let Some(screen) = self.screen.as_mut() else { return Ok(()) };
+        self.play_requested = !screen.prepare(&gpu_settings);
+        if self.play_requested {
+            return Ok(());
+        }
         let Some(screen) = self.screen.take() else { return Ok(()) };
         // Graphics quality is the game's own (its menu); the low-memory
         // profile only lowers it once, after which the menu has the last word.
@@ -480,8 +496,6 @@ impl App {
         log::info!("game: {}, user data: {}", game_dir.display(), self.user_dir.display());
         let s = &self.settings;
         let back_buffer = settings::render_size(self.window.size_in_pixels(), s.render_scale(), s.low_memory);
-        let mut gpu_settings = glue5_gpu::Settings::for_game(&game_dir);
-        gpu_settings.cache_dir = Some(self.user_dir.join("cache"));
         let game = glue5_runtime::start(
             glue5_runtime::Config {
                 game_dir: game_dir.clone(),

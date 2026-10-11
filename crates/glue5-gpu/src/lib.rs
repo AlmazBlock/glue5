@@ -23,6 +23,7 @@ mod ops;
 mod overlay;
 mod pipeline;
 mod pool;
+mod prepare;
 mod present;
 mod profile;
 mod shader;
@@ -148,24 +149,58 @@ fn pipeline_cache_name(info: &wgpu::AdapterInfo) -> String {
 }
 
 /// The GPU and the window it shows frames in. The application opens it
-/// before the game starts, to show its own UI ([`Screen::show_ui`]); the
-/// renderer takes it over when the game starts ([`backend`]).
+/// before the game starts, to show its own UI ([`Screen::show_ui`]) and to
+/// prepare the game's pipelines ([`Screen::prepare`]); the renderer takes it
+/// over when the game starts ([`backend`]).
 pub struct Screen {
     gpu: Device,
     output: present::Output,
+    preparing: Option<Preparing>,
+}
+
+/// The known pipelines being compiled, for the game in `shader_dir`.
+struct Preparing {
+    shader_dir: PathBuf,
+    progress: Arc<prepare::Progress>,
+    thread: std::thread::JoinHandle<Result<prepare::Prepared>>,
 }
 
 impl Screen {
     pub fn open(window: Window) -> Result<Screen> {
         let gpu = Device::open(&window.instance, Some(&window.surface))?;
         let output = present::Output::new(gpu.adapter.clone(), &gpu.device, window);
-        Ok(Screen { gpu, output })
+        Ok(Screen { gpu, output, preparing: None })
+    }
+
+    /// Compiles the pipelines known for the game of `settings` before it
+    /// starts (see `prepare.rs`), in the background: true once done, then
+    /// start the game with this screen.
+    pub fn prepare(&mut self, settings: &Settings) -> bool {
+        if self.preparing.as_ref().is_none_or(|p| p.shader_dir != settings.shader_dir) {
+            let (gpu, settings) = (self.gpu.clone(), settings.clone());
+            let shader_dir = settings.shader_dir.clone();
+            let progress = Arc::new(prepare::Progress::default());
+            let shared = progress.clone();
+            let thread = std::thread::Builder::new()
+                .name("gpu prepare".into())
+                .spawn(move || prepare::prepare(&gpu, &settings, &shared))
+                .expect("spawning the prepare thread");
+            self.preparing = Some(Preparing { shader_dir, progress, thread });
+        }
+        self.preparing.as_ref().is_some_and(|p| p.thread.is_finished())
+    }
+
+    /// How far [`Screen::prepare`] got (0 to 1), while it runs.
+    pub fn progress(&self) -> Option<f32> {
+        let p = self.preparing.as_ref().filter(|p| !p.thread.is_finished())?;
+        let total = p.progress.total.load(Ordering::Relaxed);
+        Some(if total == 0 { 0.0 } else { p.progress.done.load(Ordering::Relaxed) as f32 / total as f32 })
     }
 
     /// Shows the overlay alone (the game is not running). False when the
     /// window had no frame to give (hidden, minimised, being replaced).
     pub fn show_ui(&mut self) -> bool {
-        let Screen { gpu, output } = self;
+        let Screen { gpu, output, .. } = self;
         let Some(frame) = output.acquire(&gpu.device) else { return false };
         gpu.queue.submit(output.compose(&gpu.device, &gpu.queue, &frame, None));
         output.show(&gpu.queue, frame);
@@ -179,6 +214,7 @@ impl Screen {
 }
 
 /// An open GPU.
+#[derive(Clone)]
 struct Device {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -247,17 +283,11 @@ fn error_handler(ring: Option<GpuRing>) -> Arc<dyn wgpu::UncapturedErrorHandler>
     })
 }
 
-fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exec::Gpu> {
-    let t0 = Instant::now();
-    let (gpu, output) = match screen {
-        Some(screen) => (screen.gpu, Some(screen.output)),
-        None => (Device::open(&instance(), None)?, None),
-    };
-    let Device { adapter, device, queue, features, profile } = gpu;
-    let info = adapter.get_info();
-    device.on_uncaptured_error(error_handler(Some(ring)));
-
-    let mut caps = format::Caps::new(&adapter, features);
+/// The pipeline compiler for `gpu`, with the driver's pipeline cache of
+/// earlier runs where there is one (Vulkan; Metal keeps its own).
+fn compiler(gpu: &Device, settings: &Settings) -> pipeline::Compiler {
+    let Device { adapter, device, features, .. } = gpu;
+    let mut caps = format::Caps::new(adapter, *features);
     if std::env::var_os("GLUE5_NO_FLOAT32_FILTER").is_some() {
         // Test the path of GPUs that cannot filter 32-bit float textures.
         caps.float32_filter = false;
@@ -266,7 +296,8 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         std::fs::create_dir_all(dir).ok();
     }
     let cache = features.contains(wgpu::Features::PIPELINE_CACHE).then(|| {
-        let data = settings.cache_dir.as_ref().and_then(|d| std::fs::read(d.join(pipeline_cache_name(&info))).ok());
+        let name = pipeline_cache_name(&adapter.get_info());
+        let data = settings.cache_dir.as_ref().and_then(|d| std::fs::read(d.join(name)).ok());
         unsafe {
             device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
                 label: Some("pipelines"),
@@ -275,15 +306,26 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
             })
         }
     });
-    let library = Arc::new(shader::Library::open(&settings.shader_dir)?);
-    let compiler = Arc::new(pipeline::Compiler::new(device.clone(), caps, cache));
+    pipeline::Compiler::new(device.clone(), caps, cache)
+}
+
+fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exec::Gpu> {
+    let t0 = Instant::now();
+    let (gpu, output, preparing) = match screen {
+        Some(screen) => (screen.gpu, Some(screen.output), screen.preparing),
+        None => (Device::open(&instance(), None)?, None, None),
+    };
+    // Prepared by the application (for this game), else now.
+    let prepared = match preparing.filter(|p| p.shader_dir == settings.shader_dir) {
+        Some(p) => p.thread.join().map_err(|_| anyhow::anyhow!("preparing the pipelines panicked"))??,
+        None => prepare::prepare(&gpu, &settings, &Default::default())?,
+    };
+    let prepare::Prepared { library, compiler, pipes } = prepared;
+    let Device { adapter, device, queue, features: _, profile } = gpu;
+    device.on_uncaptured_error(error_handler(Some(ring)));
+    let caps = compiler.caps;
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(2).clamp(2, 6);
     let staging = Arc::new(done::StagingPool::default());
-    let mut recipe_files = vec![settings.shader_dir.join("pipelines.json")];
-    if let Some(dir) = &settings.cache_dir {
-        recipe_files.push(dir.join("pipelines.jsonl"));
-    }
-    let ahead = pipeline::load_recipes(&recipe_files).into();
     let limits = device.limits();
     let window = output.is_some();
     log::info!("gpu: ready in {:.0} ms ({threads} compile threads)", t0.elapsed().as_secs_f64() * 1000.0);
@@ -331,12 +373,8 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         profiler,
         pass_profile: None,
         fast_pipes: Default::default(),
-        pipes: Default::default(),
+        pipes,
         pass_tails: Default::default(),
-        shaders_by_hash: Default::default(),
-        ahead,
-        ahead_waiting: Vec::new(),
-        ahead_shaders: 0,
         recipes_new: Vec::new(),
         key: Vec::new(),
         binds: Default::default(),

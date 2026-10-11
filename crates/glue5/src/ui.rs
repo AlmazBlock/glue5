@@ -86,6 +86,8 @@ pub struct Status<'a> {
     pub metal_hud: bool,
     /// The display's refresh rate at most, in Hz.
     pub refresh_rate: f32,
+    /// Play waits for the game's pipelines: how far they are (0 to 1).
+    pub preparing: Option<f32>,
 }
 
 /// The settings button over the game: from the safe area's top right
@@ -403,6 +405,8 @@ impl Ui {
         }
         if self.starting {
             self.repaint();
+        } else if status.preparing.is_some() {
+            self.repaint_in(Duration::from_millis(200));
         }
         if starting {
             actions.push(Action::Play);

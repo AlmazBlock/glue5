@@ -331,6 +331,7 @@ impl Gpu {
                 let recipe = Recipe {
                     vs: vs.hash,
                     ps: ps.map(|p| p.hash),
+                    sig: self.objs.shader(self.s.shader[0]).map(|s| s.sig.clone()).unwrap_or_default(),
                     elements: layout.elements.clone(),
                     strides: layout.slots.iter().map(|&(slot, _)| stride(slot)).collect(),
                     topology: self.s.topology,
@@ -345,8 +346,7 @@ impl Gpu {
                     variant: [vs.unfiltered, vs.depth, ps.map_or(0, |p| p.unfiltered), ps.map_or(0, |p| p.depth)],
                     hud_mask: ps.is_some_and(|p| p.hud_mask),
                 };
-                let sig = self.objs.shader(self.s.shader[0]).map(|s| s.sig.clone()).unwrap_or_default();
-                let cell = self.pipeline_for(Arc::new(recipe), vs.clone(), ps.cloned(), sig, true);
+                let cell = self.pipeline_for(Arc::new(recipe), vs.clone(), ps.cloned());
                 self.fast_pipes.insert(key.as_slice().into(), cell.clone());
                 cell
             }
@@ -355,95 +355,25 @@ impl Gpu {
         Some(cell)
     }
 
-    /// The pipeline of a recipe, compiling it if new.
-    pub fn pipeline_for(
-        &mut self,
-        recipe: Arc<Recipe>,
-        vs: Arc<Program>,
-        ps: Option<Arc<Program>>,
-        sig: Arc<[pipeline::SigElement]>,
-        urgent: bool,
-    ) -> Arc<pipeline::Cell> {
+    /// The pipeline of a recipe: prepared before the game started (see
+    /// `prepare.rs`), else compiled now, in the background.
+    fn pipeline_for(&mut self, recipe: Arc<Recipe>, vs: Arc<Program>, ps: Option<Arc<Program>>) -> Arc<pipeline::Cell> {
         if let Some(cell) = self.pipes.get(&recipe) {
             return cell.clone();
         }
         let cell: Arc<pipeline::Cell> = Arc::new(OnceLock::new());
         self.pipes.insert(recipe.clone(), cell.clone());
-        if urgent && recipe.variant == [0; 4] {
-            self.recipes_new.push(recipe.clone());
-        }
+        self.recipes_new.push(recipe.clone());
         let (compiler, c) = (self.compiler.clone(), cell.clone());
         let job = move || {
-            c.get_or_init(|| compiler.compile(&vs, &sig, ps.as_deref(), &recipe));
+            c.get_or_init(|| compiler.compile(&vs, ps.as_deref(), &recipe));
         };
-        if self.settings.sync_pipelines && urgent {
+        if self.settings.sync_pipelines {
             job();
-        } else if urgent {
-            self.pool.urgent(job);
         } else {
-            self.pool.background(job);
+            self.pool.urgent(job);
         }
         cell
-    }
-
-    /// Queues recipes of earlier runs whose shaders are ready. Recipes whose
-    /// shaders the engine has not created yet wait for new shaders.
-    pub fn compile_ahead(&mut self, budget: std::time::Duration) {
-        if self.ahead.is_empty() && !self.ahead_waiting.is_empty() && self.shaders_by_hash.len() != self.ahead_shaders {
-            self.ahead_shaders = self.shaders_by_hash.len();
-            self.ahead.extend(self.ahead_waiting.drain(..));
-        }
-        if self.ahead.is_empty() || self.pool.background_queued() > 64 {
-            return;
-        }
-        enum Ready {
-            Yes(Arc<[pipeline::SigElement]>, Arc<Program>),
-            Later,
-            Never,
-        }
-        let ready = |gpu: &Gpu, hash: u64| match gpu.shaders_by_hash.get(&hash) {
-            None => Ready::Later,
-            Some((sig, slot)) => match slot.get() {
-                None => Ready::Later,
-                Some(None) => Ready::Never,
-                Some(Some(p)) => Ready::Yes(sig.clone(), p.clone()),
-            },
-        };
-        let t0 = std::time::Instant::now();
-        while t0.elapsed() < budget
-            && let Some(r) = self.ahead.pop_front()
-        {
-            if self.pipes.contains_key(&r) {
-                continue;
-            }
-            let (sig, vs) = match ready(self, r.vs) {
-                Ready::Yes(sig, vs) => (sig, vs),
-                Ready::Later => {
-                    self.ahead_waiting.push(r);
-                    continue;
-                }
-                Ready::Never => continue,
-            };
-            let ps = match r.ps.map(|h| ready(self, h)) {
-                None => None,
-                Some(Ready::Yes(_, ps)) => Some(ps),
-                Some(Ready::Later) => {
-                    self.ahead_waiting.push(r);
-                    continue;
-                }
-                Some(Ready::Never) => continue,
-            };
-            let ps = if r.hud_mask {
-                let Some(ps) = ps.and_then(|p| p.for_hud_mask(&self.device)) else {
-                    continue;
-                };
-                Some(ps)
-            } else {
-                ps
-            };
-            self.pipeline_for(r, vs, ps, sig, false);
-            self.stats.pipelines_ahead += 1;
-        }
     }
 
     // ---- bind groups -----------------------------------------------------------------

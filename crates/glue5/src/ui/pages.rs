@@ -51,11 +51,25 @@ pub(super) fn start_page(
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 6.0 * scale;
-                                ui.add_enabled_ui(status.game_dir.is_some() && !starting, |ui| {
-                                    play =
-                                        menu_button(ui, menu_width, if starting { "STARTING…" } else { "PLAY" }, true)
-                                            .clicked();
+                                let busy = starting || status.preparing.is_some();
+                                ui.add_enabled_ui(status.game_dir.is_some() && !busy, |ui| {
+                                    let label = match status.preparing {
+                                        Some(done) => format!("PREPARING {:.0}%", done * 100.0),
+                                        None if starting => "STARTING…".into(),
+                                        None => "PLAY".into(),
+                                    };
+                                    play = menu_button(ui, menu_width, &label, true).clicked();
                                 });
+                                if status.preparing.is_some() {
+                                    ui.label(
+                                        RichText::new(
+                                            "Compiling the game's shaders for this device: minutes the first time, \
+                                             seconds after.",
+                                        )
+                                        .small()
+                                        .color(theme::MUTED),
+                                    );
+                                }
                                 if menu_button(ui, menu_width, "SETTINGS", false).clicked() {
                                     *go = Some(Some(Page::Settings));
                                 }
@@ -426,6 +440,7 @@ mod tests {
             metalfx: true,
             metal_hud: false,
             refresh_rate: 120.0,
+            preparing: None,
         }
     }
 

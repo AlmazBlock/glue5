@@ -93,18 +93,46 @@ already has HTTP file imports (`wasm_httpfs_*`), currently stubbed here.
 This would be implemented in the VFS and is not required for the initial
 release.
 
-## Shaders: no full precompile
+## Shaders: known pipelines before the game
 
-The 4919 translated WGSL shaders are adapted and
-compiled, with their render pipelines, on background threads. A draw whose
-pipeline is not ready is skipped for that frame instead of waiting, so a new
-pipeline never stalls a frame; the cost is an object missing for a frame or
-two. Every pipeline the game asks for is recorded
-(`<user dir>/cache/pipelines.jsonl`) and, together with the seed that comes
-with the game (`shaders/pipelines.json`, 720 recipes), compiled ahead at the
-next start, in the background while the game loads. Metal keeps compiled
-shaders in the system cache; on Vulkan the pipeline cache is saved to
-`cache/`.
+The 4919 translated WGSL shaders are adapted and compiled, with their render
+pipelines, on background threads. Pipelines are what costs: each combines a
+shader pair, vertex layout, blend/depth/raster states and target formats, so
+they cannot all be enumerated, and the combinations appear during play.
+Every pipeline the game asks for is recorded
+(`<user dir>/cache/pipelines.jsonl`, with the vertex shader's input
+signature, which places the layout's elements).
+
+Before the game starts, Play compiles the known pipelines on every core: the
+app's seed (`crates/glue5-gpu/seed/pipelines.jsonl`, recipes merged from
+playthroughs on several devices with `mise run shaders:seed`; hashes and
+states only, no game data) and this device's recordings. The start page
+shows how far it is; the renderer then takes the pipelines over. This is
+the usual practice (Steam's Fossilize replay, Unreal's PSO cache): record,
+ship the set, compile it before the world shows.
+
+The driver's cache makes it cheap after the first time: Metal keeps
+compiled shaders in the system cache (macOS and iOS); on Vulkan the app
+saves wgpu's pipeline cache per adapter and driver in `cache/`. Measured
+with the ~5,600-recipe seed: an iPhone 13 Pro compiles a pipeline it has not
+seen in ~200 ms of CPU while the game runs, one in its cache in ~2 ms; it
+prepares the whole seed in 80-100 s the first time, a Mac in 56 s, and
+0.9 s after. Without this, the first run on the phone showed the world with
+objects and lights missing for about 40 s after the loading screen (20,000
+draws skipped in 10 s, the compile threads saturated), because the world is
+not drawn behind the loading screen and its pipelines appear only when it
+shows; with it, 564 draws were skipped in those 10 s, then a few dozen.
+
+Recipes include the program variants the renderer picks for what is bound
+(depth buffers read as textures, everywhere; 32-bit float textures read
+unfiltered, on GPUs that cannot filter them, such as the A15 and most
+Android GPUs). The light and foliage shaders use them, so they are recorded
+and prepared too.
+
+Pipelines never recorded still compile in the background during play: a
+draw whose pipeline is not ready is skipped for that frame instead of
+waiting, so a new pipeline never stalls a frame; the cost is an object
+missing for a frame or two. They are recorded for the next start.
 
 The radar's antialiased pixel shader expects edge distances from a geometry
 shader, which WebGPU cannot run. Its load-time adapter supplies full coverage
@@ -119,19 +147,6 @@ normalized coordinates to clip space. Pause-map exploration is identified
 by its MIN alpha blend and keeps the original depth pixel program with the
 world-space transform vertex shader. Neither correction changes game assets.
 The same mask variant is selected when compiling recorded recipes ahead.
-
-We cannot enumerate every pipeline in advance. Each combines a shader
-pair, vertex layout, blend/depth/raster states and target formats; actual
-combinations are discovered during play. Compiling all shaders would take
-minutes on a phone after each game build or driver update and use memory
-needed by the game. It would also leave pipeline compilation unfinished,
-which is where Metal and Vulkan do most of the work. Recording pipelines
-as they are used lets later runs prepare the relevant combinations.
-
-Metal uses the system shader cache on macOS and iOS. On Vulkan, the app
-saves wgpu's pipeline cache per adapter and driver. To improve first-run
-coverage, merge `pipelines.jsonl` from several playthroughs into the game's
-`pipelines.json` seed.
 
 ## Application UI and game menus
 

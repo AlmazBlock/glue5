@@ -74,6 +74,7 @@ debug and release builds; later builds only recompile what changed.
 | macOS: build a distributable disk image | `mise run macos:package` |
 | Run without a window: scripted input, PNG shots, statistics | `mise run headless --press 30 start --for 40 --shots 300 shots` (`mise run headless -- --help` lists the options) |
 | Tests | `mise run test`; every translated shader through the adapter and naga's validator: `mise run test:shaders` |
+| Merge recorded pipelines into the app's seed | `mise run shaders:seed <pipelines.jsonl>...` |
 | iOS: build, sign, install, launch on the connected device | `mise run ios [device]` |
 | iOS: only check that the app builds | `mise run ios:build` |
 | iOS: launch the installed app again, with its console | `mise run ios:run [device]` |
@@ -167,10 +168,14 @@ resolution. With a frame rate set, Apple platforms show frames at that pace,
 each for the same time ([frame pacing](docs/design.md#frame-pacing)): on
 120 Hz displays 40 is offered too.
 
-Pipeline recipes are recorded in `<user dir>/cache/pipelines.jsonl` and, with
-the game's seed (`shaders/pipelines.json`), compiled ahead on later runs. The
-first run on a machine is slow to show the world: Metal compiles every shader
-for the first time (the system keeps them afterwards).
+Pipeline recipes are recorded in `<user dir>/cache/pipelines.jsonl`. Before
+the game starts, Play compiles the pipelines known for it (the app's seed,
+`crates/glue5-gpu/seed/`, and the recorded ones) while the start page shows
+how far it is: minutes on a phone's first run (an iPhone 13 Pro takes ~200 ms
+of CPU per pipeline the system has not seen), about a second after, when
+Metal's system cache or the saved Vulkan pipeline cache has them. Merge
+recordings from new playthroughs into the seed with
+`mise run shaders:seed <pipelines.jsonl>...`.
 
 ## Platforms
 

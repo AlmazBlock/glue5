@@ -1,7 +1,7 @@
 //! Render pipelines, by content: a [`Recipe`] is everything a pipeline is
 //! made of (shaders, input layout, strides, states, target formats). Recipes
-//! seen are kept on disk and, with the game's seed (`shaders/pipelines.json`,
-//! the browser build's format), compiled ahead on later runs.
+//! seen are kept on disk and, with the app's seed, compiled before the game
+//! starts on later runs (see `prepare.rs`).
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -30,6 +30,9 @@ pub type Element = [u32; 7];
 pub struct Recipe {
     pub vs: u64,
     pub ps: Option<u64>,
+    /// The vertex shader's input signature (from the engine when it creates
+    /// the shader): it places the layout's elements.
+    pub sig: Arc<[SigElement]>,
     pub elements: Vec<Element>,
     /// Stride of each slot the layout uses, in [`slots`] order (0: unbound).
     pub strides: Vec<u32>,
@@ -45,8 +48,8 @@ pub struct Recipe {
     /// 1: read-only depth, 2: read-only stencil.
     pub read_only: u8,
     /// The programs' variants for what is bound (`Program::for_bindings`):
-    /// vertex unfiltered and depth, pixel unfiltered and depth. Not recorded:
-    /// the recipes compiled ahead are for the programs as loaded.
+    /// vertex unfiltered and depth, pixel unfiltered and depth (bits by SRV
+    /// slot; unfiltered includes the depth bits).
     pub variant: [u128; 4],
     /// Uses the HUD coverage program rather than the original depth blit.
     pub hud_mask: bool,
@@ -135,10 +138,10 @@ impl Compiler {
     }
 
     /// Builds the pipeline (any thread). Failures are logged and give `None`.
-    pub fn compile(&self, vs: &Program, sig: &[SigElement], ps: Option<&Program>, r: &Recipe) -> Option<Pipe> {
+    pub fn compile(&self, vs: &Program, ps: Option<&Program>, r: &Recipe) -> Option<Pipe> {
         let t0 = Instant::now();
         let label = format!("{} + {}", vs.label, ps.map_or("-", |p| &p.label));
-        let result = self.build(vs, sig, ps, r, &label);
+        let result = self.build(vs, ps, r, &label);
         self.compile_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         match result {
             Ok(pipe) => {
@@ -153,14 +156,7 @@ impl Compiler {
         }
     }
 
-    fn build(
-        &self,
-        vs: &Program,
-        sig: &[SigElement],
-        ps: Option<&Program>,
-        r: &Recipe,
-        label: &str,
-    ) -> anyhow::Result<Pipe> {
+    fn build(&self, vs: &Program, ps: Option<&Program>, r: &Recipe, label: &str) -> anyhow::Result<Pipe> {
         let features = self.caps.features;
         let remap = shader::remap_locations(vs, ps, self.max_inter_stage);
         let interpolation = ps.map_or(&[][..], |p| &p.interpolation);
@@ -194,7 +190,7 @@ impl Compiler {
         let slot_list = slots(&r.elements);
         let mut attributes: Vec<(u32, wgpu::VertexAttribute)> = Vec::new();
         for e in &r.elements {
-            let Some(s) = sig.iter().find(|s| s.semantic == e[0] && s.index == e[1]) else {
+            let Some(s) = r.sig.iter().find(|s| s.semantic == e[0] && s.index == e[1]) else {
                 continue;
             };
             let Some(format) = format::vertex(e[2]) else {
@@ -431,15 +427,16 @@ fn dual_source_fallback(f: wgpu::BlendFactor, _features: Features) -> wgpu::Blen
     }
 }
 
-// ---- recipes on disk (the browser build's JSON format) ------------------------
+// ---- recipes on disk (the browser build's JSON format, with the signature) ----
 
 impl Recipe {
     pub fn to_json(&self) -> Value {
         let words = |w: &Option<Box<[u32]>>| w.as_ref().map(|w| json!(w.to_vec()));
         let strip = ["", "uint16", "uint32"][self.strip as usize];
-        json!({
+        let mut v = json!({
             "vs": format!("{:016x}", self.vs),
             "ps": self.ps.map(|h| format!("{h:016x}")).unwrap_or_default(),
+            "sig": self.sig.iter().map(|s| [s.semantic, s.index, s.register]).collect::<Vec<_>>(),
             "el": self.elements,
             "st": self.strides,
             "tp": self.topology,
@@ -452,7 +449,11 @@ impl Recipe {
             "ds": self.depth_format.map(format::name).unwrap_or(""),
             "ro": self.read_only,
             "hud_mask": self.hud_mask,
-        })
+        });
+        if self.variant != [0; 4] {
+            v["variant"] = json!(self.variant.map(|m| format!("{m:x}")));
+        }
+        v
     }
 
     pub fn from_json(v: &Value) -> Option<Recipe> {
@@ -480,9 +481,19 @@ impl Recipe {
                 Some(out)
             })
             .collect::<Option<Vec<_>>>()?;
+        let sig = v
+            .get("sig")?
+            .as_array()?
+            .iter()
+            .map(|s| {
+                let w = |i: usize| s.get(i).and_then(Value::as_u64).map(|x| x as u32);
+                Some(SigElement { semantic: w(0)?, index: w(1)?, register: w(2)? })
+            })
+            .collect::<Option<_>>()?;
         Some(Recipe {
             vs: hex("vs")?,
             ps: hex("ps"),
+            sig,
             elements,
             strides: v.get("st")?.as_array()?.iter().map(|x| x.as_u64().map(|x| x as u32)).collect::<Option<_>>()?,
             topology: u("tp")?,
@@ -499,33 +510,31 @@ impl Recipe {
             depth_format: v.get("ds").and_then(Value::as_str).and_then(format::by_name),
             read_only: u("ro").unwrap_or(0) as u8,
             hud_mask: v.get("hud_mask").and_then(Value::as_bool).unwrap_or(false),
-            variant: [0; 4],
+            variant: match v.get("variant") {
+                None => [0; 4],
+                Some(a) => {
+                    let mask = |i: usize| u128::from_str_radix(a.get(i)?.as_str()?, 16).ok();
+                    [mask(0)?, mask(1)?, mask(2)?, mask(3)?]
+                }
+            },
         })
     }
 }
 
-/// Recipes of earlier runs (and the game's seed), to compile ahead.
-pub fn load_recipes(paths: &[std::path::PathBuf]) -> Vec<Arc<Recipe>> {
-    let mut out: Vec<Arc<Recipe>> = Vec::new();
+/// The recipes seen while playing this game build, gathered from several
+/// devices (`mise run shaders:seed`).
+const SEED: &str = include_str!("../seed/pipelines.jsonl");
+
+/// The recipes known before the game starts: the seed and this device's
+/// (`<cache>/pipelines.jsonl`), each once. Lines in another format (without
+/// a signature) are skipped.
+pub fn known_recipes(cache_dir: Option<&std::path::Path>) -> Vec<Arc<Recipe>> {
+    let recorded = cache_dir.and_then(|d| std::fs::read_to_string(d.join("pipelines.jsonl")).ok()).unwrap_or_default();
     let mut seen = rustc_hash::FxHashSet::default();
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let values: Vec<Value> = if text.trim_start().starts_with('[') {
-            serde_json::from_str(&text).unwrap_or_default()
-        } else {
-            text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
-        };
-        let before = out.len();
-        for v in &values {
-            if let Some(r) = Recipe::from_json(v)
-                && seen.insert(r.clone())
-            {
-                out.push(Arc::new(r));
-            }
-        }
-        log::info!("gpu: {} pipeline recipes from {}", out.len() - before, path.display());
-    }
-    out
+    SEED.lines()
+        .chain(recorded.lines())
+        .filter_map(|l| Recipe::from_json(&serde_json::from_str(l).ok()?))
+        .filter(|r| seen.insert(r.clone()))
+        .map(Arc::new)
+        .collect()
 }
