@@ -162,6 +162,25 @@ command line, skips the start page.
 wasm name. Signatures come from the module; an unset hook keeps the original,
 and a hook can call the original through `glue5_game::orig`.
 
+## Future work
+
+- **Give freed wasm memory back to the system.** The wasm memory is only
+  reserved (16 GiB of address space); its pages count once the engine writes
+  them, and then for good: wasm has no `munmap` or `madvise`, so memory the
+  engine frees stays in the footprint. Most of the ~1.3 GB written is the
+  engine's own data (macOS, low memory, early in story mode: the resource
+  heap at 1023 MiB with ~770 in use, ~500 MB of other heaps). Hooks on
+  `rage::sysMemGrowBuddyAllocator::Free` (its bookkeeping looks to be kept
+  outside the blocks, which needs checking) and on large frees of the game's
+  malloc (the pages inside the chunk) could hand whole freed pages back
+  (`MADV_FREE_REUSABLE` on Apple platforms, `MADV_DONTNEED` elsewhere): at
+  most ~250 MB there, less where free space was never written. No compiler
+  or wasm flag changes how much the engine writes.
+- **Reserve, not commit, the wasm memory on Windows.** `map` allocates the
+  whole range committed, which counts against the page file's commit limit
+  (not RAM); `VirtualAlloc` with `MEM_RESERVE`, committing as the memory
+  grows, would not.
+
 ## Notes
 
 - Game data must be the copies prepared for the browser build (re-keyed archives).
