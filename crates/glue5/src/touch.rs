@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use egui::{Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2, pos2, vec2};
 use glue5_runtime::input::{Gamepad, button};
 
+use crate::haptics;
+
 /// Stick travel, in points (scaled with the controls).
 const STICK_RADIUS: f32 = 56.0;
 /// Phones are held closer: their controls are this much smaller.
@@ -111,12 +113,14 @@ pub struct Touch {
     /// Where the controls go: clear of notches and rounded corners.
     area: Rect,
     scale: f32,
+    /// A tap under each button or D-pad direction pressed.
+    pub haptics: bool,
 }
 
 impl Touch {
     pub fn new() -> Self {
         let area = Rect::from_min_size(Pos2::ZERO, vec2(1.0, 1.0));
-        Touch { fingers: HashMap::new(), pressed: 0, screen: area.size(), area, scale: 1.0 }
+        Touch { fingers: HashMap::new(), pressed: 0, screen: area.size(), area, scale: 1.0, haptics: false }
     }
 
     /// The window's size and safe area in points, and the controls' size
@@ -176,6 +180,9 @@ impl Touch {
             Finger::Dpad(bit) => bit,
             _ => 0,
         };
+        if self.haptics && matches!(finger, Finger::Button(_) | Finger::Dpad(_)) {
+            haptics::tap();
+        }
         self.fingers.insert(id, finger);
     }
 
@@ -186,6 +193,10 @@ impl Touch {
             Some(Finger::Move { at, .. } | Finger::Look { at, .. }) => *at = p,
             Some(Finger::Dpad(dir)) => {
                 if let Some(d) = dpad {
+                    // Rolling onto another arm is a new press.
+                    if d != *dir && self.haptics {
+                        haptics::tap();
+                    }
                     *dir = d;
                     self.pressed |= d;
                 }

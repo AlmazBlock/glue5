@@ -34,3 +34,18 @@ serde_json.workspace = true
 wgpu.workspace = true
 sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
 png = "0.18"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# The Taptic Engine, for the touch controls' haptics (UIKit and CoreHaptics
+# are linked already).
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError"] }
+objc2-core-haptics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CHHapticDeviceCapability",
+    "CHHapticEngine",
+    "CHHapticEvent",
+    "CHHapticParameter",
+    "CHHapticPattern",
+    "CHHapticPatternPlayer",
+] }

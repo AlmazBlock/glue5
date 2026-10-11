@@ -369,6 +369,9 @@ fn settings_items(
             setting(ui, "Opacity", Control::Slider, None, |ui| {
                 slider(ui, &mut settings.touch_opacity, 0.2..=1.0, 0.01, "%", 0)
             });
+            if crate::haptics::SUPPORTED {
+                setting(ui, "Haptics", Control::Toggle, None, |ui| toggle(ui, &mut settings.haptics));
+            }
         }
         SettingsTab::Game => {
             let r = setting(

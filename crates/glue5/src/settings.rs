@@ -34,6 +34,8 @@ pub struct Settings {
     pub touch: TouchMode,
     pub touch_opacity: f32,
     pub touch_size: f32,
+    /// The Taptic Engine taps under pressed touch controls and plays the game's rumble (iPhone).
+    pub haptics: bool,
     /// Settings saved before the render scale: the back buffer's height.
     #[serde(skip_serializing)]
     render_height: Option<u32>,
@@ -71,6 +73,7 @@ impl Default for Settings {
             touch: TouchMode::Auto,
             touch_opacity: 0.6,
             touch_size: 1.0,
+            haptics: true,
             render_height: None,
         }
     }

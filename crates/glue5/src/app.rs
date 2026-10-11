@@ -21,6 +21,7 @@ use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::Scancode;
 use sdl3::mouse::MouseButton;
 
+use crate::haptics;
 use crate::paths::{self, MOBILE};
 use crate::settings::{self, Settings, TouchMode};
 use crate::touch::Touch;
@@ -346,8 +347,12 @@ impl App {
         }
         if show {
             let (w, h) = self.window.size();
+            self.touch.haptics = self.settings.haptics;
             self.touch.layout(egui::vec2(w as f32, h as f32), ui::safe_rect(&self.window), self.settings.touch_size);
             glue5_runtime::input::set_gamepad(0, self.touch.gamepad());
+            if self.settings.haptics {
+                haptics::rumble(glue5_runtime::input::rumble(0));
+            }
         }
 
         // While the touch controls are pad 0, a controller in slot 0 waits.

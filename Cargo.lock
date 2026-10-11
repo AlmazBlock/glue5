@@ -604,6 +604,9 @@ dependencies = [
  "glue5-gpu",
  "glue5-runtime",
  "log",
+ "objc2",
+ "objc2-core-haptics",
+ "objc2-foundation",
  "png",
  "sdl3",
  "serde",
@@ -997,6 +1000,16 @@ dependencies = [
  "objc2",
  "objc2-core-foundation",
  "objc2-io-surface",
+]
+
+[[package]]
+name = "objc2-core-haptics"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbf2dae8a5e651adec3af54059cbce15e3aadbf8913da9782e1e1affc29aa512"
+dependencies = [
+ "objc2",
+ "objc2-foundation",
 ]
 
 [[package]]

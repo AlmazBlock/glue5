@@ -13,6 +13,7 @@
 
 mod app;
 mod audio;
+mod haptics;
 mod keymap;
 mod pads;
 mod paths;
