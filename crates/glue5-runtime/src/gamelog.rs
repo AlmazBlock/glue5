@@ -53,6 +53,17 @@ pub(crate) fn line(text: &str) {
     write(&bytes);
 }
 
+/// A fatal error the engine reports ("Fatal Error: ..."): it then waits for
+/// an OK that never comes ("Press Ok to abort the program"), the screen
+/// frozen, so the game has stopped.
+fn fatal_error(bytes: &[u8]) -> Option<String> {
+    const MARK: &[u8] = b"Fatal Error: ";
+    let at = bytes.windows(MARK.len()).position(|w| w == MARK)? + MARK.len();
+    let rest = &bytes[at..];
+    let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+    Some(format!("the engine failed: {}", String::from_utf8_lossy(&rest[..end]).trim()))
+}
+
 fn run(rx: Receiver<Vec<u8>>, file: File, to_stdout: bool) {
     crate::qos::set(crate::qos::Qos::Utility);
     let mut file = BufWriter::with_capacity(1 << 20, file);
@@ -60,6 +71,9 @@ fn run(rx: Receiver<Vec<u8>>, file: File, to_stdout: bool) {
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(bytes) => {
+                if let Some(why) = fatal_error(&bytes) {
+                    crate::exit::fail(why);
+                }
                 let _ = file.write_all(&bytes);
                 if let Some(out) = &mut stdout {
                     let _ = out.write_all(&bytes);
@@ -81,4 +95,19 @@ fn run(rx: Receiver<Vec<u8>>, file: File, to_stdout: bool) {
         }
     }
     let _ = file.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_engine_s_fatal_errors() {
+        let line = b"Fatal Error: <HDD Reader> Short read on /game/x.rpf - got -1\n";
+        assert_eq!(
+            fatal_error(line).as_deref(),
+            Some("the engine failed: <HDD Reader> Short read on /game/x.rpf - got -1")
+        );
+        assert_eq!(fatal_error(b"Error: something else\n"), None);
+    }
 }

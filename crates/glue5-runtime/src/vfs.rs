@@ -103,6 +103,7 @@ pub struct Host {
 
 impl Vfs {
     pub fn new(game_data: PathBuf, user: PathBuf) -> io::Result<Self> {
+        raise_open_file_limit();
         let scratch = user.join("fsroot");
         fs::create_dir_all(&scratch)?;
         let mut game_index = HashMap::new();
@@ -424,6 +425,31 @@ fn stat_of(meta: &fs::Metadata) -> Stat {
         atime: meta.accessed().unwrap_or(UNIX_EPOCH),
         mtime: meta.modified().unwrap_or(UNIX_EPOCH),
         ctime: meta.modified().unwrap_or(UNIX_EPOCH),
+    }
+}
+
+/// The engine keeps hundreds of the game's packfiles open, a host file each;
+/// a process started from the Finder or the home screen may have 256 open at
+/// most (launchd's default), and the engine fails at load ("short read" on
+/// a packfile it could not open). Raised to what the system allows.
+fn raise_open_file_limit() {
+    #[cfg(unix)]
+    unsafe {
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+            return;
+        }
+        // macOS takes no more than OPEN_MAX (10240) under an unlimited hard limit.
+        let want = limit.rlim_max.min(10240);
+        if limit.rlim_cur < want {
+            let was = limit.rlim_cur;
+            limit.rlim_cur = want;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) == 0 {
+                log::info!("open files: up to {want} (was {was})");
+            } else {
+                log::warn!("open files: still {was} at most: {}", io::Error::last_os_error());
+            }
+        }
     }
 }
 
