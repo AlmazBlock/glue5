@@ -184,6 +184,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     }
     let hooks = glue5_game::Hooks {
         pad_update: Some(input::pad_update),
+        pad_debug: Some(input::pad_debug),
         text_box_open: Some(input::text_box_open_hook),
         text_box_close: Some(input::text_box_close_hook),
         want_to_exit: Some(exit::want_to_exit),

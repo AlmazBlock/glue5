@@ -88,13 +88,51 @@ const PAD_ANALOG: u64 = 24; // analog button values; [0] = L2, [1] = R2
 const PAD_HAS_ANALOG: u64 = 55; // 1: CPad reads the analog trigger values
 const PAD_MOTORS: u64 = 66; // u16 low, u16 high (ioPad::SetActuatorValue)
 
-/// Hook for `rage::ioPad::Update(bool)`: the original runs first (it resets the
-/// pad and merges the engine's own injected input), then the host's state is
-/// merged on top.
-///
-/// START and SELECT reach the game as a tap when released: RAGE's
-/// `ioPad::UpdateDebug` holds back buttons in its combo mask (START|SELECT)
-/// while they are down, as on PC.
+/// Pad buttons the game gets as keys: START as Esc (the pause menu), Back as
+/// V (the camera view). This build's front end takes those from the keyboard
+/// only (its prompts stay the keyboard's whatever pad is used): from a pad,
+/// START never opened the pause menu, and after it the pad's other buttons
+/// went unanswered (the sticks still worked).
+const AS_KEYS: [(u16, u8); 2] = [(button::START, 0x1B), (button::SELECT, b'V')];
+const AS_KEYS_MASK: u16 = button::START | button::SELECT;
+
+/// The [`AS_KEYS`] buttons down at the engine's last read, per pad.
+static KEYS_HELD: Mutex<[u16; MAX_PADS]> = Mutex::new([0; MAX_PADS]);
+
+/// Hook for `rage::ioPad::UpdateDebug()`, which `ioPad::Update` calls once it
+/// has read the pad's device: the host's buttons go in there, as a device's
+/// would, so the engine takes them alike.
+pub(crate) unsafe extern "C" fn pad_debug(env: *mut Env, pad: u64) {
+    let mem = unsafe { Mem::of(env) };
+    let slot = mem.u32(pad + PAD_INDEX) as usize;
+    if let Some(state) = PADS.lock().unwrap().get(slot).copied()
+        && state.connected
+    {
+        let buttons = state.buttons | std::mem::take(&mut PRESSED.lock().unwrap()[slot]);
+        keys_from_pad(mem, &mut KEYS_HELD.lock().unwrap()[slot], buttons);
+        mem.set_u32(pad + PAD_BUTTONS, mem.u32(pad + PAD_BUTTONS) | (buttons & !AS_KEYS_MASK) as u32);
+    }
+    unsafe { orig::pad_debug(env, pad) };
+}
+
+/// Presses or lets go of the keys of the [`AS_KEYS`] buttons that changed
+/// (only then: a key held on a real keyboard is left alone).
+fn keys_from_pad(mem: Mem, held: &mut u16, buttons: u16) {
+    let block = crate::rt().input_block.load(Ordering::Relaxed);
+    if block == 0 {
+        return;
+    }
+    for (bit, vk) in AS_KEYS {
+        let down = buttons & bit != 0;
+        if down != (*held & bit != 0) {
+            mem.set_u8(block + KEYS + vk as u64, if down { 0x80 } else { 0 });
+        }
+    }
+    *held = buttons & AS_KEYS_MASK;
+}
+
+/// Hook for `rage::ioPad::Update(bool)`: once it has run (the buttons went in
+/// through [`pad_debug`]), the host's sticks and triggers are merged on top.
 pub(crate) unsafe extern "C" fn pad_update(env: *mut Env, pad: u64) {
     unsafe { orig::pad_update(env, pad) };
     let mem = unsafe { Mem::of(env) };
@@ -102,12 +140,10 @@ pub(crate) unsafe extern "C" fn pad_update(env: *mut Env, pad: u64) {
     if let Some(r) = RUMBLE.lock().unwrap().get_mut(slot) {
         *r = (mem.u16(pad + PAD_MOTORS), mem.u16(pad + PAD_MOTORS + 2));
     }
-    let Some(mut state) = PADS.lock().unwrap().get(slot).copied() else { return };
-    state.buttons |= std::mem::take(&mut PRESSED.lock().unwrap()[slot]);
+    let Some(state) = PADS.lock().unwrap().get(slot).copied() else { return };
     if !state.connected {
         return;
     }
-    mem.set_u32(pad + PAD_BUTTONS, mem.u32(pad + PAD_BUTTONS) | state.buttons as u32);
     let axis = |v: f32| ((v.clamp(-1.0, 1.0) + 1.0) * 127.5).round() as u8;
     for (i, v) in [state.left[0], state.left[1], state.right[0], state.right[1]].into_iter().enumerate() {
         // Keep the original value when the host reports a centred stick.
