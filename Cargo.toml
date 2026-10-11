@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# xtask is a workspace of its own: it prepares third_party/wgpu-core, which
+# this one needs before it can load.
+exclude = ["third_party", "xtask"]
+default-members = ["crates/glue5"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+glue5-game = { path = "crates/glue5-game" }
+glue5-runtime = { path = "crates/glue5-runtime" }
+glue5-gpu = { path = "crates/glue5-gpu" }
+glue5 = { path = "crates/glue5" }
+
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+egui = "0.36"
+egui-wgpu = { version = "0.36", default-features = false }
+serde_json = "1"
+wgpu = { version = "30", default-features = false }
+
+# build-time
+cc = { version = "1", features = ["parallel"] }
+sha2 = "0.11"
+wasmparser = "0.261"
+
+[profile.release]
+debug = "line-tables-only"
+
+# The game's generated C is always compiled with optimisations (see
+# glue5-game/build.rs); this only affects the Rust side.
+[profile.dev.package."*"]
+opt-level = 1
+
+# wgpu-core with our patches (patches/wgpu-core) on top of the release,
+# prepared by `cargo xtask setup`.
+[patch.crates-io]
+wgpu-core = { path = "third_party/wgpu-core" }

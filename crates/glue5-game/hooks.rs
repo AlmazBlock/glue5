@@ -1,0 +1,31 @@
+// Game functions the host can take over.
+//
+// Each entry pairs a field name with the function's name in the wasm name
+// section. The build script finds the function, derives its signature from the
+// module and routes every call to it through `Hooks::<field>`. An unset hook
+// falls back to the original, and a hook can call the original through
+// `orig::<field>`. Hooks receive the same `*mut Env` as imports. An entry
+// the host leaves unset gives it a way to call that game function.
+//
+// This file is included by the build script.
+
+pub const HOOKS: &[(&str, &str)] = &[
+    // Once per frame for each of the 4 pads: feeds native gamepads (this build
+    // has no XInput and never fills the DirectInput stick table).
+    ("pad_update", "rage::ioPad::Update(bool)"),
+    // The game's text box (save names, the phone's cheat entry, ...): touch
+    // devices show the system keyboard while it is open.
+    ("text_box_open", "CTextInputBox::Open(rage::ioVirtualKeyboard::Params const&)"),
+    ("text_box_close", "CTextInputBox::Close()"),
+    // The engine's way out: asked by the main loop whether to leave it and
+    // shut down ("Exit Game"), and the first step of the restart some
+    // graphics settings need. The shutdown never finishes in this port; the
+    // host ends the process instead.
+    ("want_to_exit", "CSystem::WantToExit()"),
+    ("rl_shutdown", "rage::rlShutdown()"),
+    // The resource heap grows whenever the streaming engine asks how much
+    // memory is left; the host caps it on low-memory devices (and only calls
+    // GetHeapSize, to know the heap's size).
+    ("grow_heap", "rage::sysMemGrowBuddyAllocator::GrowHeap()"),
+    ("heap_size", "rage::sysMemGrowBuddyAllocator::GetHeapSize() const"),
+];

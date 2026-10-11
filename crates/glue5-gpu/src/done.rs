@@ -1,0 +1,249 @@
+//! Completions: what the engine waits on (fences, queries, readbacks) is
+//! finished by a thread of its own once the GPU is done with the submission,
+//! so the command thread never blocks on the GPU for them.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
+
+use glue5_runtime::gpu::{OCCLUSION_VISIBLE_COUNT, store_query};
+use glue5_runtime::memory::Mem;
+
+pub enum Work {
+    /// A fence: store `value` at `at` and wake waiters.
+    Store {
+        at: u64,
+        value: u32,
+    },
+    Query {
+        at: u64,
+        result: u64,
+        seq: u32,
+    },
+    /// GPU data into wasm memory, then the flag word to 0.
+    Readback {
+        staging: Staging,
+        copy: Copy,
+        flag: u64,
+    },
+    /// Occlusion results: per query, its slots' 8-byte counts.
+    Occlusion {
+        staging: Staging,
+        queries: Vec<OcclusionResult>,
+    },
+    /// Pass timestamps (`GLUE5_GPU_PROFILE`).
+    Profile {
+        staging: Staging,
+        resolved: crate::profile::Resolved,
+    },
+    Screenshot {
+        staging: Staging,
+        width: u32,
+        height: u32,
+        bpr: u32,
+        format: wgpu::TextureFormat,
+        path: PathBuf,
+    },
+}
+
+pub struct OcclusionResult {
+    pub at: u64,
+    pub seq: u32,
+    /// Byte offsets of the query's counts in the staging buffer.
+    pub offsets: Vec<u32>,
+}
+
+pub enum Copy {
+    Bytes {
+        to: u64,
+        len: usize,
+    },
+    /// Rows of a texture copy (`bpr`-aligned) to the engine's pitches.
+    Rows {
+        to: u64,
+        rows: u32,
+        row_bytes: u32,
+        bpr: u32,
+        row_pitch: u32,
+        depth: u32,
+        slice_pitch: u32,
+        /// Keep only this byte of each 4-byte texel (an A8 texture stored as
+        /// RGBA8 reads back as A8).
+        pick: Option<u8>,
+    },
+}
+
+/// A mappable buffer being read back; returned to the pool afterwards.
+pub struct Staging {
+    pub buffer: wgpu::Buffer,
+    mapped: Arc<AtomicU8>,
+}
+
+/// MAP_READ buffers, reused.
+#[derive(Default)]
+pub struct StagingPool {
+    free: Mutex<Vec<wgpu::Buffer>>,
+}
+
+impl StagingPool {
+    pub fn get(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+        let size = size.max(256).next_power_of_two();
+        let mut free = self.free.lock().unwrap();
+        if let Some(i) = free.iter().position(|b| b.size() == size) {
+            return free.swap_remove(i);
+        }
+        drop(free);
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn put(&self, buffer: wgpu::Buffer) {
+        let mut free = self.free.lock().unwrap();
+        if free.len() < 16 {
+            free.push(buffer);
+        }
+    }
+}
+
+impl Staging {
+    /// Starts mapping `buffer`; call right after the submit that fills it.
+    pub fn map(buffer: wgpu::Buffer) -> Staging {
+        let mapped = Arc::new(AtomicU8::new(0));
+        let m = mapped.clone();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| m.store(if r.is_ok() { 1 } else { 2 }, Ordering::Release));
+        Staging { buffer, mapped }
+    }
+}
+
+pub struct Done {
+    tx: Sender<(wgpu::SubmissionIndex, Vec<Work>)>,
+}
+
+impl Done {
+    pub fn start(device: wgpu::Device, mem: Mem, pool: Arc<StagingPool>) -> Done {
+        let (tx, rx) = channel();
+        std::thread::Builder::new()
+            .name("gpu done".into())
+            .spawn(move || run(device, mem, pool, rx))
+            .expect("spawning the GPU completion thread");
+        Done { tx }
+    }
+
+    /// Runs `work` once `submission` has completed.
+    pub fn after(&self, submission: wgpu::SubmissionIndex, work: Vec<Work>) {
+        if !work.is_empty() {
+            let _ = self.tx.send((submission, work));
+        }
+    }
+}
+
+fn run(device: wgpu::Device, mem: Mem, pool: Arc<StagingPool>, rx: Receiver<(wgpu::SubmissionIndex, Vec<Work>)>) {
+    // The engine paces its frames on what this thread completes.
+    glue5_runtime::qos::set(glue5_runtime::qos::Qos::Interactive);
+    while let Ok((submission, works)) = rx.recv() {
+        if let Err(e) = device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None }) {
+            log::error!("gpu: waiting for a submission: {e}");
+        }
+        for work in works {
+            finish(&device, mem, &pool, work);
+        }
+    }
+}
+
+/// The mapped contents of a staging buffer, or `None` if mapping failed.
+fn mapped(device: &wgpu::Device, s: &Staging) -> Option<wgpu::BufferView> {
+    if s.mapped.load(Ordering::Acquire) == 0 {
+        // Callbacks of the submission waited for have run; a straggler gets one more poll.
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    if s.mapped.load(Ordering::Acquire) == 1 { s.buffer.slice(..).get_mapped_range().ok() } else { None }
+}
+
+fn release(pool: &StagingPool, s: Staging) {
+    if s.mapped.load(Ordering::Acquire) == 1 {
+        s.buffer.unmap();
+        pool.put(s.buffer);
+    }
+}
+
+fn finish(device: &wgpu::Device, mem: Mem, pool: &StagingPool, work: Work) {
+    match work {
+        Work::Store { at, value } => mem.store_notify(at, value),
+        Work::Query { at, result, seq } => store_query(mem, at, result, seq),
+        Work::Readback { staging, copy, flag } => {
+            if let Some(data) = mapped(device, &staging) {
+                match copy {
+                    Copy::Bytes { to, len } => mem.bytes_mut(to, len).copy_from_slice(&data[..len]),
+                    Copy::Rows { to, rows, row_bytes, bpr, row_pitch, depth, slice_pitch, pick } => {
+                        for z in 0..depth {
+                            for row in 0..rows {
+                                let from = ((z * rows + row) * bpr) as usize;
+                                let src = &data[from..from + row_bytes as usize];
+                                let dst = to + z as u64 * slice_pitch as u64 + row as u64 * row_pitch as u64;
+                                match pick {
+                                    None => mem.bytes_mut(dst, src.len()).copy_from_slice(src),
+                                    Some(i) => {
+                                        let out = mem.bytes_mut(dst, src.len() / 4);
+                                        for (o, texel) in out.iter_mut().zip(src.as_chunks::<4>().0) {
+                                            *o = texel[i as usize];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                log::warn!("gpu: a readback could not be mapped");
+            }
+            release(pool, staging);
+            if flag != 0 {
+                mem.store_notify(flag, 0);
+            }
+        }
+        Work::Occlusion { staging, queries } => {
+            let counts: Option<Vec<u64>> = mapped(device, &staging).map(|data| {
+                queries
+                    .iter()
+                    .map(|q| {
+                        q.offsets
+                            .iter()
+                            .map(|&o| u64::from_le_bytes(data[o as usize..o as usize + 8].try_into().unwrap()))
+                            .sum()
+                    })
+                    .collect()
+            });
+            release(pool, staging);
+            for (i, q) in queries.iter().enumerate() {
+                let visible = counts.as_ref().is_none_or(|c| c[i] != 0);
+                store_query(mem, q.at, if visible { OCCLUSION_VISIBLE_COUNT } else { 0 }, q.seq);
+            }
+        }
+        Work::Profile { staging, resolved } => {
+            if let Some(data) = mapped(device, &staging) {
+                resolved.add(&data);
+            }
+            release(pool, staging);
+        }
+        Work::Screenshot { staging, width, height, bpr, format, path } => {
+            let pixels = mapped(device, &staging).map(|data| data.to_vec());
+            release(pool, staging);
+            // Encoding takes tens of milliseconds: not on this thread.
+            if let Some(pixels) = pixels {
+                std::thread::spawn(move || {
+                    match crate::present::write_png(&path, &pixels, width, height, bpr, format) {
+                        Ok(()) => log::info!("gpu: screenshot {}", path.display()),
+                        Err(e) => log::warn!("gpu: screenshot {}: {e:#}", path.display()),
+                    }
+                });
+            }
+        }
+    }
+}

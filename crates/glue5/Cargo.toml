@@ -1,0 +1,19 @@
+[package]
+name = "glue5"
+description = "Glue 5: runs the game natively on desktop and mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+glue5-runtime.workspace = true
+glue5-gpu.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+egui.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+wgpu.workspace = true
+sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }

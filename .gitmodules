@@ -1,0 +1,4 @@
+[submodule "third_party/wabt"]
+	path = third_party/wabt
+	url = https://github.com/WebAssembly/wabt.git
+	shallow = true

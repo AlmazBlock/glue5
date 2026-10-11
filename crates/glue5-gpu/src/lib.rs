@@ -1,0 +1,344 @@
+//! The renderer: executes the engine's GPU command ring (D3D11-style
+//! commands, see `glue5_runtime::gpu`) with wgpu — Metal on Apple platforms,
+//! Vulkan elsewhere.
+//!
+//! Threads: one executes the ring in order (it owns every wgpu object the
+//! engine refers to); compile threads build shader modules and pipelines; a
+//! completion thread finishes what the engine waits on (fences, queries,
+//! readbacks) once the GPU is done.
+//!
+//! With a window, the application opens the GPU first ([`Screen`]): its own
+//! UI shows before the game starts, and the renderer takes the same device
+//! and window over when it does.
+
+mod bc;
+mod done;
+mod draw;
+mod exec;
+mod format;
+#[cfg(target_vendor = "apple")]
+mod metalfx;
+mod objects;
+mod ops;
+mod overlay;
+mod pipeline;
+mod pool;
+mod present;
+mod profile;
+mod shader;
+mod submit;
+mod uniforms;
+mod uploads;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use glue5_runtime::gpu::{GpuBackend, GpuRing, State};
+
+pub use overlay::Overlay;
+pub use present::{Presentation, Upscaler, Window};
+
+/// How the renderer runs.
+#[derive(Clone, Debug)]
+pub struct Settings {
+    /// The translated shaders (`<game>/b/<build>/shaders`).
+    pub shader_dir: PathBuf,
+    /// Pipeline recipes and the driver's pipeline cache, kept across runs.
+    pub cache_dir: Option<PathBuf>,
+    /// Compile pipelines when first drawn, on the command thread (no draws
+    /// skipped while compiling; hitches instead).
+    pub sync_pipelines: bool,
+    /// Every n-th presented frame to a PNG in `shot_dir` (0: never).
+    pub shot_every: u32,
+    pub shot_dir: Option<PathBuf>,
+}
+
+impl Settings {
+    /// For the game in `game_dir` (`b/<build>/shaders`).
+    pub fn for_game(game_dir: &std::path::Path) -> Settings {
+        Settings::new(glue5_runtime::layout::shader_dir(game_dir))
+    }
+
+    pub fn new(shader_dir: PathBuf) -> Settings {
+        Settings { shader_dir, cache_dir: None, sync_pipelines: false, shot_every: 0, shot_dir: None }
+    }
+}
+
+/// The wgpu instance for this platform (create surfaces with it).
+pub fn instance() -> wgpu::Instance {
+    let backends = if cfg!(target_vendor = "apple") { wgpu::Backends::METAL } else { wgpu::Backends::VULKAN };
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = backends;
+    desc.flags = wgpu::InstanceFlags::from_build_config();
+    wgpu::Instance::new(desc.with_env())
+}
+
+/// The renderer as the runtime's GPU backend; presents on `screen` if given.
+pub fn backend(settings: Settings, screen: Option<Screen>) -> GpuBackend {
+    Box::new(move |ring: GpuRing| {
+        std::thread::Builder::new()
+            .name("gpu".into())
+            .spawn(move || match init(ring, settings, screen) {
+                Ok(gpu) => {
+                    glue5_runtime::qos::set(glue5_runtime::qos::Qos::Interactive);
+                    gpu.run()
+                }
+                Err(e) => {
+                    log::error!("gpu: {e:#}");
+                    drain(ring);
+                }
+            })
+            .expect("spawning the GPU thread");
+    })
+}
+
+/// Without a device the engine still runs: commands are dropped.
+fn drain(ring: GpuRing) {
+    ring.set_state(State::Failed);
+    let mut reader = ring.reader();
+    loop {
+        let head = reader.head();
+        while reader.next(head).is_some() {}
+        reader.wait(Duration::from_millis(100));
+    }
+}
+
+const WANTED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
+    .union(wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D)
+    .union(wgpu::Features::DEPTH32FLOAT_STENCIL8)
+    .union(wgpu::Features::FLOAT32_FILTERABLE)
+    .union(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+    .union(wgpu::Features::RG11B10UFLOAT_RENDERABLE)
+    .union(wgpu::Features::BGRA8UNORM_STORAGE)
+    .union(wgpu::Features::DEPTH_CLIP_CONTROL)
+    .union(wgpu::Features::CLIP_DISTANCES)
+    .union(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+    .union(wgpu::Features::ADDRESS_MODE_CLAMP_TO_BORDER)
+    .union(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+    .union(wgpu::Features::PIPELINE_CACHE);
+
+fn pipeline_cache_name(info: &wgpu::AdapterInfo) -> String {
+    format!("pipelines.{:?}.{:x}.{:x}.bin", info.backend, info.vendor, info.device).to_lowercase()
+}
+
+/// The GPU and the window it shows frames in. The application opens it
+/// before the game starts, to show its own UI ([`Screen::show_ui`]); the
+/// renderer takes it over when the game starts ([`backend`]).
+pub struct Screen {
+    gpu: Device,
+    output: present::Output,
+}
+
+impl Screen {
+    pub fn open(window: Window) -> Result<Screen> {
+        let gpu = Device::open(&window.instance, Some(&window.surface))?;
+        let output = present::Output::new(gpu.adapter.clone(), &gpu.device, window);
+        Ok(Screen { gpu, output })
+    }
+
+    /// Shows the overlay alone (the game is not running). False when the
+    /// window had no frame to give (hidden, minimised, being replaced).
+    pub fn show_ui(&mut self) -> bool {
+        let Screen { gpu, output } = self;
+        let Some((frame, format)) = output.acquire(&gpu.device) else { return false };
+        gpu.queue.submit(output.compose(&gpu.device, &gpu.queue, &frame, format, None));
+        gpu.queue.present(frame);
+        true
+    }
+
+    /// Whether [`Upscaler::MetalFx`] is available.
+    pub fn has_metalfx(&self) -> bool {
+        self.output.has_metalfx()
+    }
+}
+
+/// An open GPU.
+struct Device {
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    features: wgpu::Features,
+    /// GPU time per pass (`GLUE5_GPU_PROFILE`).
+    profile: bool,
+}
+
+impl Device {
+    fn open(instance: &wgpu::Instance, surface: Option<&wgpu::Surface>) -> Result<Device> {
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: surface,
+            apply_limit_buckets: false,
+        }))
+        .context("no GPU adapter")?;
+        let info = adapter.get_info();
+        let mut features = adapter.features() & WANTED_FEATURES;
+        if std::env::var_os("GLUE5_NO_BC").is_some() {
+            // Test the CPU decoding path of devices without BC compression.
+            features.remove(wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D);
+        }
+        let profile = std::env::var_os("GLUE5_GPU_PROFILE").is_some()
+            && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        if profile {
+            features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("glue5"),
+            required_features: features,
+            required_limits: adapter.limits(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            ..Default::default()
+        }))
+        .context("creating the GPU device")?;
+        log::info!("gpu: {} ({:?}, {}), features {:?}", info.name, info.backend, info.driver_info, features);
+        device.on_uncaptured_error(error_handler(None));
+        device.set_device_lost_callback(|reason, message| log::error!("gpu: device lost ({reason:?}): {message}"));
+        Ok(Device { adapter, device, queue, features, profile })
+    }
+}
+
+/// Logs device errors (the first of each kind), and counts them for the
+/// engine once it runs.
+fn error_handler(ring: Option<GpuRing>) -> Arc<dyn wgpu::UncapturedErrorHandler> {
+    let errors = AtomicU32::new(0);
+    let seen = std::sync::Mutex::new(std::collections::HashSet::new());
+    Arc::new(move |e: wgpu::Error| {
+        let n = errors.fetch_add(1, Ordering::Relaxed);
+        if let Some(ring) = &ring {
+            ring.add_errors(1);
+        }
+        let msg = match &e {
+            wgpu::Error::Validation { description, .. } | wgpu::Error::Internal { description, .. } => {
+                description.clone()
+            }
+            other => other.to_string(),
+        };
+        let key: String = msg.chars().filter(|c| !c.is_ascii_digit()).take(200).collect();
+        let mut seen = seen.lock().unwrap();
+        if seen.len() < 40 && seen.insert(key) {
+            log::error!("gpu: device error ({n} so far): {}", msg.chars().take(1500).collect::<String>());
+        }
+    })
+}
+
+fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exec::Gpu> {
+    let t0 = Instant::now();
+    let (gpu, output) = match screen {
+        Some(screen) => (screen.gpu, Some(screen.output)),
+        None => (Device::open(&instance(), None)?, None),
+    };
+    let Device { adapter, device, queue, features, profile } = gpu;
+    let info = adapter.get_info();
+    device.on_uncaptured_error(error_handler(Some(ring)));
+
+    let mut caps = format::Caps::new(&adapter, features);
+    if std::env::var_os("GLUE5_NO_FLOAT32_FILTER").is_some() {
+        // Test the path of GPUs that cannot filter 32-bit float textures.
+        caps.float32_filter = false;
+    }
+    if let Some(dir) = &settings.cache_dir {
+        std::fs::create_dir_all(dir).ok();
+    }
+    let cache = features.contains(wgpu::Features::PIPELINE_CACHE).then(|| {
+        let data = settings.cache_dir.as_ref().and_then(|d| std::fs::read(d.join(pipeline_cache_name(&info))).ok());
+        unsafe {
+            device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("pipelines"),
+                data: data.as_deref(),
+                fallback: true,
+            })
+        }
+    });
+    let library = Arc::new(shader::Library::open(&settings.shader_dir)?);
+    let compiler = Arc::new(pipeline::Compiler::new(device.clone(), caps, cache));
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(2).clamp(2, 6);
+    let staging = Arc::new(done::StagingPool::default());
+    let mut recipe_files = vec![settings.shader_dir.join("pipelines.json")];
+    if let Some(dir) = &settings.cache_dir {
+        recipe_files.push(dir.join("pipelines.jsonl"));
+    }
+    let ahead = pipeline::load_recipes(&recipe_files).into();
+    let limits = device.limits();
+    let window = output.is_some();
+    log::info!("gpu: ready in {:.0} ms ({threads} compile threads)", t0.elapsed().as_secs_f64() * 1000.0);
+
+    let profiler = profile.then(|| profile::Profiler::new(&device, &queue));
+    let uploads = uploads::Uploads::new(device.clone());
+    Ok(exec::Gpu {
+        submitter: submit::Submitter::start(
+            device.clone(),
+            queue.clone(),
+            done::Done::start(device.clone(), ring.mem(), staging.clone()),
+            uploads.free_chunks(),
+            output,
+        ),
+        uniforms: uniforms::Uniforms::new(limits.min_uniform_buffer_offset_alignment),
+        uploads,
+        adapter,
+        device,
+        caps,
+        limits,
+        library,
+        compiler,
+        pool: pool::Pool::new(threads),
+        staging,
+        ring,
+        settings,
+        objs: Default::default(),
+        s: Default::default(),
+        encoder: None,
+        pass: None,
+        pass_info: None,
+        bound: Default::default(),
+        epoch: 1,
+        clears: Vec::new(),
+        graveyard: Vec::new(),
+        op: 0,
+        works: Vec::new(),
+        maps: Vec::new(),
+        pdirty: true,
+        last_pipe: None,
+        last_programs: (0, 0),
+        chunk_passes: 0,
+        batch_since: None,
+        profiler,
+        pass_profile: None,
+        fast_pipes: Default::default(),
+        pipes: Default::default(),
+        pass_tails: Default::default(),
+        shaders_by_hash: Default::default(),
+        ahead,
+        ahead_waiting: Vec::new(),
+        ahead_shaders: 0,
+        recipes_new: Vec::new(),
+        key: Vec::new(),
+        binds: Default::default(),
+        packs: Default::default(),
+        dummies: Default::default(),
+        blits: Default::default(),
+        computes: Default::default(),
+        next_buffer_uid: 0,
+        occlusion: Default::default(),
+        counter_src: None,
+        counter_slot: 0,
+        window,
+        last_present: None,
+        stats: Default::default(),
+        total_presents: 0,
+        started: Instant::now(),
+        last_stats: Instant::now(),
+        last_save: Instant::now(),
+    })
+}
+
+pub(crate) fn log_once(key: &str, msg: impl FnOnce() -> String) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    if SEEN.lock().unwrap().get_or_insert_default().insert(key.to_owned()) {
+        log::warn!("gpu: {}", msg());
+    }
+}

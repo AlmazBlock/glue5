@@ -1,0 +1,13 @@
+[package]
+name = "glue5-runtime"
+description = "Host side of the game: Emscripten/WASI imports, threads, files, audio and input plumbing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+glue5-game.workspace = true
+anyhow.workspace = true
+log.workspace = true
+libc = "0.2"

@@ -1,0 +1,615 @@
+//! The application: window, renderer, engine and the event loop.
+//!
+//! It opens on the start page with the renderer already running: the
+//! game's files, Play, Settings. What applies when the engine starts (frame
+//! rate, memory profile, the game folder, a phone's resolution) can be
+//! changed there before it loads, and a game that fails while starting is
+//! not started again by itself. Play starts the engine, which then owns the
+//! frames; the application's UI goes over them. `glue5 --play` (a restart
+//! the game asks for) and a game folder on the command line start the game
+//! without the start page.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::{Result, anyhow};
+use glue5_gpu::{Presentation, Screen, Upscaler};
+use glue5_runtime::exit::Exit;
+use glue5_runtime::input::{Gamepad, InputBlock, mouse};
+use glue5_runtime::layout::is_game_dir;
+use sdl3::event::{Event, WindowEvent};
+use sdl3::keyboard::Scancode;
+use sdl3::mouse::MouseButton;
+
+use crate::paths::{self, MOBILE};
+use crate::settings::{self, Settings, TouchMode};
+use crate::touch::Touch;
+use crate::ui::{self, Action, Page, Started, Status, Ui};
+use crate::{audio, keymap, pads};
+
+/// Story mode (the browser page's start choice 1).
+const START_MODE: u32 = 1;
+
+/// The settings button's opacity over the game while the touch controls
+/// are hidden (a controller in use, or touch off): there, but faint.
+const GEAR_ALONE: f32 = 0.35;
+
+pub fn run() -> Result<()> {
+    let sdl = sdl3::init().map_err(|e| anyhow!("SDL: {e}"))?;
+    let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
+    if MOBILE {
+        sdl3::hint::set("SDL_ORIENTATIONS", "LandscapeLeft LandscapeRight");
+        // Touches drive the touch controls, not a pretend mouse.
+        sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
+    }
+    // The renderer sizes the window's Metal layer when it configures it for
+    // the window. SDL resizing the layer as well (macOS), from inside the
+    // system's resize loop, had frames drawn for one size shown at another.
+    sdl3::hint::set("SDL_VIDEO_METAL_AUTO_RESIZE_DRAWABLE", "0");
+    let user_dir = paths::user_dir()?;
+    let mut settings = Settings::load(&user_dir);
+    let args = Args::parse();
+
+    let mut builder = video.window("Glue 5", 1280, 720);
+    builder.resizable().high_pixel_density();
+    if MOBILE {
+        builder.fullscreen();
+    }
+    if cfg!(target_vendor = "apple") {
+        builder.metal_view();
+    }
+    let window = builder.build()?;
+    let pixels = window.size_in_pixels();
+    settings.for_screen(pixels.1);
+
+    let presentation = Presentation::new(pixels, settings.vsync, upscaler(&settings));
+    let overlay = glue5_gpu::Overlay::default();
+    let instance = glue5_gpu::instance();
+    // The window outlives the renderer: the process exits with it.
+    let surface = unsafe {
+        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_display_and_window(&window, &window)?)?
+    };
+    let screen = Screen::open(glue5_gpu::Window {
+        instance,
+        surface,
+        presentation: presentation.clone(),
+        overlay: overlay.clone(),
+    })?;
+    // While the system resizes the window in a loop of its own (macOS,
+    // Windows), events wait for it to end, and so does this loop; SDL still
+    // calls watches, and from there the renderer follows the window. The
+    // game's resolution changes once, when this loop runs again.
+    let watched = presentation.clone();
+    let _watch = sdl.event().map_err(|e| anyhow!("SDL events: {e}"))?.add_event_watch(move |event: Event| {
+        if let Event::Window { win_event: WindowEvent::PixelSizeChanged(w, h), .. } = event {
+            watched.set_size(w.max(0) as u32, h.max(0) as u32);
+        }
+    });
+
+    let text_input = video.text_input();
+    // Desktop types into the game all the time; touch devices only while the
+    // game's text box is open (it brings up the system keyboard).
+    if !MOBILE {
+        text_input.start(&window);
+    }
+    let mut app = App {
+        pads: pads::Pads::new(sdl.gamepad().map_err(|e| anyhow!("SDL gamepad: {e}"))?),
+        mouse: sdl.mouse(),
+        events: sdl.event_pump().map_err(|e| anyhow!("SDL events: {e}"))?,
+        sdl,
+        window,
+        text_input,
+        typing: !MOBILE,
+        presentation,
+        user_dir,
+        settings,
+        ui: Ui::new(overlay),
+        touch: Touch::new(),
+        touch_input: MOBILE,
+        touch_shown: false,
+        foreground: true,
+        folder: None,
+        game_dir: None,
+        problem: None,
+        metalfx: screen.has_metalfx(),
+        screen: Some(screen),
+        game: None,
+    };
+    app.find_game(args.game_dir.as_deref());
+    if (args.play || args.game_dir.is_some()) && app.game_dir.is_some() {
+        app.play()?;
+    }
+    app.run()
+}
+
+/// The command line (desktop): `glue5 [--play] [game folder]`.
+struct Args {
+    /// Start the game without the start page.
+    play: bool,
+    game_dir: Option<PathBuf>,
+}
+
+impl Args {
+    fn parse() -> Args {
+        let mut args = Args { play: false, game_dir: None };
+        // Phones pass arguments of their own.
+        for arg in std::env::args_os().skip(1).filter(|_| !MOBILE) {
+            if arg == "--play" {
+                args.play = true;
+            } else {
+                args.game_dir = Some(arg.into());
+            }
+        }
+        args
+    }
+}
+
+struct App {
+    sdl: sdl3::Sdl,
+    window: sdl3::video::Window,
+    events: sdl3::EventPump,
+    mouse: sdl3::mouse::MouseUtil,
+    text_input: sdl3::keyboard::TextInputUtil,
+    /// Typed text is on (desktop: always; touch devices: while the game's
+    /// text box is open).
+    typing: bool,
+    pads: pads::Pads,
+    presentation: Presentation,
+    user_dir: PathBuf,
+    settings: Settings,
+    ui: Ui,
+    touch: Touch,
+    /// Touch is the input in use: the touch controls follow it (touching
+    /// shows them, a controller or keyboard hides them; being connected is
+    /// not enough, phones often have a paired controller lying around).
+    touch_input: bool,
+    touch_shown: bool,
+    /// Not in the background (phones: no GPU work there).
+    foreground: bool,
+    folder: Option<FolderPick>,
+    /// The game's folder, once found.
+    game_dir: Option<PathBuf>,
+    /// Why it was not, or a folder chosen that is not one.
+    problem: Option<String>,
+    metalfx: bool,
+    /// The renderer, until the game takes it over.
+    screen: Option<Screen>,
+    game: Option<Running>,
+}
+
+/// The game, once started.
+struct Running {
+    game: glue5_runtime::Game,
+    /// The engine's input block, once it has published it.
+    input: Option<InputBlock>,
+    started: Started,
+    /// The back buffer size last asked of the engine.
+    back_buffer: (u32, u32),
+    _audio: Option<audio::Audio>,
+}
+
+impl App {
+    fn run(mut self) -> Result<()> {
+        loop {
+            if let Some(exit) = glue5_runtime::exit::requested() {
+                self.settings.save(&self.user_dir);
+                if exit == Exit::Restart {
+                    restart();
+                }
+                return Ok(());
+            }
+            if let Some(game) = &mut self.game
+                && game.input.is_none()
+            {
+                game.input = game.game.input();
+                if let Some(i) = &game.input {
+                    i.focus(true);
+                }
+            }
+            let page = self.ui.page();
+            // Before the game the loop sleeps until there is input or the UI
+            // animates; with it, it keeps the touch controls and pads current.
+            let wait = if self.game.is_some() { Duration::from_millis(8) } else { self.ui.idle_for() };
+            let first = self.events.wait_event_timeout(wait);
+            let events: Vec<Event> = first.into_iter().chain(self.events.poll_iter()).collect();
+            for event in events {
+                if self.event(event) {
+                    self.settings.save(&self.user_dir);
+                    return Ok(());
+                }
+            }
+            if self.update(page)? {
+                self.settings.save(&self.user_dir);
+                return Ok(());
+            }
+        }
+    }
+
+    /// One event; true to quit.
+    fn event(&mut self, event: Event) -> bool {
+        match &event {
+            Event::Quit { .. } => return true,
+            Event::GamepadAdded { which, .. } => self.pads.added(*which),
+            Event::GamepadRemoved { which, .. } => self.pads.removed(*which),
+            Event::KeyDown { .. } | Event::MouseButtonDown { .. } | Event::GamepadButtonDown { .. } => {
+                self.touch_input = false
+            }
+            Event::GamepadAxisMotion { value, .. } if value.unsigned_abs() > 16000 => self.touch_input = false,
+            Event::Window { win_event: WindowEvent::PixelSizeChanged(..) | WindowEvent::Resized(..), .. } => {
+                let (w, h) = self.window.size_in_pixels();
+                self.presentation.set_size(w, h);
+                self.ui.repaint();
+            }
+            Event::Window { win_event: WindowEvent::Exposed, .. } => self.ui.repaint(),
+            Event::AppWillEnterBackground { .. } => self.foreground = false,
+            Event::AppDidEnterForeground { .. } => {
+                self.foreground = true;
+                self.ui.repaint();
+                // The game's files may have been copied in meanwhile (Finder,
+                // the Files app).
+                if self.game.is_none() && self.game_dir.is_none() {
+                    self.find_game(None);
+                }
+            }
+            _ => {}
+        }
+        if let Event::FingerDown { x, y, .. } = event {
+            // The settings button takes its finger before the touch controls
+            // see it (or they would show, taking pad 0 from a controller).
+            if !self.ui.is_open() && self.ui.gear_hit(x, y, &self.window) {
+                self.ui.toggle_settings();
+                return false;
+            }
+            self.touch_input = true;
+        }
+        if let Event::KeyDown { scancode: Some(Scancode::F1), repeat: false, .. } = event {
+            self.ui.toggle_settings();
+            return false;
+        }
+        if self.ui.is_open() {
+            if let Event::KeyDown { scancode: Some(Scancode::Escape), .. } = event {
+                self.ui.back();
+            } else {
+                self.ui.event(&event, &self.window);
+            }
+            return false;
+        }
+        match event {
+            Event::FingerDown { finger_id, x, y, .. } => self.touch.finger_down(finger_id, x, y),
+            Event::FingerMotion { finger_id, x, y, .. } => self.touch.finger_motion(finger_id, x, y),
+            Event::FingerUp { finger_id, .. } => self.touch.finger_up(finger_id),
+            _ => {}
+        }
+        if let Some(game) = &self.game
+            && let Some(input) = &game.input
+        {
+            game_input(input, &event, &self.window, &self.mouse, game.back_buffer);
+        }
+        false
+    }
+
+    /// Everything after the events: touch controls, pads, the UI and what
+    /// it asks for. True to quit.
+    fn update(&mut self, page_before: Option<Page>) -> Result<bool> {
+        let in_game = self.game.is_some();
+        // Touch controls: a virtual pad in slot 0 unless a controller has it.
+        let show = in_game
+            && !self.ui.is_open()
+            && match self.settings.touch {
+                TouchMode::Always => true,
+                TouchMode::Off => false,
+                TouchMode::Auto => self.touch_input,
+            };
+        if show != self.touch_shown {
+            self.touch_shown = show;
+            self.touch.clear();
+            glue5_runtime::input::set_gamepad(0, Gamepad::default());
+        }
+        if show {
+            let (w, h) = self.window.size();
+            self.touch.layout(egui::vec2(w as f32, h as f32), ui::safe_rect(&self.window), self.settings.touch_size);
+            glue5_runtime::input::set_gamepad(0, self.touch.gamepad());
+        }
+
+        // While the touch controls are pad 0, a controller in slot 0 waits.
+        let report = self.pads.update(self.ui.is_open(), show);
+        if report.menu {
+            self.ui.toggle_settings();
+        }
+        for nav in report.nav {
+            self.ui.nav(nav);
+        }
+
+        // What applies at once.
+        self.presentation.set_vsync(self.settings.vsync);
+        self.presentation.set_upscaler(upscaler(&self.settings));
+        self.resize_game();
+
+        // The UI: over the game at every turn, before it when something changed.
+        let mut actions = Vec::new();
+        if in_game || (self.foreground && self.ui.wants_frame()) {
+            let status = Status {
+                game_dir: self.game_dir.as_deref(),
+                problem: self.problem.as_deref(),
+                started: self.game.as_ref().map(|g| &g.started),
+                window: self.window.size_in_pixels(),
+                metalfx: self.metalfx,
+            };
+            // The settings button: on touch screens always, so that it stays
+            // with a controller in use or the touch controls off.
+            let gear =
+                (in_game && (MOBILE || show)).then_some(if show { self.settings.touch_opacity } else { GEAR_ALONE });
+            actions = self.ui.frame(&self.window, &mut self.settings, &status, show.then_some(&self.touch), gear);
+            if let Some(screen) = &mut self.screen
+                && !screen.show_ui()
+            {
+                // Not shown (the window not visible yet, ...): again soon.
+                self.ui.repaint_in(Duration::from_millis(100));
+            }
+        }
+        for action in actions {
+            match action {
+                Action::Quit => return Ok(true),
+                Action::Play => self.play()?,
+                Action::ChooseGame => self.folder = Some(FolderPick::start(&self.window)),
+                Action::FindGame => self.find_game(None),
+            }
+        }
+        if let Some(choice) = self.folder.as_ref().and_then(FolderPick::poll) {
+            self.folder = None;
+            self.chosen(choice);
+        }
+
+        let page = self.ui.page();
+        if page != page_before {
+            if let Some(input) = self.game.as_ref().and_then(|g| g.input.as_ref()) {
+                // Nothing stays pressed in the game behind a page.
+                input.release_all();
+                if page.is_some() {
+                    self.mouse.set_relative_mouse_mode(&self.window, false);
+                    input.pointer_locked(false);
+                }
+            }
+            if page_before == Some(Page::Settings) {
+                self.settings.save(&self.user_dir);
+            }
+        }
+
+        let want_typing = !MOBILE || glue5_runtime::input::text_box_open();
+        if want_typing != self.typing {
+            self.typing = want_typing;
+            if want_typing {
+                self.text_input.start(&self.window);
+            } else {
+                self.text_input.stop(&self.window);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The game's back buffer follows the window (desktop): asked of the
+    /// engine when it differs. The engine waits for a size to hold for 20
+    /// of its frames before rebuilding its render targets, and a window
+    /// being resized by the system does not reach this loop until the end:
+    /// one rebuild per resize. Phone windows never change size; their back
+    /// buffer is the one they started with.
+    fn resize_game(&mut self) {
+        let Some(game) = &mut self.game else { return };
+        let Some(input) = &game.input else { return };
+        let (w, h) = self.window.size_in_pixels();
+        if MOBILE || w == 0 || h == 0 {
+            return;
+        }
+        let size = settings::render_size((w, h), self.settings.render_scale(), game.started.low_memory);
+        if size != game.back_buffer {
+            log::info!("back buffer {}x{}", size.0, size.1);
+            input.resize(size.0, size.1);
+            game.back_buffer = size;
+        }
+    }
+
+    /// Starts the game; the renderer takes the screen over.
+    fn play(&mut self) -> Result<()> {
+        let Some(game_dir) = self.game_dir.clone() else { return Ok(()) };
+        let Some(screen) = self.screen.take() else { return Ok(()) };
+        // Graphics quality is the game's own (its menu); the low-memory
+        // profile only lowers it once, after which the menu has the last word.
+        if self.settings.low_memory && !self.settings.low_preset_written {
+            match glue5_runtime::game_settings::apply_low_preset(&self.user_dir) {
+                Ok(()) => {
+                    self.settings.low_preset_written = true;
+                    log::info!("the game's graphics settings: low-memory preset written");
+                }
+                Err(e) => log::warn!("cannot write the low-memory preset: {e}"),
+            }
+        }
+        self.settings.save(&self.user_dir);
+        log::info!("game: {}, user data: {}", game_dir.display(), self.user_dir.display());
+        let s = &self.settings;
+        let back_buffer = settings::render_size(self.window.size_in_pixels(), s.render_scale(), s.low_memory);
+        let mut gpu_settings = glue5_gpu::Settings::for_game(&game_dir);
+        gpu_settings.cache_dir = Some(self.user_dir.join("cache"));
+        let game = glue5_runtime::start(
+            glue5_runtime::Config {
+                game_dir: game_dir.clone(),
+                user_dir: self.user_dir.clone(),
+                width: back_buffer.0,
+                height: back_buffer.1,
+                start_mode: START_MODE,
+                low_memory: s.low_memory,
+                max_fps: s.max_fps,
+            },
+            glue5_gpu::backend(gpu_settings, Some(screen)),
+        )?;
+        let audio = match self.sdl.audio().map_err(|e| anyhow!("{e}")).and_then(|a| audio::start(&a, game.audio())) {
+            Ok(audio) => Some(audio),
+            Err(e) => {
+                log::warn!("no audio: {e}");
+                None
+            }
+        };
+        let started =
+            Started { game_dir, max_fps: s.max_fps, low_memory: s.low_memory, render_scale: s.render_scale() };
+        self.game = Some(Running { game, input: None, started, back_buffer, _audio: audio });
+        self.ui.game_started();
+        Ok(())
+    }
+
+    /// Looks for the game: the folder named on the command line or by
+    /// `GLUE5_GAME_DIR`, the last one used, the platform's default places.
+    fn find_game(&mut self, explicit: Option<&Path>) {
+        self.game_dir = None;
+        self.problem = None;
+        self.ui.repaint();
+        let explicit = explicit.map(PathBuf::from).or_else(|| std::env::var_os("GLUE5_GAME_DIR").map(PathBuf::from));
+        if let Some(dir) = explicit {
+            if is_game_dir(&dir) {
+                self.game_dir = paths::canonical(&dir).ok();
+                return;
+            }
+            self.problem = Some(format!("{} is not a game folder.", dir.display()));
+        }
+        let candidates = self.settings.game_dir.iter().cloned().chain(paths::default_game_dirs());
+        if let Some(dir) = candidates.filter(|d| is_game_dir(d)).find_map(|d| paths::canonical(&d).ok()) {
+            self.settings.game_dir = Some(dir.clone());
+            self.game_dir = Some(dir);
+        }
+    }
+
+    /// The folder picker's answer.
+    fn chosen(&mut self, choice: Option<PathBuf>) {
+        let Some(dir) = choice else { return };
+        let Ok(dir) = paths::canonical(&dir) else { return };
+        if !is_game_dir(&dir) {
+            let problem = format!("{} is not a game folder.", dir.display());
+            self.ui.note(problem.clone());
+            if self.game.is_none() {
+                self.problem = Some(problem);
+            }
+            return;
+        }
+        self.settings.game_dir = Some(dir.clone());
+        self.settings.save(&self.user_dir);
+        if self.game.is_none() {
+            self.game_dir = Some(dir);
+            self.problem = None;
+        }
+        self.ui.repaint();
+    }
+}
+
+fn upscaler(settings: &Settings) -> Upscaler {
+    if settings.metalfx { Upscaler::MetalFx } else { Upscaler::Bicubic }
+}
+
+/// Keyboard and mouse into the game's input block.
+fn game_input(
+    input: &InputBlock,
+    event: &Event,
+    window: &sdl3::video::Window,
+    mouse_util: &sdl3::mouse::MouseUtil,
+    back_buffer: (u32, u32),
+) {
+    let (bw, bh) = (back_buffer.0 as f32, back_buffer.1 as f32);
+    match *event {
+        Event::KeyDown { scancode: Some(sc), repeat, .. } => {
+            if sc == Scancode::Escape && mouse_util.relative_mouse_mode(window) {
+                mouse_util.set_relative_mouse_mode(window, false);
+                input.pointer_locked(false);
+            }
+            if !repeat {
+                key(input, sc, true);
+            }
+            match sc {
+                Scancode::Return | Scancode::KpEnter => input.text("\r"),
+                Scancode::Backspace => input.text("\u{8}"),
+                _ => {}
+            }
+        }
+        Event::KeyUp { scancode: Some(sc), .. } => key(input, sc, false),
+        Event::TextInput { ref text, .. } => input.text(text),
+        Event::MouseMotion { x, y, xrel, yrel, .. } => {
+            let (ww, wh) = window.size();
+            input.mouse_position((x * bw / ww as f32) as i32, (y * bh / wh as f32) as i32);
+            input.mouse_motion(xrel.round() as i32, yrel.round() as i32);
+        }
+        Event::MouseButtonDown { mouse_btn, .. } => {
+            // Like the page: a click captures the pointer.
+            if !mouse_util.relative_mouse_mode(window) {
+                mouse_util.set_relative_mouse_mode(window, true);
+                input.pointer_locked(true);
+            }
+            input.mouse_button(mouse_bit(mouse_btn), true);
+        }
+        Event::MouseButtonUp { mouse_btn, .. } => input.mouse_button(mouse_bit(mouse_btn), false),
+        Event::MouseWheel { y, .. } => input.mouse_wheel(y.round() as i32),
+        Event::Window { win_event: WindowEvent::FocusGained, .. } => input.focus(true),
+        Event::Window { win_event: WindowEvent::FocusLost, .. } => {
+            mouse_util.set_relative_mouse_mode(window, false);
+            input.pointer_locked(false);
+            input.focus(false);
+        }
+        _ => {}
+    }
+}
+
+/// Starts the application again, straight into the game (desktop; a phone
+/// app cannot, and the player reopens it).
+fn restart() {
+    if MOBILE {
+        return;
+    }
+    let args = std::env::args_os().skip(1).filter(|a| a != "--play");
+    let started =
+        std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--play").args(args).spawn());
+    if let Err(e) = started {
+        log::warn!("cannot start again: {e}");
+    }
+}
+
+fn key(input: &InputBlock, sc: sdl3::keyboard::Scancode, down: bool) {
+    if let Some(vk) = keymap::vk(sc) {
+        input.key(vk, down);
+        if let Some(generic) = keymap::generic(vk) {
+            input.key(generic, down);
+        }
+    }
+    if let Some(alias) = keymap::numpad_alias(sc) {
+        input.key(alias, down);
+    }
+}
+
+fn mouse_bit(b: MouseButton) -> u32 {
+    match b {
+        MouseButton::Left => mouse::LEFT,
+        MouseButton::Right => mouse::RIGHT,
+        MouseButton::Middle => mouse::MIDDLE,
+        MouseButton::X1 => mouse::X1,
+        MouseButton::X2 => mouse::X2,
+        _ => 0,
+    }
+}
+
+/// The system's folder picker, answered asynchronously (SDL calls back on
+/// the main thread while events are pumped).
+struct FolderPick(Arc<Mutex<Option<Option<PathBuf>>>>);
+
+impl FolderPick {
+    fn start(window: &sdl3::video::Window) -> FolderPick {
+        let picked: Arc<Mutex<Option<Option<PathBuf>>>> = Default::default();
+        let slot = picked.clone();
+        sdl3::dialog::show_open_folder_dialog(
+            None::<&str>,
+            false,
+            window,
+            Box::new(move |result, _| *slot.lock().unwrap() = Some(result.ok().and_then(|mut v| v.pop()))),
+        );
+        FolderPick(picked)
+    }
+
+    /// `Some(choice)` once answered (`Some(None)`: cancelled).
+    fn poll(&self) -> Option<Option<PathBuf>> {
+        self.0.lock().unwrap().take()
+    }
+}

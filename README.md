@@ -1,0 +1,164 @@
+# Glue 5
+
+Glue 5 is a recompilation toolchain and native compatibility layer for
+GTA V's WebAssembly build. It turns user-supplied game code into a native
+application and connects it to the device's graphics, audio, storage and
+controls. The game runs locally on iOS and macOS. Phones, tablets and
+computers share the same code base; more platforms are planned.
+
+The game's code is compiled for the target device when you build the app.
+It runs without just-in-time (JIT) compilation or streaming from another
+computer. Improvements to the shared runtime benefit both mobile and
+desktop builds.
+
+**This project provides only the recompilation tools and compatibility
+layer. It does not include or distribute ANY GTA V assets or game binaries.**
+Users must supply the required files from the supported **WebAssembly
+(WASM) version of the game**: `game.wasm` at build time, and the prepared
+game assets and translated shaders at run time. Files from a regular PC
+or console installation alone are not sufficient.
+
+`game.wasm` is translated to C with [wasm2c] at build time, compiled with the
+platform's C compiler and linked into a Rust host that provides the
+Emscripten/WASI imports, threads, file access, input, audio and GPU support.
+
+**Status:** the story mode runs on macOS and iOS devices (wgpu on Metal,
+with sound); keyboard, mouse, gamepads and touch controls work. Next:
+Android packaging.
+
+See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `crates/glue5-game` | The game module. Its build script verifies `game.wasm`, runs wasm2c, applies hooks and compiles the C. |
+| `crates/glue5-runtime` | Host runtime: Emscripten/WASI imports, threads, VFS, input, audio output, the GPU command ring (and a null backend). |
+| `crates/glue5-gpu` | The renderer: executes the engine's D3D11-style command ring with wgpu (Metal on Apple platforms, Vulkan elsewhere). |
+| `crates/glue5` | The application (SDL3), the same on every platform: window, input, audio, settings and touch controls (egui overlay). Its `headless` example runs the game without a window. |
+| `platform/ios` | What iOS needs around it: `main.c`, entitlements, the xcodegen spec. |
+| `xtask` | `cargo xtask` (from the repository root): setup and the iOS app. A workspace of its own. |
+| `patches` | Our patches to wasm2c and wgpu-core, applied by `cargo xtask setup` ([README](patches/README.md)). |
+| `third_party/wabt` | wasm2c's sources, pinned (a submodule). `third_party/wgpu-core`, the patched wgpu-core, is made by setup and not in git. |
+
+Symlink your game directory
+(`b/<build>/game.wasm`, `b/<build>/shaders/`, `data/`) to `./game`, or point
+`GLUE5_GAME_DIR` at it. The build checks `game.wasm` against the supported
+build.
+
+## Building
+
+Requirements: Rust (see `rust-toolchain.toml`), CMake, a C/C++ compiler;
+for iOS, Xcode and [xcodegen].
+
+```sh
+cargo xtask setup      # once: wgpu-core and wasm2c with our patches
+cargo run --release    # the first build compiles ~1 GB of generated C
+```
+
+Compiled C objects are cached in `target/glue5-tools/objcache`, shared by
+debug and release builds; later builds only recompile what changed.
+
+## Tasks
+
+| What | Command |
+|---|---|
+| Play | `cargo run -r` |
+| Run without a window: scripted input, PNG shots, statistics | `cargo run -r --example headless -- --press 30 start --for 40 --shots 300 shots` (`-- --help` lists the options) |
+| Tests | `cargo test --workspace`; every translated shader through the adapter and naga's validator: `cargo test -r -p glue5-gpu -- --ignored` |
+| iOS: build, sign, install, launch on the connected device | `GLUE5_TEAM=<team id> cargo xtask ios` |
+| iOS: only check that the app builds | `cargo xtask ios-build` |
+| iOS: launch the installed app again, with its console | `cargo xtask ios-run` |
+| iOS: copy the game into the app's Documents/game | `cargo xtask ios-game` |
+
+The app and headless runner accept these environment variables.
+`cargo xtask ios` and `ios-run` forward `RUST_LOG` and `GLUE5_*` variables
+to the device.
+
+| Variable | Effect |
+|---|---|
+| `GLUE5_GAME_DIR` | The game directory, for the build and at run time (`./game` under cargo). |
+| `RUST_LOG` | Log filter (default `info`): renderer statistics every 10 s (frame times, CPU time per renderer stage, memory); `glue5::audio=debug` adds the sound device's. |
+| `GLUE5_ENGINE_LOG=stdout` | The engine's log on the terminal too (it is always in `<user dir>/game.log`). |
+| `GLUE5_ENGINE_ARGS` | More engine switches, e.g. `-FrameQueueLimit=2`. |
+| `GLUE5_GPU_PROFILE=1` | GPU time per pass in the statistics. |
+| `GLUE5_NO_BC=1`, `GLUE5_NO_FLOAT32_FILTER=1` | Mobile GPU fallbacks on a desktop GPU: BC textures decoded on the CPU, 32-bit float textures unfiltered. |
+| `GAMERESOURCEMB`, `KEEPTHREADS` | The engine's module settings (`gameResourceMB`, `keepThreads`), read like the browser build reads them under Node. |
+| `GLUE5_ALLOW_UNKNOWN_BUILD=1` | Build against a `game.wasm` other than the supported one. |
+| `GLUE5_TEAM` | Apple development team id, to sign the iOS app. |
+
+## Controls
+
+Keyboard, mouse and controllers work as on PC, including the game's
+controller prompts. Click to capture the pointer; Esc releases it. On
+touch screens, an on-screen controller appears while touch is in use and
+hides when a controller or keyboard is used. The game's text boxes bring
+up the system keyboard on touch devices.
+
+The start page shows the game files, Play and Settings. App settings cover
+resolution, upscaling, VSync, frame rate, touch controls, low memory and the
+game folder. During play, open them with F1, the ⚙ button on touch screens,
+or by holding Back + Start on a controller. Use the D-pad or arrow keys to
+navigate, A or Enter to select, and B or Esc to go back.
+
+Esc / Start opens the game's own menu. Graphics quality is configured in
+Settings › Graphics and saved in `settings.xml`. Confirming a change that
+requires a restart, such as texture quality, ends the game. On desktop,
+the app restarts directly into the game. On a phone, reopen the app.
+
+## Renderer
+
+The engine emits D3D11-style commands into a ring in wasm memory (the browser
+build's `wgpu_worker.js` protocol); `glue5-gpu` executes them in order on one
+thread. The translated WGSL shaders (`shaders/`) are adapted at load time
+(constant buffers packed into one dynamic uniform binding per stage, vertex
+outputs given the pixel shader's interpolation) and compiled, with render
+pipelines, on background threads. Draws whose pipeline is still compiling
+are skipped (the headless runner's `--sync-pipelines` compiles them on the
+spot instead).
+
+The back buffer follows the window: its size in pixels times the render
+scale (Settings › Resolution). The present step scales it to the window
+using MetalFX on supported Apple GPUs or a bicubic filter otherwise
+(Settings › Upscaling). The app's UI is drawn afterwards at the window's
+resolution.
+
+Pipeline recipes are recorded in `<user dir>/cache/pipelines.jsonl` and, with
+the game's seed (`shaders/pipelines.json`), compiled ahead on later runs. The
+first run on a machine is slow to show the world: Metal compiles every shader
+for the first time (the system keeps them afterwards).
+
+## Platforms
+
+All platforms use `crates/glue5`. The desktop binary calls `glue5::main`.
+On iOS, an Xcode project generated by [xcodegen] from
+`platform/ios/project.yml` links the crate as a static library. Android will
+package it with SDL's Java activity.
+
+The app looks for the game in this order: the command line (desktop),
+`GLUE5_GAME_DIR`, the saved location in `glue5.json`, then platform defaults.
+On desktop, the default is `game` next to the executable or in the
+repository. On iOS, it is `Documents/game`, populated with
+`cargo xtask ios-game`, Finder > device > Files, or the Files app.
+
+If the files are missing, the start page explains where to put them.
+Desktop users can choose a folder; on iOS, the app checks again when it
+returns to the foreground. `glue5 --play`, or a game folder passed on the
+command line, skips the start page.
+
+## Hooks
+
+`crates/glue5-game/hooks.rs` lists game functions the host replaces, by their
+wasm name. Signatures come from the module; an unset hook keeps the original,
+and a hook can call the original through `glue5_game::orig`.
+
+## Notes
+
+- Game data must be the copies prepared for the browser build (re-keyed archives).
+- The user directory (saves, `glue5.json`, the engine log `game.log`, the
+  renderer's caches in `cache/`) is SDL's per-user application directory:
+  `~/Library/Application Support/glue5` on macOS, `~/.local/share/glue5` on
+  Linux, `%APPDATA%\glue5` on Windows.
+
+[wasm2c]: https://github.com/WebAssembly/wabt/tree/main/wasm2c
+[xcodegen]: https://github.com/yonaskolb/XcodeGen

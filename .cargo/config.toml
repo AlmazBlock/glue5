@@ -1,0 +1,12 @@
+[alias]
+# A workspace of its own (see Cargo.toml): run it from the repository root.
+xtask = "run --quiet --manifest-path xtask/Cargo.toml --"
+
+[env]
+# Directory with the game build (b/<build>/game.wasm, b/<build>/shaders, data/).
+# Override in the environment, or symlink ./game to the real location.
+GLUE5_GAME_DIR = { value = "game", relative = true }
+
+# iOS devices: the oldest CPU iOS 16.4 runs on (A11) instead of the A7 default.
+[target.aarch64-apple-ios]
+rustflags = ["-Ctarget-cpu=apple-a11"]

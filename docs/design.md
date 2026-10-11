@@ -1,0 +1,314 @@
+# Design decisions
+
+This document covers the architecture, platform constraints and tradeoffs
+behind Glue 5.
+
+## One application for every platform
+
+`crates/glue5` is the application: a library with one entry point
+(`glue5::main`) and a thin binary for desktop. Each platform only adds the
+way the operating system starts a process:
+
+| Platform | Started by | Packaging |
+|---|---|---|
+| macOS, Linux, Windows | the `glue5` binary | `cargo build` |
+| iOS | `platform/ios/main.c` calls `glue5_main`, which hands the process to SDL (`SDL_RunApp`) | an Xcode project generated from `platform/ios/project.yml` by xcodegen links the crate as a static library (`cargo xtask ios`) |
+| Android (next) | SDL's Java activity loads the library and calls `SDL_main` | Gradle project with SDL's activity, the library built with the NDK |
+
+Platform-specific Rust code uses `cfg`s for details such as default folders
+and window flags. The app shares its UI and event handling across platforms.
+The generated Xcode project replaces the earlier `glue5-ios` crate and
+cargo-mobile2 setup; there is no Swift UI or Xcode project to maintain by
+hand.
+
+## Compiling the game module
+
+`game.wasm` uses 64-bit memory, threads and SIMD. wasm2c translates it to C,
+then the platform's compiler builds native code ahead of time. Firefox's
+RLBox sandboxes use the same approach.
+
+We considered WebAssembly runtimes such as Wasmtime, Wasmer and WAMR.
+Their usual ahead-of-time paths map compiled code as executable at run
+time, which conflicts with iOS restrictions. Interpreters are too slow for
+this game, and the static compilation modes are less established. These
+runtimes also check the bounds of each access to 64-bit memory. Glue 5
+treats the game as trusted code and disables those checks through wasm2c's
+`WASM_RT_NONCONFORMING_*` modes.
+
+wasm2c leaves several pieces to the host: a C function for each import,
+trap handling around calls into the module, Emscripten's setjmp/longjmp
+wrappers (`invoke_*`) and an instance per thread. Trap handling uses setjmp
+and must stay in C.
+
+The `glue5-game` build script generates this glue by reading the module
+with wasmparser. Imports use a function-pointer table filled by Rust at
+startup, so the generated C does not depend on Rust symbols or static
+library link order. Exports return traps as values, and hooks replace game
+functions by name. The Rust crate exposes the FFI bindings.
+
+SDL3 handles windows, input, gamepads, audio and dialogs. Other dependencies
+include wgpu, naga, egui, parking_lot_core for wasm futexes, bcdec_rs for BC
+decoding, png and serde_json. Project code implements the Emscripten system
+interface, translates the engine's command ring to wgpu, adapts the shaders
+and supplies touch controls.
+
+We patch wasm2c and wgpu-core. The patch files live in `patches/` and
+`cargo xtask setup` applies them to pinned sources. Cargo cannot apply
+patch files directly to a dependency.
+
+The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes
+and a fixed memory base. The wgpu-core patches clear usage scopes by their
+members and stop pipelines from retaining shader modules, reducing CPU
+work during pass encoding and memory use. We would like to submit both
+sets upstream.
+
+## Game files are never in the app
+
+The game's data is 20 GB (`data/`), plus this build's translated shaders
+(`b/<build>/shaders/`, 155 MB). Neither goes in the application package:
+
+- it is the user's copy of the game, not ours to distribute;
+- 20 GB is far over what app stores accept, and every app update would
+  carry it again;
+- the shaders belong to the game build (the build checks `game.wasm`'s
+  hash), so they live and move with the data.
+
+The application looks for a game directory (`data/` + `b/<build>/shaders/`),
+in this order: the command line (desktop), `GLUE5_GAME_DIR`, the last
+location (`glue5.json`), the platform's default places, then (desktop) a
+folder picker. Default places:
+
+| Platform | Default | How the files get there |
+|---|---|---|
+| desktop | `game` next to the executable or in the repository | copy, or pick any folder |
+| iOS | the app's `Documents/game` | Finder (device > Files) or the Files app; `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace` make the folder visible |
+| Android | the app's external files directory, `Android/data/<app>/files/game` | USB file transfer; no storage permission needed |
+
+A future VFS backend could read files over HTTP and cache them locally,
+allowing a phone to start without copying all 20 GB first. The WASM build
+already has HTTP file imports (`wasm_httpfs_*`), currently stubbed here.
+This would be implemented in the VFS and is not required for the initial
+release.
+
+## Shaders: no full precompile
+
+The 4919 translated WGSL shaders are adapted and
+compiled, with their render pipelines, on background threads. A draw whose
+pipeline is not ready is skipped for that frame instead of waiting, so a new
+pipeline never stalls a frame; the cost is an object missing for a frame or
+two. Every pipeline the game asks for is recorded
+(`<user dir>/cache/pipelines.jsonl`) and, together with the seed that comes
+with the game (`shaders/pipelines.json`, 720 recipes), compiled ahead at the
+next start, in the background while the game loads. Metal keeps compiled
+shaders in the system cache; on Vulkan the pipeline cache is saved to
+`cache/`.
+
+We cannot enumerate every pipeline in advance. Each combines a shader
+pair, vertex layout, blend/depth/raster states and target formats; actual
+combinations are discovered during play. Compiling all shaders would take
+minutes on a phone after each game build or driver update and use memory
+needed by the game. It would also leave pipeline compilation unfinished,
+which is where Metal and Vulkan do most of the work. Recording pipelines
+as they are used lets later runs prepare the relevant combinations.
+
+Metal uses the system shader cache on macOS and iOS. On Vulkan, the app
+saves wgpu's pipeline cache per adapter and driver. To improve first-run
+coverage, merge `pipelines.jsonl` from several playthroughs into the game's
+`pipelines.json` seed.
+
+## Application UI and game menus
+
+The engine supplies the PC front end, including loading screens, the pause
+menu (Esc / Start), map, settings and phone.
+
+The application uses [egui] for:
+
+- a start page showing the game files, Play and Settings before the engine
+  loads, with instructions if files are missing;
+- a settings page (resolution, upscaling, VSync, frame rate, touch
+  controls, low memory, game folder), opened from the start page or, in the
+  game, with F1, the ⚙ button on touch screens or holding Back + Start on a
+  controller;
+- the touch controls.
+
+All pages share the game's window. SDL's mobile backends restrict multiple
+windows, while a second desktop window would add another surface and
+separate focus and input routing. On phones, pages fill the safe area. On
+larger screens, they appear as a centered panel over a dimmed game frame.
+The widgets support controllers and keyboards: D-pad, left stick or arrows
+move focus, A / Enter activates, and B / Esc goes back. Held directions
+repeat.
+
+The application creates the GPU device and surface (`glue5_gpu::Screen`)
+before starting the engine. It uses them to draw the start page. Play
+transfers both to the game's renderer, which then draws the overlay after
+each game frame. The device is reused, with one owner of the surface at a
+time.
+
+The start page replaces the previous message boxes and allows changes to
+startup settings, such as frame rate, low memory and mobile resolution,
+before the engine loads. It also lets users adjust settings after a failed
+launch. Automatic restarts happen only when requested by the game itself
+on desktop, using `--play`. The engine cannot start twice in one process:
+its runtime is global and shutdown never completes. Returning to the start
+page from the game is therefore unsupported; Quit ends the app.
+
+The app draws the ⚙ button independently of the touch controls. It remains
+visible at reduced opacity when a controller is in use or touch controls
+are disabled. It consumes touches before they reach the virtual controller,
+so opening settings leaves the physical controller in pad slot 0.
+
+egui receives SDL events directly and renders at the window's resolution,
+independently of the game's render scale. Native UI would require separate
+SwiftUI and Android implementations. Using Scaleform would require hooks
+into the game's menus, while iced or Slint would add their own event loops
+and renderers.
+
+Graphics quality remains in the game's menu to avoid conflicting settings
+(see Known limits).
+
+## Resolution, resizing and upscaling
+
+The game's back buffer is the window's size in pixels multiplied by the
+render scale (50-100% per axis). Dimensions are rounded to even numbers,
+with a minimum of 320x240 and a maximum of 4K, or 1440p in low-memory mode.
+The first start chooses a scale targeting roughly 1080 lines on desktop
+and 720 on phones to limit GPU load on high-resolution screens. Existing
+settings files are migrated from a fixed height to a scale. The UI shows
+both the render and output dimensions.
+
+Resizing affects three resources:
+
+| What | Cost | When |
+|---|---|---|
+| The surface (swapchain) | `Surface::configure` waits for the GPU to be idle | at the next frame after the size changes |
+| The engine's back buffer | a device reset recreates screen-sized render targets | once the size is stable |
+| The MetalFX scaler | creation takes milliseconds; depends on input and output dimensions | once the sizes have been stable for 250 ms |
+
+`grcDevice::Manage` waits until it has observed the same requested size for
+20 frames before resetting. The app writes the latest size from its event
+loop. On macOS and Windows, that loop stops running during the system's
+modal resize loop, so the engine receives the final size after the drag.
+Frames continue at the old resolution and are scaled to fit, preserving
+their aspect ratio. An SDL event watch runs during the modal loop and
+updates the surface size on the renderer.
+
+Only the renderer resizes the Metal layer
+(`SDL_VIDEO_METAL_AUTO_RESIZE_DRAWABLE=0`). Allowing SDL to resize it as well
+caused frames rendered for one size to appear at another. The current phone
+app uses a fixed window and sets its back buffer at startup. Although
+`InputBlock::resize` is available there, the memory peak from a device reset
+has not been measured on a phone.
+
+The present step scales the back buffer with Catmull-Rom bicubic filtering
+or MetalFX Spatial on supported Apple GPUs (`glue5-gpu/src/metalfx.rs`).
+MetalFX runs on the submit thread and uses the same queue. It has a separate
+command buffer because wgpu does not let raw Metal commands share its
+encoder. The MetalFX commands run after the game's commands and before the
+present pass, which copies the result 1:1.
+
+The scaler uses perceptual mode to match the gamma-encoded back buffer.
+It scales the game's HUD along with the scene; the app overlay is drawn
+afterwards. During resizing, frames use the bicubic path. VSync and upscaler
+changes apply on the next frame. Linking the MetalFX framework requires
+macOS 13; the iOS requirement remains iOS 16.
+
+Spatial scaling needs only the finished frame. Temporal scaling also needs
+colour before post-processing, depth, motion vectors and a jittered
+projection. Those inputs are unavailable at the present step. Supporting
+it requires identifying the targets in the engine's command stream and
+hooking its camera and TAA. MetalFX frame interpolation uses the same depth
+and motion inputs (see Future work).
+
+## Input
+
+Input is routed through the game's PC interfaces to preserve controller
+prompts, aim assist and menu behaviour:
+
+- **Keyboard and mouse** go to the engine's input block, exactly as the
+  browser page fed it (virtual-key codes, relative mouse with pointer lock).
+  Same on desktop and on tablets or phones with a keyboard.
+- **Controllers** (SDL: XInput, PlayStation, Switch, Apple's GameController,
+  Android) feed the engine's own pad code: the `pad_update` hook writes RAGE's
+  pad state after `rage::ioPad::Update`, where XInput would on PC. The game
+  then shows controller prompts by itself.
+- **Touch controls** are a virtual controller in pad slot 0: a floating
+  stick on the left, camera drag and buttons on the right, laid out in the
+  safe area. They are shown on touch devices while touch is the input in use
+  and hide as soon as a controller, keyboard or mouse is used (setting:
+  Auto / Always / Off). Visibility follows the last input used, so an idle
+  paired controller does not hide the touch controls.
+- **Text entry**: hooks on `CTextInputBox::Open/Close` tell the app when the
+  game wants text (save names, cheats). On touch devices that starts SDL
+  text input, which brings up the system keyboard; typed text goes into the
+  same input block as a physical keyboard. The system keyboard handles
+  languages, dictation and accessibility, and stays hidden when a hardware
+  keyboard is attached.
+
+## Known limits
+
+- The renderer handles missing mobile GPU features as follows:
+  - no BC texture compression (iPhones before the A17 Pro, most Android
+    GPUs): textures are decoded on the CPU (slower uploads, more memory),
+    large ones without their first level;
+  - no filtering of 32-bit float textures (many Android GPUs): programs
+    that sample one get a variant that reads it unfiltered;
+  - no indirect draws: those draws are skipped.
+
+  `GLUE5_NO_BC=1` and `GLUE5_NO_FLOAT32_FILTER=1` force the first two on a
+  desktop GPU, for testing.
+- A resolution change on mobile applies at the next start (see
+  Resolution, resizing and upscaling).
+- Graphics quality is set in the game's menu (Settings › Graphics). The
+  app omits the WASM build's command-line quality switches because they
+  would override the menu at each start. App settings control back buffer
+  size (`-forceResolution`), frame rate (`-frameLimit`), memory pools and
+  touch controls.
+- The low-memory profile defaults on for phones and tablets with less than
+  8 GB of RAM. It uses smaller pools and lowers texture quality, LOD,
+  density, variety and shadows to the WASM build's low preset. The normal
+  profile uses about 4 GB. `game_settings::apply_low_preset` writes the
+  graphics preset to `settings.xml` once; later changes use the game's menu.
+
+  The resource heap is capped at its starting size (`gameResourceMB`,
+  768 MiB). The PC build grows it by 256 MiB whenever the streaming engine
+  asks how much memory is left. This can retain resources from areas the
+  player has left and exhaust available memory on phones. Capping the heap
+  makes the streaming engine evict resources when it fills, as on consoles.
+  Setting it too low also causes problems: at 512 MiB, the prologue never
+  finishes loading.
+- The engine's shutdown waits indefinitely for work that never arrives.
+  Glue 5 hooks `CSystem::WantToExit` for Exit Game and `rage::rlShutdown`
+  for restarts requested from within a frame. The app then exits or, on
+  desktop, relaunches. The engine's restart-pending flag distinguishes the
+  two cases; its settings menu sets that flag after saving.
+
+## Future work
+
+- **Temporal upscaling** (MetalFX's temporal scaler on Apple platforms,
+  FSR 2 elsewhere), then frame interpolation: sharper than the spatial
+  scaler, but it needs the engine's colour before post-processing, depth,
+  motion vectors and a jittered projection (hooking the renderer's camera
+  and TAA), and interpolated frames need the HUD composed after them. On
+  platforms without MetalFX, FSR 1 (EASU + RCAS, plain shaders) would take
+  the spatial slot.
+- **Frames queued by the engine**: `CSystem::RenderThreadInit` sets
+  `FrameQueueLimit` to 1, so the engine's render thread waits for the GPU
+  to finish the previous frame before it starts the next ("Wait on queued
+  frames"). Allowing a second queued frame may reduce this wait, at the
+  cost of extra latency. Measure the effect with
+  `GLUE5_ENGINE_ARGS=-FrameQueueLimit=2 cargo xtask ios-run`; the result
+  depends on the CPU and GPU bottlenecks.
+- **Shader adaptation on naga's IR**: the translated WGSL is adapted as
+  text (regular expressions: constant buffers packed, interpolation
+  copied, depth reads, storage formats), checked against all 4919 shaders
+  by a test (`cargo test -r -p glue5-gpu -- --ignored`). Doing it on the
+  parsed module and handing wgpu the IR would be sturdier against a new
+  game build's shaders.
+- **macOS app bundle**: the desktop build is a bare executable. As a
+  `.app` with `LSApplicationCategoryType = public.app-category.games` it
+  would get Game Mode in full screen (iOS has it already, through the same
+  key and `GCSupportsGameMode`), and could be signed and notarized for
+  distribution.
+
+[egui]: https://github.com/emilk/egui

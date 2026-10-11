@@ -1,0 +1,70 @@
+# The iOS app: a thin package around the glue5 library (the same crate as
+# the desktop app). `cargo xtask ios` / `ios-build` build the library, then
+# generate the Xcode project (Glue5.xcodeproj, Info.plist: ignored by git)
+# next to this file.
+name: Glue5
+options:
+  deploymentTarget:
+    iOS: "16.4"
+settings:
+  base:
+    PRODUCT_NAME: Glue 5
+    PRODUCT_BUNDLE_IDENTIFIER: local.glue5
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ARCHS: arm64
+    DEAD_CODE_STRIPPING: YES
+    DEVELOPMENT_TEAM: ${GLUE5_TEAM}
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_ENTITLEMENTS: Glue5.entitlements
+    # The library built by cargo.
+    OTHER_LDFLAGS: $(PROJECT_DIR)/../../target/aarch64-apple-ios/release/libglue5.a -liconv
+targets:
+  Glue5:
+    type: application
+    platform: iOS
+    scheme: {}
+    sources:
+      - path: main.c
+    dependencies:
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreBluetooth.framework
+      - sdk: CoreFoundation.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreMotion.framework
+      - sdk: CoreVideo.framework
+      - sdk: Foundation.framework
+      - sdk: GameController.framework
+      - sdk: Metal.framework
+      - sdk: MetalFX.framework
+      - sdk: OpenGLES.framework
+      - sdk: QuartzCore.framework
+      - sdk: UIKit.framework
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Glue 5
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        # ProMotion iPhones run faster than 60 Hz only with this.
+        CADisableMinimumFrameDurationOnPhone: true
+        # A game: Game Mode (iOS 18+) gives it the CPU and GPU first and
+        # lowers Bluetooth controller latency while it is in front.
+        LSApplicationCategoryType: public.app-category.games
+        GCSupportsGameMode: true
+        UIStatusBarHidden: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        # The game goes in Documents/game (Finder / Files app).
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # Mouse and trackpad (iPad), game controllers.
+        UIApplicationSupportsIndirectInputEvents: true
+        GCSupportsControllerUserInteraction: true
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad

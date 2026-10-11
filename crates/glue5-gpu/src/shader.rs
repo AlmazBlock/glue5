@@ -1,0 +1,1126 @@
+//! The engine's shaders: WGSL translated ahead of time from the D3D11
+//! bytecode (`shaders/<hash>.wgsl`, `index.json`), adapted to wgpu and
+//! reflected.
+//!
+//! The translator's conventions: group 0 is the vertex (or compute) stage,
+//! group 1 the pixel stage; binding = D3D register + 0 (constant buffers,
+//! `b15` = the special-constant table of `<hash>.consts.json`), 16
+//! (samplers), 32 (SRVs), 160 (UAVs), 176 (UAV counters).
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+
+use anyhow::{Context, Result, bail};
+use regex::Regex;
+use wgpu::util::DeviceExt;
+
+use crate::format;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Stage {
+    Vertex = 0,
+    Pixel = 1,
+    Compute = 2,
+}
+
+impl Stage {
+    pub fn from_d3d(v: u32) -> Option<Stage> {
+        match v {
+            0 => Some(Stage::Vertex),
+            1 => Some(Stage::Pixel),
+            2 => Some(Stage::Compute),
+            _ => None,
+        }
+    }
+
+    pub fn group(self) -> u32 {
+        if self == Stage::Pixel { 1 } else { 0 }
+    }
+
+    fn visibility(self) -> wgpu::ShaderStages {
+        match self {
+            Stage::Vertex => wgpu::ShaderStages::VERTEX,
+            Stage::Pixel => wgpu::ShaderStages::FRAGMENT,
+            Stage::Compute => wgpu::ShaderStages::COMPUTE,
+        }
+    }
+}
+
+/// Binding numbers.
+pub const PACKED_CBUFFERS: u32 = 0;
+pub const CONSTANT_TABLE: u32 = 15;
+pub const SAMPLERS: u32 = 16;
+pub const SRVS: u32 = 32;
+pub const UAVS: u32 = 160;
+pub const UAV_COUNTERS: u32 = 176;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sample {
+    Float,
+    Depth,
+    Uint,
+    Sint,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Kind {
+    Uniform,
+    Storage { read_only: bool },
+    Sampler { comparison: bool },
+    Texture { sample: Sample, dim: wgpu::TextureViewDimension, multisampled: bool },
+    StorageTexture { access: wgpu::StorageTextureAccess, format: wgpu::TextureFormat, dim: wgpu::TextureViewDimension },
+}
+
+#[derive(Clone, Debug)]
+pub struct Binding {
+    pub binding: u32,
+    pub kind: Kind,
+}
+
+impl Binding {
+    pub fn layout_entry(&self, stage: Stage) -> wgpu::BindGroupLayoutEntry {
+        use wgpu::{BindingType, BufferBindingType, TextureSampleType};
+        let ty = match &self.kind {
+            Kind::Uniform => BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: self.binding != CONSTANT_TABLE,
+                min_binding_size: None,
+            },
+            Kind::Storage { read_only } => BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: *read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            Kind::Sampler { comparison: true } => BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+            Kind::Sampler { comparison: false } => BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            Kind::Texture { sample, dim, multisampled } => BindingType::Texture {
+                sample_type: match sample {
+                    Sample::Float => TextureSampleType::Float { filterable: !multisampled },
+                    Sample::Depth => TextureSampleType::Depth,
+                    Sample::Uint => TextureSampleType::Uint,
+                    Sample::Sint => TextureSampleType::Sint,
+                },
+                view_dimension: *dim,
+                multisampled: *multisampled,
+            },
+            Kind::StorageTexture { access, format, dim } => {
+                BindingType::StorageTexture { access: *access, format: *format, view_dimension: *dim }
+            }
+        };
+        wgpu::BindGroupLayoutEntry { binding: self.binding, visibility: stage.visibility(), ty, count: None }
+    }
+}
+
+/// The constant buffers a stage reads, merged into one uniform struct at
+/// binding 0 (one dynamic offset per stage instead of up to 14 bindings).
+#[derive(Clone, Debug)]
+pub struct Pack {
+    /// (D3D slot, size, offset), by slot.
+    pub members: Vec<PackMember>,
+    pub size: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PackMember {
+    pub slot: u32,
+    pub size: u32,
+    pub offset: u32,
+}
+
+/// One translated shader, ready to use.
+pub struct Program {
+    /// Unique per program (keys of caches).
+    pub id: u32,
+    pub hash: u64,
+    pub stage: Stage,
+    pub label: String,
+    /// The WGSL as compiled (constant buffers packed).
+    pub text: String,
+    /// Modules made from it, kept while in use (see [`Modules`]); shared by
+    /// the copies of a program with the same text.
+    pub modules: Arc<Modules>,
+    /// The stage's bindings, by binding number.
+    pub bindings: Vec<Binding>,
+    /// Layout of the stage's group (compute: per pipeline, see compute.rs).
+    pub layout: Option<wgpu::BindGroupLayout>,
+    pub pack: Option<Pack>,
+    /// The special-constant table (binding 15).
+    pub consts: Option<wgpu::Buffer>,
+    /// Pixel shader: colour outputs written (bit per location).
+    pub outputs: u8,
+    /// Pixel shader: interpolation attributes of its inputs, by location.
+    pub interpolation: Vec<(u32, String)>,
+    /// Vertex shader: reads vertex_index / instance_index.
+    pub vertex_index: bool,
+    pub instance_index: bool,
+    pub clip_distances: bool,
+    /// Indices into `bindings` of the sampled textures.
+    pub textures: Vec<usize>,
+    /// Inter-stage locations (vertex outputs / pixel inputs).
+    pub locations: Vec<u32>,
+    /// (texture binding, sampler binding) sampled together.
+    pub pairs: Vec<(u32, u32)>,
+    /// Textures declared unfilterable (bit: binding - SRVS), for GPUs that
+    /// cannot filter the 32-bit float textures bound there, or read as depth
+    /// textures (`depth`); the samplers used with them are non-filtering.
+    pub unfiltered: u128,
+    /// Textures read as depth textures (bit: binding - SRVS): depth buffers
+    /// the shader reads as floats, read directly (see [`with_depth_reads`]).
+    pub depth: u128,
+    /// Copies for other bindings, made once each: (unfiltered, depth).
+    copies: Mutex<Vec<((u128, u128), Arc<Program>)>>,
+}
+
+impl std::fmt::Debug for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+static NEXT_PROGRAM: AtomicU32 = AtomicU32::new(1);
+
+pub fn next_program_id() -> u32 {
+    NEXT_PROGRAM.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Shader modules made from a program's text, by variant key ("" for the
+/// text itself). wgpu's Metal and Vulkan backends keep each module's naga
+/// IR, ~470 KB for the game's larger shaders, while it lives; a module is
+/// needed only to make pipelines, so idle ones are released and made again
+/// from the text when a new pipeline needs them (on the compile threads).
+#[derive(Default)]
+pub struct Modules(Mutex<HashMap<String, (Option<wgpu::ShaderModule>, u64)>>);
+
+fn now_secs() -> u64 {
+    static START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+    START.elapsed().as_secs()
+}
+
+impl Modules {
+    pub fn with(module: wgpu::ShaderModule) -> Modules {
+        Modules(Mutex::new(HashMap::from([(String::new(), (Some(module), now_secs()))])))
+    }
+
+    /// The module for `key`, made by `make` if missing. Failures are
+    /// remembered (not retried).
+    fn get_or_make(&self, key: &str, make: impl FnOnce() -> Option<wgpu::ShaderModule>) -> Option<wgpu::ShaderModule> {
+        if let Some((module, used)) = self.0.lock().unwrap().get_mut(key) {
+            *used = now_secs();
+            return module.clone();
+        }
+        // Made outside the lock: compiling takes a while.
+        let module = make();
+        self.0.lock().unwrap().insert(key.to_owned(), (module.clone(), now_secs()));
+        module
+    }
+
+    /// Takes out the modules unused for `idle` seconds (until `out` holds
+    /// `max`). Dropping them frees their naga IR, which takes a while for
+    /// thousands: the caller does it off the recording thread.
+    pub fn take_idle(&self, idle: u64, max: usize, out: &mut Vec<wgpu::ShaderModule>) {
+        let now = now_secs();
+        let mut map = self.0.lock().unwrap();
+        let idle_keys: Vec<String> = map
+            .iter()
+            .filter(|(_, (module, used))| module.is_some() && now - *used >= idle)
+            .map(|(k, _)| k.clone())
+            .take(max.saturating_sub(out.len()))
+            .collect();
+        for key in idle_keys {
+            if let Some((Some(module), _)) = map.remove(&key) {
+                out.push(module);
+            }
+        }
+    }
+}
+
+/// The translated shaders on disk.
+pub struct Library {
+    dir: PathBuf,
+    index: HashMap<u64, Entry>,
+    /// Programs by hash: prepared once, shared by every shader object with
+    /// that hash. `None`: not usable.
+    programs: Mutex<HashMap<u64, Arc<OnceLock<Option<Arc<Program>>>>>>,
+}
+
+struct Entry {
+    label: String,
+    ok: bool,
+    consts: bool,
+    error: Option<String>,
+}
+
+impl Library {
+    pub fn open(dir: &Path) -> Result<Library> {
+        let path = dir.join("index.json");
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let json: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut index = HashMap::new();
+        for (key, v) in json.as_object().context("index.json is not an object")? {
+            let Ok(hash) = u64::from_str_radix(key, 16) else {
+                continue;
+            };
+            let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+            index.insert(
+                hash,
+                Entry {
+                    label: format!("{}::{}", s("effect"), s("program")),
+                    ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+                    consts: v.get("consts").is_some(),
+                    error: v.get("error").and_then(|x| x.as_str()).map(String::from),
+                },
+            );
+        }
+        log::info!("gpu: {} translated shaders in {}", index.len(), dir.display());
+        Ok(Library { dir: dir.to_owned(), index, programs: Mutex::default() })
+    }
+
+    pub fn label(&self, hash: u64) -> String {
+        self.index.get(&hash).map_or_else(|| format!("{hash:016x}"), |e| e.label.clone())
+    }
+
+    /// Takes out, to be dropped elsewhere, up to `max` shader modules
+    /// unused for `idle` seconds.
+    pub fn take_idle_modules(&self, idle: u64, max: usize, out: &mut Vec<wgpu::ShaderModule>) {
+        let programs: Vec<Arc<Program>> =
+            self.programs.lock().unwrap().values().filter_map(|slot| slot.get().cloned().flatten()).collect();
+        for p in programs {
+            if out.len() >= max {
+                break;
+            }
+            p.take_idle_modules(idle, max, out);
+        }
+    }
+
+    /// The slot of a program: filled by [`Library::prepare`], once.
+    pub fn slot(&self, hash: u64) -> Arc<OnceLock<Option<Arc<Program>>>> {
+        self.programs.lock().unwrap().entry(hash).or_default().clone()
+    }
+
+    /// Loads, adapts and compiles a shader (any thread). Errors are logged.
+    pub fn prepare(&self, device: &wgpu::Device, hash: u64, stage: Stage) -> Option<Arc<Program>> {
+        match self.load(device, hash, stage) {
+            Ok(p) => Some(Arc::new(p)),
+            Err(e) => {
+                log::warn!("gpu: {} shader {hash:016x} ({}) unusable: {e:#}", stage_name(stage), self.label(hash));
+                None
+            }
+        }
+    }
+
+    fn load(&self, device: &wgpu::Device, hash: u64, stage: Stage) -> Result<Program> {
+        let entry = self.index.get(&hash).context("not in the shader index")?;
+        if !entry.ok {
+            bail!("not translated: {}", entry.error.as_deref().unwrap_or("?"));
+        }
+        let name = format!("{hash:016x}");
+        let source = std::fs::read_to_string(self.dir.join(format!("{name}.wgsl")))?;
+        let (text, pack) = pack_uniforms(&source);
+        if let Some(pack) = &pack
+            && pack.size > device.limits().max_uniform_buffer_binding_size as u32
+        {
+            bail!("constant buffers total {} bytes, over the uniform binding limit", pack.size);
+        }
+        // Validated now, made again when a pipeline needs it: the engine
+        // creates all its shaders (thousands) while loading.
+        drop(create_module(device, &entry.label, &text)?);
+        let modules = Arc::new(Modules::default());
+        let consts = if entry.consts {
+            let json = std::fs::read_to_string(self.dir.join(format!("{name}.consts.json")))?;
+            let values: Vec<u64> = serde_json::from_str(&json)?;
+            // One u32 per 16-byte slot (x of a uvec4).
+            let mut data = vec![0u32; values.len().max(1) * 4];
+            for (i, v) in values.iter().enumerate() {
+                data[i * 4] = *v as u32;
+            }
+            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("constant table"),
+                contents: bytemuck::cast_slice(&data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            }))
+        } else {
+            None
+        };
+
+        let bindings = stage_bindings(&text, stage);
+        let textures = bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| matches!(b.kind, Kind::Texture { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        let (outputs, interpolation, locations) = match stage {
+            Stage::Pixel => (fragment_outputs(&text), interpolations(&text), ps_input_locations(&text)),
+            Stage::Vertex => (0, Vec::new(), vs_output_locations(&text)),
+            Stage::Compute => (0, Vec::new(), Vec::new()),
+        };
+        let mut program = Program {
+            id: next_program_id(),
+            hash,
+            stage,
+            label: entry.label.clone(),
+            modules,
+            bindings,
+            layout: None,
+            pack,
+            consts,
+            outputs,
+            interpolation,
+            vertex_index: RE_VERTEX_INDEX.is_match(&text),
+            instance_index: RE_INSTANCE_INDEX.is_match(&text),
+            clip_distances: text.contains("@builtin(clip_distances)"),
+            textures,
+            locations,
+            pairs: sampling_pairs(&text),
+            unfiltered: 0,
+            depth: 0,
+            copies: Mutex::default(),
+            text,
+        };
+        program.layout = program.make_layout(device);
+        Ok(program)
+    }
+}
+
+/// A stage's resource bindings (its group), by binding number.
+pub fn stage_bindings(text: &str, stage: Stage) -> Vec<Binding> {
+    let group = stage.group();
+    let mut bindings: Vec<Binding> =
+        reflect_bindings(text).into_iter().filter(|(g, _)| *g == group).map(|(_, b)| b).collect();
+    bindings.sort_by_key(|b| b.binding);
+    bindings
+}
+
+pub fn stage_name(stage: Stage) -> &'static str {
+    ["vs", "ps", "cs"][stage as usize]
+}
+
+/// Compiles WGSL; a module that fails validation is an error (an invalid
+/// module would invalidate every pipeline and command buffer using it).
+pub fn create_module(device: &wgpu::Device, label: &str, text: &str) -> Result<wgpu::ShaderModule> {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    // The translated code is trusted: no loop bounding (loops come from D3D
+    // bytecode). Bounds checks stay: D3D reads zeros out of bounds.
+    let checks = wgpu::ShaderRuntimeChecks { force_loop_bounding: false, ..wgpu::ShaderRuntimeChecks::checked() };
+    let module = unsafe {
+        device.create_shader_module_trusted(
+            wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(text.into()) },
+            checks,
+        )
+    };
+    match pollster::block_on(scope.pop()) {
+        None => Ok(module),
+        Some(e) => bail!("{e}"),
+    }
+}
+
+impl Program {
+    /// The same program under a new id (with its own pipelines and bind
+    /// groups); the caller changes what differs.
+    pub fn copy(&self) -> Program {
+        Program {
+            id: next_program_id(),
+            hash: self.hash,
+            stage: self.stage,
+            label: self.label.clone(),
+            text: self.text.clone(),
+            modules: self.modules.clone(),
+            bindings: self.bindings.clone(),
+            layout: self.layout.clone(),
+            pack: self.pack.clone(),
+            consts: self.consts.clone(),
+            outputs: self.outputs,
+            interpolation: self.interpolation.clone(),
+            vertex_index: self.vertex_index,
+            instance_index: self.instance_index,
+            clip_distances: self.clip_distances,
+            textures: self.textures.clone(),
+            locations: self.locations.clone(),
+            pairs: self.pairs.clone(),
+            unfiltered: self.unfiltered,
+            depth: self.depth,
+            copies: Mutex::default(),
+        }
+    }
+
+    /// Whether the sampler at `binding` is used with an unfilterable texture.
+    pub fn nonfiltering(&self, binding: u32) -> bool {
+        self.pairs.iter().any(|&(t, s)| s == binding && self.unfiltered >> (t - SRVS) & 1 != 0)
+    }
+
+    /// The layout entries of the stage's group.
+    pub fn layout_entries(&self) -> Vec<wgpu::BindGroupLayoutEntry> {
+        use wgpu::{BindingType, SamplerBindingType, TextureSampleType};
+        self.bindings
+            .iter()
+            .map(|b| {
+                let mut entry = b.layout_entry(self.stage);
+                match &mut entry.ty {
+                    BindingType::Texture { sample_type: TextureSampleType::Float { filterable }, .. }
+                        if self.unfiltered >> (b.binding - SRVS) & 1 != 0 =>
+                    {
+                        *filterable = false
+                    }
+                    BindingType::Sampler(ty @ SamplerBindingType::Filtering) if self.nonfiltering(b.binding) => {
+                        *ty = SamplerBindingType::NonFiltering
+                    }
+                    _ => {}
+                }
+                entry
+            })
+            .collect()
+    }
+
+    /// The group's layout (compute: per pipeline, see ops.rs).
+    fn make_layout(&self, device: &wgpu::Device) -> Option<wgpu::BindGroupLayout> {
+        (self.stage != Stage::Compute && !self.bindings.is_empty()).then(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(&self.label),
+                entries: &self.layout_entries(),
+            })
+        })
+    }
+
+    /// This program for what is bound: the textures in `unfiltered`
+    /// declared unfilterable (GPUs that cannot filter 32-bit float textures),
+    /// those in `depth` read as depth textures. Made once per pair of sets;
+    /// when the depth reads cannot be rewritten, it has none (`depth` is 0:
+    /// the renderer copies those depth buffers to float textures instead).
+    pub fn for_bindings(self: &Arc<Self>, device: &wgpu::Device, unfiltered: u128, depth: u128) -> Arc<Program> {
+        if (unfiltered, depth) == (self.unfiltered, self.depth) {
+            return self.clone();
+        }
+        let key = (unfiltered, depth);
+        if let Some((_, p)) = self.copies.lock().unwrap().iter().find(|(k, _)| *k == key) {
+            return p.clone();
+        }
+        let mut p = self.copy();
+        p.unfiltered = unfiltered | depth;
+        if depth != 0 {
+            let module =
+                with_depth_reads(&self.text, depth).ok_or_else(|| anyhow::anyhow!("not rewritable")).and_then(|text| {
+                    create_module(device, &format!("{} [depth reads]", self.label), &text).map(|m| (text, m))
+                });
+            match module {
+                Ok((text, module)) => {
+                    p.bindings = stage_bindings(&text, self.stage);
+                    p.textures = p
+                        .bindings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, b)| matches!(b.kind, Kind::Texture { .. }))
+                        .map(|(i, _)| i)
+                        .collect();
+                    p.text = text;
+                    p.modules = Arc::new(Modules::with(module));
+                    p.depth = depth;
+                }
+                Err(e) => {
+                    crate::log_once(&format!("depth{}", self.label), || {
+                        format!("{}: depth read as float through a copy ({e:#})", self.label)
+                    });
+                    let p = self.for_bindings(device, unfiltered, 0);
+                    self.copies.lock().unwrap().push((key, p.clone()));
+                    return p;
+                }
+            }
+        }
+        p.layout = p.make_layout(device);
+        let p = Arc::new(p);
+        self.copies.lock().unwrap().push((key, p.clone()));
+        p
+    }
+
+    /// The program's module (made again if released while idle).
+    pub fn module(&self, device: &wgpu::Device) -> Option<wgpu::ShaderModule> {
+        self.modules.get_or_make("", || {
+            create_module(device, &self.label, &self.text).map_err(|e| log::warn!("gpu: {}: {e:#}", self.label)).ok()
+        })
+    }
+
+    /// A variant of this program's module (`make` rewrites the text).
+    pub fn variant(
+        &self,
+        device: &wgpu::Device,
+        key: &str,
+        make: impl FnOnce(&str) -> String,
+    ) -> Option<wgpu::ShaderModule> {
+        self.modules.get_or_make(key, || {
+            let text = make(&self.text);
+            let label = format!("{} [{key}]", self.label);
+            create_module(device, &label, &text).map_err(|e| log::warn!("gpu: variant {label}: {e:#}")).ok()
+        })
+    }
+
+    /// Takes out the modules of this program and its copies unused for
+    /// `idle` seconds (until `out` holds `max`).
+    pub fn take_idle_modules(&self, idle: u64, max: usize, out: &mut Vec<wgpu::ShaderModule>) {
+        self.modules.take_idle(idle, max, out);
+        for (_, p) in self.copies.lock().unwrap().iter() {
+            p.modules.take_idle(idle, max, out);
+        }
+    }
+}
+
+// ---- WGSL text: the translator emits plain, regular declarations -------------
+
+macro_rules! re {
+    ($name:ident, $re:expr) => {
+        static $name: LazyLock<Regex> = LazyLock::new(|| Regex::new($re).unwrap());
+    };
+}
+
+re!(RE_DECL, r"@group\((\d+)u?\)\s*@binding\((\d+)u?\)\s*var(?:<([^>]*)>)?\s+(\w+)\s*:\s*([^;]+);");
+re!(RE_UNIFORM, r"@group\((\d+)u?\)\s*@binding\((\d+)u?\)\s*var<uniform>\s+(\w+)\s*:\s*(\w+)\s*;");
+re!(RE_ARRAY_LEN, r"array<[^>]*>,\s*(\d+)u?>");
+re!(RE_FIRST_ITEM, r"\n(?:@\w+|fn)\s");
+re!(RE_TEXTURE_TYPE, r"^texture_(\w+?)(?:<([^>]*)>)?$");
+re!(RE_FRAGMENT_MAIN, r"@fragment\s*fn\s+main\s*\((?:[^()]|\([^)]*\))*\)\s*->\s*([^{]+)\{");
+re!(RE_LOCATION, r"@location\((\d+)u?\)");
+re!(RE_INTERPOLATE, r"@location\((\d+)u?\)\s*@interpolate\(([^)]*)\)");
+re!(RE_VS_MAIN, r"@vertex\s*fn\s+main\s*\([\s\S]*?\)\s*->\s*(\w+)\s*\{");
+re!(RE_PS_MAIN, r"(@fragment\s*fn\s+main\s*\()([\s\S]*?)(\)\s*->)");
+re!(RE_VS_OUTPUT_MEMBER, r"@location\((\d+)u\)(\s*\n\s*\w+\s*:)");
+re!(RE_MAIN_INNER_CALL, r"(\n\s*main_inner\([^;]*\);)");
+re!(RE_VERTEX_INDEX, r"\bvertex_index\b");
+re!(RE_INSTANCE_INDEX, r"\binstance_index\b");
+
+fn struct_body<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let re = Regex::new(&format!(r"struct\s+{}\s*\{{([^}}]*)\}}", regex::escape(name))).ok()?;
+    re.captures(text).map(|c| c.get(1).unwrap().as_str())
+}
+
+/// Merges the constant buffers (every `var<uniform>` but the constant table)
+/// into one struct at binding 0; members keep their names, 16-byte aligned,
+/// in slot order. The runtime copies the bound buffers back to back.
+pub fn pack_uniforms(text: &str) -> (String, Option<Pack>) {
+    let mut members = Vec::new();
+    let mut group = 0;
+    let mut names = Vec::new();
+    let out = RE_UNIFORM.replace_all(text, |c: &regex::Captures| {
+        let slot: u32 = c[2].parse().unwrap();
+        if slot == CONSTANT_TABLE {
+            return c[0].to_owned();
+        }
+        group = c[1].parse().unwrap();
+        let ty = &c[4];
+        let rows =
+            struct_body(text, ty).and_then(|b| RE_ARRAY_LEN.captures(b)).map_or(1, |a| a[1].parse::<u32>().unwrap());
+        members.push((slot, c[3].to_owned(), ty.to_owned(), rows * 16));
+        String::new()
+    });
+    if members.is_empty() {
+        return (text.to_owned(), None);
+    }
+    members.sort_by_key(|m| m.0);
+    let mut out = out.into_owned();
+    for (_, name, _, _) in &members {
+        let re = Regex::new(&format!(r"\b{}\b", regex::escape(name))).unwrap();
+        out = re.replace_all(&out, format!("cbpack_v.{name}").as_str()).into_owned();
+        names.push(name.clone());
+    }
+    let mut decl = String::from("struct cbpack_t {\n");
+    let mut offset = 0;
+    let mut pack = Vec::new();
+    for (slot, name, ty, size) in &members {
+        decl += &format!("  {name} : {ty},\n");
+        pack.push(PackMember { slot: *slot, size: *size, offset });
+        offset += size;
+    }
+    decl += &format!("}}\n@group({group}u) @binding({PACKED_CBUFFERS}u) var<uniform> cbpack_v : cbpack_t;\n");
+    // After the member types, before the first function or entry point.
+    match RE_FIRST_ITEM.find(&out).map(|m| m.start()) {
+        Some(at) => out.insert_str(at, &format!("\n{decl}")),
+        None => out.push_str(&decl),
+    }
+    (out, Some(Pack { members: pack, size: offset }))
+}
+
+fn view_dim(name: &str) -> Option<wgpu::TextureViewDimension> {
+    use wgpu::TextureViewDimension as D;
+    Some(match name {
+        "1d" => D::D1,
+        "2d" => D::D2,
+        "2d_array" => D::D2Array,
+        "3d" => D::D3,
+        "cube" => D::Cube,
+        "cube_array" => D::CubeArray,
+        _ => return None,
+    })
+}
+
+/// Every resource declaration: (group, binding).
+pub fn reflect_bindings(text: &str) -> Vec<(u32, Binding)> {
+    let mut out = Vec::new();
+    for c in RE_DECL.captures_iter(text) {
+        let group: u32 = c[1].parse().unwrap();
+        let binding: u32 = c[2].parse().unwrap();
+        let space: String = c.get(3).map_or("", |m| m.as_str()).chars().filter(|c| !c.is_whitespace()).collect();
+        let ty = c[5].trim();
+        let kind = if space == "uniform" {
+            Kind::Uniform
+        } else if space.starts_with("storage") {
+            Kind::Storage { read_only: !space.contains("read_write") }
+        } else if ty == "sampler" {
+            Kind::Sampler { comparison: false }
+        } else if ty == "sampler_comparison" {
+            Kind::Sampler { comparison: true }
+        } else if let Some(t) = RE_TEXTURE_TYPE.captures(ty) {
+            let name = &t[1];
+            let arg = t.get(2).map_or("f32", |m| m.as_str());
+            if let Some(dim) = name.strip_prefix("storage_") {
+                let mut parts = arg.split(',').map(str::trim);
+                let Some(format) = parts.next().and_then(format::storage) else {
+                    log::warn!("gpu: storage texture format {arg} not supported");
+                    continue;
+                };
+                let access = match parts.next() {
+                    Some("read") => wgpu::StorageTextureAccess::ReadOnly,
+                    Some("read_write") => wgpu::StorageTextureAccess::ReadWrite,
+                    _ => wgpu::StorageTextureAccess::WriteOnly,
+                };
+                Kind::StorageTexture { access, format, dim: view_dim(dim).unwrap_or(wgpu::TextureViewDimension::D2) }
+            } else if let Some(rest) = name.strip_prefix("depth_") {
+                let (ms, dim) = match rest.strip_prefix("multisampled_") {
+                    Some(d) => (true, d),
+                    None => (false, rest),
+                };
+                Kind::Texture {
+                    sample: Sample::Depth,
+                    dim: view_dim(dim).unwrap_or(wgpu::TextureViewDimension::D2),
+                    multisampled: ms,
+                }
+            } else if let Some(dim) = name.strip_prefix("multisampled_") {
+                Kind::Texture {
+                    sample: Sample::Float,
+                    dim: view_dim(dim).unwrap_or(wgpu::TextureViewDimension::D2),
+                    multisampled: true,
+                }
+            } else {
+                let sample = match arg {
+                    "u32" => Sample::Uint,
+                    "i32" => Sample::Sint,
+                    _ => Sample::Float,
+                };
+                Kind::Texture {
+                    sample,
+                    dim: view_dim(name).unwrap_or(wgpu::TextureViewDimension::D2),
+                    multisampled: false,
+                }
+            }
+        } else {
+            log::warn!("gpu: unsupported declaration {}", &c[0]);
+            continue;
+        };
+        out.push((group, Binding { binding, kind }));
+    }
+    out
+}
+
+re!(RE_SAMPLING, r"\btexture(?:Sample|Gather)\w*\(([^;]*)");
+
+/// (texture binding, sampler binding) of every sampling call: the first two
+/// arguments, or the second and third (textureGather's component first).
+fn sampling_pairs(text: &str) -> Vec<(u32, u32)> {
+    let bindings: HashMap<&str, u32> =
+        RE_DECL.captures_iter(text).map(|c| (c.get(4).unwrap().as_str(), c[2].parse().unwrap())).collect();
+    let mut pairs = Vec::new();
+    for c in RE_SAMPLING.captures_iter(text) {
+        let args: Vec<&str> = c[1].splitn(4, ',').map(str::trim).collect();
+        for w in args.windows(2).take(2) {
+            if let (Some(&t), Some(&s)) = (bindings.get(w[0]), bindings.get(w[1]))
+                && (SRVS..UAVS).contains(&t)
+                && (SAMPLERS..SRVS).contains(&s)
+                && !pairs.contains(&(t, s))
+            {
+                pairs.push((t, s));
+            }
+        }
+    }
+    pairs
+}
+
+/// The colour locations `fn main` of a pixel shader returns.
+fn fragment_outputs(text: &str) -> u8 {
+    let Some(sig) = RE_FRAGMENT_MAIN.captures(text) else {
+        return 0;
+    };
+    let ret = sig[1].trim();
+    let locations =
+        |s: &str| RE_LOCATION.captures_iter(s).fold(0u8, |m, c| m | 1 << c[1].parse::<u32>().unwrap().min(7));
+    if ret.contains("@location") { locations(ret) } else { struct_body(text, ret).map_or(0, locations) }
+}
+
+fn interpolations(text: &str) -> Vec<(u32, String)> {
+    RE_INTERPOLATE.captures_iter(text).map(|c| (c[1].parse().unwrap(), c[2].to_owned())).collect()
+}
+
+fn vs_output_struct(text: &str) -> Option<String> {
+    RE_VS_MAIN.captures(text).map(|c| c[1].to_owned())
+}
+
+fn vs_output_locations(text: &str) -> Vec<u32> {
+    let body = vs_output_struct(text).and_then(|s| struct_body(text, &s).map(String::from)).unwrap_or_default();
+    RE_LOCATION.captures_iter(&body).map(|c| c[1].parse().unwrap()).collect()
+}
+
+fn ps_input_locations(text: &str) -> Vec<u32> {
+    RE_PS_MAIN
+        .captures(text)
+        .map_or_else(Vec::new, |c| RE_LOCATION.captures_iter(&c[2]).map(|c| c[1].parse().unwrap()).collect())
+}
+
+/// Vertex shader outputs take the pixel shader's interpolation attributes
+/// (WGSL requires them to match; HLSL declares them on the pixel shader only).
+pub fn with_interpolation(text: &str, interpolation: &[(u32, String)]) -> String {
+    RE_VS_OUTPUT_MEMBER
+        .replace_all(text, |c: &regex::Captures| {
+            let loc: u32 = c[1].parse().unwrap();
+            match interpolation.iter().find(|(l, _)| *l == loc) {
+                Some((_, attr)) => format!("@location({loc}u) @interpolate({attr}){}", &c[2]),
+                None => c[0].to_owned(),
+            }
+        })
+        .into_owned()
+}
+
+/// D3D11 alpha-to-coverage on a single-sample target is an alpha test
+/// (alpha >= 0.5); the foliage shaders rely on it instead of clip().
+/// `None` when the shader's first output is not an RGBA colour.
+pub fn with_alpha_test(text: &str) -> Option<String> {
+    if !text.contains("var<private> o0 : vec4<f32>;") || !RE_MAIN_INNER_CALL.is_match(text) {
+        return None;
+    }
+    Some(RE_MAIN_INNER_CALL.replace(text, "$1\n  if (o0.w < 0.5f) { discard; }").into_owned())
+}
+
+/// Moves inter-stage locations (`map`: from -> to) in a vertex shader's
+/// output struct or a pixel shader's inputs.
+pub fn with_locations(text: &str, stage: Stage, map: &[(u32, u32)]) -> String {
+    let swap = |s: &str| {
+        RE_LOCATION
+            .replace_all(s, |c: &regex::Captures| {
+                let loc: u32 = c[1].parse().unwrap();
+                match map.iter().find(|(from, _)| *from == loc) {
+                    Some((_, to)) => format!("@location({to}u)"),
+                    None => c[0].to_owned(),
+                }
+            })
+            .into_owned()
+    };
+    match stage {
+        Stage::Vertex => {
+            let Some(name) = vs_output_struct(text) else {
+                return text.to_owned();
+            };
+            let re = Regex::new(&format!(r"(struct\s+{}\s*\{{)([^}}]*)(\}})", regex::escape(&name))).unwrap();
+            re.replace(text, |c: &regex::Captures| format!("{}{}{}", &c[1], swap(&c[2]), &c[3])).into_owned()
+        }
+        _ => RE_PS_MAIN.replace(text, |c: &regex::Captures| format!("{}{}{}", &c[1], swap(&c[2]), &c[3])).into_owned(),
+    }
+}
+
+/// Inter-stage locations at or above the device's limit moved to free low
+/// locations (vertex outputs and the pixel inputs that read them), or `None`
+/// when nothing has to move or there is no room.
+pub fn remap_locations(vs: &Program, ps: Option<&Program>, max: u32) -> Option<Vec<(u32, u32)>> {
+    let limit = if vs.clip_distances { max.saturating_sub(1) } else { max };
+    if !vs.locations.iter().any(|&l| l >= limit) {
+        return None;
+    }
+    let ins = ps.map_or(&[][..], |p| &p.locations);
+    let mut used: Vec<u32> = vs.locations.iter().chain(ins).copied().filter(|&l| l < limit).collect();
+    let mut map = Vec::new();
+    let mut free = 0;
+    for &l in &vs.locations {
+        if l < limit {
+            continue;
+        }
+        while used.contains(&free) {
+            free += 1;
+        }
+        if free >= limit {
+            crate::log_once(&format!("remap{}", vs.label), || {
+                format!("{}: vertex outputs do not fit below location {limit}", vs.label)
+            });
+            return None;
+        }
+        map.push((l, free));
+        used.push(free);
+    }
+    Some(map)
+}
+
+/// The text with the textures in `depth` (bit: binding - SRVS) declared as
+/// depth textures, read the way D3D reads a depth format through a float
+/// view, (d, 0, 0, 1): no copy of the depth buffer into a float texture.
+/// `None` if one is read in a way depth textures cannot be (gradients, bias).
+pub fn with_depth_reads(text: &str, depth: u128) -> Option<String> {
+    let mut names = Vec::new();
+    let mut out = text.to_owned();
+    for c in RE_DECL.captures_iter(text) {
+        let binding: u32 = c[2].parse().unwrap();
+        if !(SRVS..UAVS).contains(&binding) || depth >> (binding - SRVS) & 1 == 0 {
+            continue;
+        }
+        let ty = match c[5].trim() {
+            "texture_2d<f32>" => "texture_depth_2d",
+            "texture_2d_array<f32>" => "texture_depth_2d_array",
+            "texture_cube<f32>" => "texture_depth_cube",
+            "texture_cube_array<f32>" => "texture_depth_cube_array",
+            _ => return None,
+        };
+        let decl = &c[0];
+        out = out.replacen(decl, &decl.replacen(c[5].trim(), ty, 1), 1);
+        names.push(c[4].to_owned());
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let mut body = rewrite_depth_calls(&out, &names)?;
+    body.push_str("\nfn g5_depth4(d : f32) -> vec4<f32> {\n  return vec4<f32>(d, 0.0f, 0.0f, 1.0f);\n}\n");
+    Some(body)
+}
+
+re!(RE_TEXTURE_CALL, r"\b(texture[A-Za-z]+)\(");
+
+/// Rewrites the texture calls on `names` (see [`with_depth_reads`]).
+fn rewrite_depth_calls(text: &str, names: &[String]) -> Option<String> {
+    let mut out = String::with_capacity(text.len() + 256);
+    let mut at = 0;
+    while let Some(m) = RE_TEXTURE_CALL.captures_at(text, at) {
+        let whole = m.get(0).unwrap();
+        let func = m.get(1).unwrap().as_str();
+        let open = whole.end();
+        let close = matching_paren(text, open)?;
+        let args: Vec<&str> = split_args(&text[open..close]);
+        out.push_str(&text[at..whole.start()]);
+        // textureGather takes the component first.
+        let ti = if func == "textureGather" && args.len() == 4 { 1 } else { 0 };
+        let target = args.get(ti).is_some_and(|a| names.iter().any(|n| n == a.trim()));
+        if !target {
+            // Not ours: copy the call, rewriting inside its arguments.
+            out.push_str(&text[whole.start()..open]);
+            out.push_str(&rewrite_depth_calls(&text[open..close], names)?);
+            out.push(')');
+            at = close + 1;
+            continue;
+        }
+        let args: Vec<String> = args.iter().map(|a| rewrite_depth_calls(a.trim(), names)).collect::<Option<_>>()?;
+        let call = match func {
+            "textureSample" | "textureLoad" => format!("g5_depth4({func}({}))", args.join(", ")),
+            "textureSampleLevel" => {
+                // The level of a depth texture is an integer.
+                let (last, rest) = args.split_last()?;
+                format!("g5_depth4(textureSampleLevel({}, i32({})))", rest.join(", "), last.trim())
+            }
+            "textureGather" if args[0].trim() == "0i" || args[0].trim() == "0" => {
+                format!("textureGather({})", args[1..].join(", "))
+            }
+            "textureGather" => "vec4<f32>(0.0f)".to_owned(),
+            "textureDimensions" | "textureNumLevels" | "textureNumLayers" => format!("{func}({})", args.join(", ")),
+            _ => return None,
+        };
+        out.push_str(&call);
+        at = close + 1;
+    }
+    out.push_str(&text[at..]);
+    Some(out)
+}
+
+/// The index of the `)` closing the parenthesis opened just before `open`.
+fn matching_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 1;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Arguments separated by top-level commas.
+fn split_args(args: &str) -> Vec<&str> {
+    let (mut out, mut depth, mut start) = (Vec::new(), 0i32, 0);
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' | '<' => depth += 1,
+            ')' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&args[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&args[start..]);
+    out
+}
+
+/// A compute shader with its storage textures declared in the formats of
+/// the textures bound (the translation guesses them from the component count).
+pub fn with_storage_formats(text: &str, subs: &[(u32, wgpu::TextureFormat, wgpu::TextureFormat)]) -> String {
+    let mut out = text.to_owned();
+    for (binding, from, to) in subs {
+        let (Some(from), Some(to)) = (format::wgsl_storage_name(*from), format::wgsl_storage_name(*to)) else {
+            continue;
+        };
+        let re =
+            Regex::new(&format!(r"(@binding\({binding}u?\)\s*var\s+\w+\s*:\s*texture_storage_\w+<){from}")).unwrap();
+        out = re.replace(&out, format!("${{1}}{to}").as_str()).into_owned();
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VS: &str = "diagnostic(off, derivative_uniformity);
+
+var<private> r0 : vec4<f32>;
+
+struct cb10_struct {
+  tint_symbol : array<vec4<f32>, 10u>,
+}
+
+@group(0u) @binding(7u) var<uniform> cb7_7 : cb10_struct;
+
+struct cb2_struct {
+  tint_symbol : array<vec4<f32>, 3u>,
+}
+
+@group(0u) @binding(2u) var<uniform> cb2_2 : cb2_struct;
+
+var<private> o0 : vec4<f32>;
+
+fn main_inner(v0 : vec2<f32>) {
+  o0 = vec4<f32>(v0 * cb7_7.tint_symbol[9u].xy + cb2_2.tint_symbol[0u].xy, 0.0f, 1.0f);
+}
+
+struct tint_symbol_1 {
+  @builtin(position)
+  o0 : vec4<f32>,
+  @location(1u)
+  o1 : vec4<f32>,
+}
+
+@vertex
+fn main(@location(0u) v0 : vec2<f32>) -> tint_symbol_1 {
+  main_inner(v0);
+  return tint_symbol_1(o0, o0);
+}
+";
+
+    #[test]
+    fn packs_constant_buffers_by_slot() {
+        let (text, pack) = pack_uniforms(VS);
+        let pack = pack.unwrap();
+        assert_eq!(pack.size, (3 + 10) * 16);
+        assert_eq!((pack.members[0].slot, pack.members[0].offset), (2, 0));
+        assert_eq!((pack.members[1].slot, pack.members[1].offset), (7, 48));
+        assert!(text.contains("cbpack_v.cb7_7.tint_symbol[9u]"));
+        assert!(text.contains("@group(0u) @binding(0u) var<uniform> cbpack_v : cbpack_t;"));
+        assert!(!text.contains("@binding(7u)"));
+        naga::front::wgsl::parse_str(&text).unwrap();
+    }
+
+    /// Every translated shader of the game (GLUE5_GAME_DIR) still validates
+    /// once adapted: `cargo test -r -p glue5-gpu -- --ignored`.
+    #[test]
+    #[ignore]
+    fn all_shaders_validate_once_packed() {
+        let game = std::env::var_os("GLUE5_GAME_DIR").expect("GLUE5_GAME_DIR");
+        let dir = glue5_runtime::layout::shader_dir(std::path::Path::new(&game));
+        let mut validator =
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
+        let (mut n, mut failed) = (0, Vec::new());
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "wgsl") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            let (mut text, _) = pack_uniforms(&source);
+            if text.contains("@fragment")
+                && let Some(alpha_tested) = with_alpha_test(&text)
+            {
+                text = alpha_tested;
+            }
+            n += 1;
+            let ok = naga::front::wgsl::parse_str(&text)
+                .map_err(|e| e.to_string())
+                .and_then(|m| validator.validate(&m).map(|_| ()).map_err(|e| format!("{e:?}")));
+            if let Err(e) = ok {
+                failed.push(format!("{}: {}", path.display(), e.lines().next().unwrap_or("")));
+            }
+            let bindings = reflect_bindings(&text);
+            assert!(bindings.iter().all(|(_, b)| b.binding != PACKED_CBUFFERS || b.kind == Kind::Uniform));
+        }
+        assert!(failed.is_empty(), "{} of {n} failed:\n{}", failed.len(), failed[..failed.len().min(10)].join("\n"));
+        assert!(n > 4000);
+    }
+
+    #[test]
+    fn reads_depth_textures_directly() {
+        let text = "@group(1u) @binding(16u) var s0 : sampler;
+@group(1u) @binding(32u) var t0 : texture_2d<f32>;
+@group(1u) @binding(33u) var t1 : texture_2d<f32>;
+fn f(uv : vec2<f32>, r : vec4<f32>) -> f32 {
+  let a = textureSample(t0, s0, r.xyxx.xy).x;
+  let b = textureSampleLevel(t0, s0, uv, r.w).x;
+  let c = textureLoad(t0, bitcast<vec2<i32>>(r.xy), 0i).x;
+  let d = textureGather(0i, t0, s0, uv).y;
+  let e = textureSample(t1, s0, vec2<f32>(textureLoad(t0, vec2<i32>(0, 0), 0i).x, 0.5f)).x;
+  return a + b + c + d + e;
+}
+";
+        let out = with_depth_reads(text, 1).unwrap();
+        assert!(out.contains("var t0 : texture_depth_2d;"));
+        assert!(out.contains("var t1 : texture_2d<f32>;"));
+        assert!(out.contains("g5_depth4(textureSample(t0, s0, r.xyxx.xy)).x"));
+        assert!(out.contains("g5_depth4(textureSampleLevel(t0, s0, uv, i32(r.w))).x"));
+        assert!(out.contains("g5_depth4(textureLoad(t0, bitcast<vec2<i32>>(r.xy), 0i)).x"));
+        assert!(out.contains("textureGather(t0, s0, uv).y"));
+        assert!(
+            out.contains("textureSample(t1, s0, vec2<f32>(g5_depth4(textureLoad(t0, vec2<i32>(0, 0), 0i)).x, 0.5f))")
+        );
+        naga::front::wgsl::parse_str(&out).unwrap();
+        let grad = "@group(1u) @binding(32u) var t0 : texture_2d<f32>;\n@group(1u) @binding(16u) var s0 : sampler;\nfn f(u : vec2<f32>) -> vec4<f32> { return textureSampleGrad(t0, s0, u, u, u); }\n";
+        assert!(with_depth_reads(grad, 1).is_none());
+    }
+
+    #[test]
+    fn finds_sampling_pairs() {
+        let text = "@group(1u) @binding(16u) var s0 : sampler;
+@group(1u) @binding(17u) var s1 : sampler;
+@group(1u) @binding(32u) var t0 : texture_2d<f32>;
+@group(1u) @binding(33u) var t1 : texture_2d<f32>;
+fn f(uv : vec2<f32>) {
+  let a = textureSample(t0, s0, uv);
+  let b = textureGather(1i, t1, s1, uv);
+  let c = textureLoad(t1, vec2<i32>(0), 0);
+}
+";
+        assert_eq!(sampling_pairs(text), vec![(32, 16), (33, 17)]);
+    }
+
+    #[test]
+    fn copies_interpolation_to_vertex_outputs() {
+        let text = with_interpolation(VS, &[(1, "perspective, sample".into())]);
+        assert!(text.contains("@location(1u) @interpolate(perspective, sample)\n  o1"));
+        let moved = with_locations(&text, Stage::Vertex, &[(1, 0)]);
+        assert!(moved.contains("@location(0u) @interpolate"));
+        assert!(moved.contains("@location(0u) v0"), "inputs stay");
+    }
+}

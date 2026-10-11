@@ -1,0 +1,210 @@
+//! Physical gamepads (SDL) to the engine's pads.
+
+use std::time::{Duration, Instant};
+
+use glue5_runtime::input::{self, Gamepad, MAX_PADS, button};
+use sdl3::gamepad::{Axis, Button};
+use sdl3::joystick::JoystickId;
+
+use crate::ui::Nav;
+
+/// SDL buttons to RAGE pad buttons (SDL names buttons by position, so the
+/// layout is right for Xbox, PlayStation and Nintendo-style pads alike).
+const BUTTONS: &[(Button, u16)] = &[
+    (Button::South, button::SOUTH),
+    (Button::East, button::EAST),
+    (Button::West, button::WEST),
+    (Button::North, button::NORTH),
+    (Button::LeftShoulder, button::L1),
+    (Button::RightShoulder, button::R1),
+    (Button::LeftStick, button::L3),
+    (Button::RightStick, button::R3),
+    (Button::Back, button::SELECT),
+    (Button::Start, button::START),
+    (Button::DPadUp, button::UP),
+    (Button::DPadDown, button::DOWN),
+    (Button::DPadLeft, button::LEFT),
+    (Button::DPadRight, button::RIGHT),
+];
+
+/// Triggers pressed past this also set the digital L2/R2 bits.
+const TRIGGER_THRESHOLD: f32 = 0.5;
+
+/// Holding Back + Start (on one controller) this long opens the
+/// application's settings.
+const MENU_HOLD: Duration = Duration::from_millis(700);
+
+/// A direction held in the application's pages repeats after this, then
+/// at this interval.
+const REPEAT_AFTER: Duration = Duration::from_millis(400);
+const REPEAT_EVERY: Duration = Duration::from_millis(110);
+/// The left stick moves in the pages past this.
+const STICK_NAV: f32 = 0.6;
+
+pub struct Pads {
+    subsystem: sdl3::GamepadSubsystem,
+    slots: [Option<Slot>; MAX_PADS],
+    /// Buttons down at the previous update, on any pad (for the pages).
+    previous: u16,
+    /// The direction held in a page, and when it repeats next.
+    repeat: Option<(u16, Instant)>,
+}
+
+/// What the pads did for the application this update.
+#[derive(Default)]
+pub struct Report {
+    /// Back + Start held: open the settings.
+    pub menu: bool,
+    /// Navigation in the application's page (only while one is open).
+    pub nav: Vec<Nav>,
+}
+
+struct Slot {
+    pad: sdl3::gamepad::Gamepad,
+    id: JoystickId,
+    rumble: (u16, u16),
+    /// Since when Back + Start are held, and whether that hold has fired.
+    combo: Option<(Instant, bool)>,
+}
+
+impl Pads {
+    pub fn new(subsystem: sdl3::GamepadSubsystem) -> Self {
+        Pads { subsystem, slots: Default::default(), previous: 0, repeat: None }
+    }
+
+    pub fn added(&mut self, id: JoystickId) {
+        if self.slots.iter().flatten().any(|s| s.id == id) {
+            return;
+        }
+        let Some(free) = self.slots.iter().position(Option::is_none) else {
+            return;
+        };
+        match self.subsystem.open(id) {
+            Ok(pad) => {
+                log::info!("gamepad {}: {}", free, pad.name().unwrap_or_default());
+                self.slots[free] = Some(Slot { pad, id, rumble: (0, 0), combo: None });
+            }
+            Err(e) => log::warn!("cannot open gamepad: {e}"),
+        }
+    }
+
+    pub fn removed(&mut self, id: JoystickId) {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.as_ref().is_some_and(|s| s.id == id) {
+                log::info!("gamepad {i} removed");
+                *slot = None;
+                input::set_gamepad(i, Gamepad::default());
+            }
+        }
+    }
+
+    /// Publishes every pad's state and applies the engine's rumble; while a
+    /// page of the application's is open the game gets idle pads and the
+    /// buttons navigate it.
+    pub fn update(&mut self, page_open: bool, touch_is_pad0: bool) -> Report {
+        let mut report = Report::default();
+        let mut all = 0u16;
+        // The left stick pushed far, as the D-pad (for the pages).
+        let mut stick = 0u16;
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            let Some(slot) = slot else { continue };
+            let pad = &slot.pad;
+            let axis = |a| pad.axis(a) as f32 / 32767.0;
+            let mut state = Gamepad {
+                connected: true,
+                left: [axis(Axis::LeftX), axis(Axis::LeftY)],
+                right: [axis(Axis::RightX), axis(Axis::RightY)],
+                l2: axis(Axis::TriggerLeft).max(0.0),
+                r2: axis(Axis::TriggerRight).max(0.0),
+                buttons: 0,
+            };
+            for &(b, bit) in BUTTONS {
+                if pad.button(b) {
+                    state.buttons |= bit;
+                }
+            }
+            if state.l2 > TRIGGER_THRESHOLD {
+                state.buttons |= button::L2;
+            }
+            if state.r2 > TRIGGER_THRESHOLD {
+                state.buttons |= button::R2;
+            }
+            all |= state.buttons;
+            for (v, minus, plus) in
+                [(state.left[0], button::LEFT, button::RIGHT), (state.left[1], button::UP, button::DOWN)]
+            {
+                stick |= if v < -STICK_NAV {
+                    minus
+                } else if v > STICK_NAV {
+                    plus
+                } else {
+                    0
+                };
+            }
+            if i == 0 && touch_is_pad0 {
+                // The touch controls have pad 0.
+            } else if page_open {
+                input::set_gamepad(i, Gamepad { connected: true, ..Default::default() });
+            } else {
+                input::set_gamepad(i, state);
+            }
+
+            let combo = button::SELECT | button::START;
+            if state.buttons & combo == combo {
+                let (since, fired) = slot.combo.get_or_insert_with(|| (Instant::now(), false));
+                if !*fired && since.elapsed() >= MENU_HOLD {
+                    *fired = true;
+                    report.menu = true;
+                }
+            } else {
+                slot.combo = None;
+            }
+
+            let rumble = input::rumble(i);
+            if rumble != slot.rumble {
+                slot.rumble = rumble;
+                // Refreshed on change; long enough to bridge frames.
+                let _ = slot.pad.set_rumble(rumble.0, rumble.1, if rumble == (0, 0) { 0 } else { 1000 });
+            }
+        }
+        let all = all | stick;
+        if page_open {
+            report.nav = self.navigate(all);
+        } else {
+            self.repeat = None;
+        }
+        self.previous = all;
+        report
+    }
+
+    /// The pages' navigation from the buttons down now: the D-pad or left
+    /// stick moves (repeating while held), A activates, B goes back.
+    fn navigate(&mut self, down: u16) -> Vec<Nav> {
+        const DIRECTIONS: [(u16, Nav); 4] =
+            [(button::UP, Nav::Up), (button::DOWN, Nav::Down), (button::LEFT, Nav::Left), (button::RIGHT, Nav::Right)];
+        let pressed = down & !self.previous;
+        let mut nav = Vec::new();
+        let now = Instant::now();
+        for (bit, n) in DIRECTIONS {
+            if pressed & bit != 0 {
+                nav.push(n);
+                self.repeat = Some((bit, now + REPEAT_AFTER));
+            }
+        }
+        match self.repeat {
+            Some((bit, _)) if down & bit == 0 => self.repeat = None,
+            Some((bit, at)) if now >= at => {
+                nav.extend(DIRECTIONS.iter().filter(|d| d.0 == bit).map(|d| d.1));
+                self.repeat = Some((bit, now + REPEAT_EVERY));
+            }
+            _ => {}
+        }
+        if pressed & button::SOUTH != 0 {
+            nav.push(Nav::Activate);
+        }
+        if pressed & button::EAST != 0 {
+            nav.push(Nav::Back);
+        }
+        nav
+    }
+}

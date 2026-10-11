@@ -1,0 +1,6 @@
+/target
+/xtask/target
+/game
+/third_party/wgpu-core
+/third_party/wgpu-core.tmp
+.DS_Store

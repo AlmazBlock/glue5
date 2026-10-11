@@ -1,0 +1,242 @@
+//! Turns game.wasm into a native static library:
+//!
+//! 1. find game.wasm under $GLUE5_GAME_DIR and check it is a supported build
+//! 2. translate it to C with the patched wasm2c (`cargo xtask setup`)
+//! 3. apply hooks (hooks.rs) and generate the glue C and Rust bindings
+//! 4. compile everything through an object cache and archive it
+
+mod codegen;
+mod compile;
+mod mangle;
+mod module;
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::{env, fs};
+
+use anyhow::{Context, Result, bail, ensure};
+use sha2::{Digest, Sha256};
+
+include!("../hooks.rs");
+
+/// Game builds the hooks and host code were written against.
+const BUILDS: &[(&str, &str)] = &[("8b0b5899ed", "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0")];
+
+/// wasm2c output files; ~15 MB of C each, so they compile in parallel.
+const OUTPUTS: usize = 64;
+
+const DEFINES: &[(&str, &str)] = &[
+    ("WASM_RT_MEMCHECK_BOUNDS_CHECK", "1"),
+    // The game is trusted code: no per-access bounds checks, plain accesses to
+    // the shared memory, unchecked indirect calls, no stack depth counting.
+    ("WASM_RT_NONCONFORMING_SKIP_BOUNDS_CHECKS", "1"),
+    ("WASM_RT_NONCONFORMING_PLAIN_SHARED_ACCESS", "1"),
+    ("WASM_RT_NONCONFORMING_UNCHECKED_CALL_INDIRECT", "1"),
+    ("WASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION", "1"),
+    // The memory never moves: its base is a constant for the generated code
+    // (set by `Memory::new`), not two loads after every store and call.
+    ("WASM_RT_NONCONFORMING_FIXED_MEMORY_BASE", "1"),
+];
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let root = manifest.parent().and_then(Path::parent).context("workspace root")?.to_path_buf();
+    let out = PathBuf::from(env::var("OUT_DIR")?);
+    let tools =
+        env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target")).join("glue5-tools");
+
+    for path in ["build", "hooks.rs", "csrc"] {
+        println!("cargo:rerun-if-changed={}", manifest.join(path).display());
+    }
+    println!("cargo:rerun-if-env-changed=GLUE5_GAME_DIR");
+    println!("cargo:rerun-if-env-changed=GLUE5_ALLOW_UNKNOWN_BUILD");
+
+    // 1. The game.
+    let game_dir = PathBuf::from(env::var("GLUE5_GAME_DIR").context("GLUE5_GAME_DIR is not set")?);
+    let (build_id, wasm_path) = find_wasm(&game_dir)?;
+    println!("cargo:rerun-if-changed={}", wasm_path.display());
+    let wasm = fs::read(&wasm_path).with_context(|| format!("reading {}", wasm_path.display()))?;
+    let sha = hex(&Sha256::digest(&wasm));
+    if !BUILDS.iter().any(|&(id, sum)| id == build_id && sum == sha) {
+        let msg = format!(
+            "{} is not a supported build (id {build_id}, sha256 {sha}); hooks and host code may not match it",
+            wasm_path.display()
+        );
+        ensure!(
+            env::var_os("GLUE5_ALLOW_UNKNOWN_BUILD").is_some(),
+            "{msg}. Set GLUE5_ALLOW_UNKNOWN_BUILD=1 to try anyway"
+        );
+        println!("cargo:warning={msg}");
+    }
+    println!("cargo:rustc-env=GLUE5_GAME_BUILD={build_id}");
+
+    // 2. wasm2c, once per (game.wasm, wasm2c) pair. Generated sources live outside
+    // OUT_DIR so every profile and target shares them and their objects.
+    let wasm2c = tools.join("bin/wasm2c");
+    ensure!(wasm2c.exists(), "{} not found: run `cargo xtask setup` first", wasm2c.display());
+    let tool_stamp = fs::read_to_string(tools.join("wasm2c.stamp")).unwrap_or_default();
+    println!("cargo:rerun-if-changed={}", wasm2c.display());
+    let gen_dir = tools.join("gen").join(&sha[..16]);
+    let stamp_path = gen_dir.join("wasm2c.stamp");
+    if fs::read_to_string(&stamp_path).ok().as_deref() != Some(tool_stamp.as_str()) {
+        let tmp = tools.join("gen").join(format!("{}.tmp{}", &sha[..16], std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp)?;
+        let status = Command::new(&wasm2c)
+            .args(["--enable-threads", "-n", "game", &format!("--num-outputs={OUTPUTS}"), "-o"])
+            .arg(tmp.join("game.c"))
+            .arg(&wasm_path)
+            .status()?;
+        ensure!(status.success(), "wasm2c failed");
+        fs::write(tmp.join("wasm2c.stamp"), &tool_stamp)?;
+        let _ = fs::remove_dir_all(&gen_dir);
+        fs::rename(&tmp, &gen_dir)?;
+    }
+
+    // 3. Hooks and glue.
+    let module = module::parse(&wasm)?;
+    let hooks = codegen::resolve_hooks(&module, HOOKS)?;
+    let mut sources: Vec<PathBuf> = (0..OUTPUTS).map(|i| gen_dir.join(format!("game_{i}.c"))).collect();
+    apply_hooks(&hooks, &mut sources)?;
+    write_if_changed(&gen_dir.join("glue.c"), &codegen::glue_c(&module, &hooks)?)?;
+    fs::write(out.join("bindings.rs"), codegen::bindings_rs(&module, &hooks))?;
+
+    // 4. Compile.
+    let wabt = tools.join("wabt-src");
+    let simde = root.join("third_party/wabt/third_party/simde");
+    ensure!(simde.join("simde").exists(), "{} is missing: run `cargo xtask setup`", simde.display());
+    let mut build = cc::Build::new();
+    build
+        .include(&gen_dir)
+        .include(manifest.join("csrc"))
+        .include(wabt.join("wasm2c"))
+        .include(&simde)
+        .opt_level(2)
+        .debug(false)
+        .warnings(false)
+        .flag_if_supported("-w")
+        .flag_if_supported("-fno-strict-aliasing");
+    for (k, v) in DEFINES {
+        build.define(k, *v);
+    }
+    // iOS devices default to the Apple A7's ARMv8.0: no LSE atomics (the
+    // engine synchronises a lot) and old scheduling. iOS 16.4 runs on A11
+    // and later.
+    if env::var("TARGET")? == "aarch64-apple-ios" {
+        build.flag("-mcpu=apple-a11");
+    }
+    if env::var("CARGO_CFG_TARGET_ARCH")? == "x86_64" {
+        build.flag_if_supported("-msse4.1"); // SIMDe maps wasm SIMD much better with SSE4.1
+    }
+    // Three groups, each keyed by the headers it includes (sources are not
+    // scanned for includes): the game, the glue, the wasm2c runtime.
+    let glue = vec![gen_dir.join("glue.c"), manifest.join("csrc/glue5.c")];
+    let runtime: Vec<PathBuf> = ["wasm-rt-impl.c", "wasm-rt-mem-impl.c", "wasm-rt-exceptions-impl.c"]
+        .iter()
+        .map(|rt| wabt.join("wasm2c").join(rt))
+        .collect();
+    let key = |files: &[PathBuf]| -> Result<String> {
+        let mut h = Sha256::new();
+        h.update(tool_stamp.as_bytes());
+        for f in files {
+            h.update(fs::read(f).with_context(|| format!("reading {}", f.display()))?);
+        }
+        Ok(hex(&h.finalize()))
+    };
+    let game_key = key(&[gen_dir.join("game.h"), gen_dir.join("game-impl.h")])?;
+    let glue_key = key(&[gen_dir.join("game.h"), manifest.join("csrc/glue5.h")])?;
+    let runtime_key = key(&[])?;
+
+    // Cargo's -j, but at most 8: each job holds a 15 MB C file's compilation.
+    let jobs = env::var("NUM_JOBS").ok().and_then(|j| j.parse().ok()).unwrap_or(4).min(8);
+    let cache = tools.join("objcache").join(env::var("TARGET")?);
+    let mut objects = compile::compile(&build, &sources, &game_key, &cache, jobs)?;
+    objects.extend(compile::compile(&build, &glue, &glue_key, &cache, jobs)?);
+    objects.extend(compile::compile(&build, &runtime, &runtime_key, &cache, jobs)?);
+    compile::archive(&build, &objects, &out.join("libglue5_game.a"))?;
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=glue5_game");
+    Ok(())
+}
+
+/// The single `b/<build>/game.wasm` under the game directory.
+fn find_wasm(game_dir: &Path) -> Result<(String, PathBuf)> {
+    let b = game_dir.join("b");
+    let mut found = Vec::new();
+    for entry in fs::read_dir(&b).with_context(|| {
+        format!("{} not found: point GLUE5_GAME_DIR at the game directory (or symlink ./game)", b.display())
+    })? {
+        let entry = entry?;
+        let wasm = entry.path().join("game.wasm");
+        if wasm.exists() {
+            found.push((entry.file_name().to_string_lossy().into_owned(), wasm));
+        }
+    }
+    match found.len() {
+        1 => Ok(found.pop().unwrap()),
+        0 => bail!("no b/<build>/game.wasm under {}", game_dir.display()),
+        _ => bail!("several builds under {}; keep one", b.display()),
+    }
+}
+
+/// Renames each hooked function's definition to `<symbol>_orig` in a copy of
+/// its file (`game_N.hooked.c`), which replaces the original in `sources`.
+fn apply_hooks(hooks: &[codegen::Hook], sources: &mut [PathBuf]) -> Result<()> {
+    let mut pending: Vec<&codegen::Hook> = hooks.iter().collect();
+    for source in sources.iter_mut() {
+        if pending.is_empty() {
+            break;
+        }
+        let text = fs::read_to_string(&*source)?;
+        let mut patched = None::<String>;
+        pending.retain(|hook| {
+            let needle = format!(" {}(w2c_game* instance", hook.symbol);
+            let current = patched.as_deref().unwrap_or(&text);
+            let Some(line_start) = current
+                .match_indices(&needle)
+                .map(|(i, _)| current[..i].rfind('\n').map_or(0, |n| n + 1))
+                .find(|&ls| {
+                    let line = current[ls..].lines().next().unwrap_or("");
+                    line.trim_end().ends_with('{') && !line.starts_with("static")
+                })
+            else {
+                return true;
+            };
+            let line_end = current[line_start..].find('\n').map_or(current.len(), |n| line_start + n);
+            let line = current[line_start..line_end].replacen(
+                &format!(" {}(", hook.symbol),
+                &format!(" {}_orig(", hook.symbol),
+                1,
+            );
+            patched = Some(format!("{}{}{}", &current[..line_start], line, &current[line_end..]));
+            false
+        });
+        if let Some(patched) = patched {
+            let hooked = source.with_extension("hooked.c");
+            write_if_changed(&hooked, &patched)?;
+            *source = hooked;
+        }
+    }
+    if let Some(hook) = pending.first() {
+        bail!("hook `{}`: definition of {} not found in the wasm2c output", hook.field, hook.symbol);
+    }
+    Ok(())
+}
+
+fn write_if_changed(path: &Path, text: &str) -> Result<()> {
+    if fs::read_to_string(path).ok().as_deref() != Some(text) {
+        fs::write(path, text)?;
+    }
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
