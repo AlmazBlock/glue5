@@ -37,8 +37,8 @@ See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
 | `crates/glue5-gpu` | The renderer: executes the engine's D3D11-style command ring with wgpu (Metal on Apple platforms, Vulkan elsewhere). |
 | `crates/glue5` | The application (SDL3), the same on every platform: window, input, audio, settings and touch controls (egui overlay). Its `headless` example runs the game without a window. |
 | `platform/ios` | What iOS needs around it: `main.c`, entitlements, the xcodegen spec. |
-| `xtask` | `cargo xtask` (from the repository root): setup and the iOS app. A workspace of its own. |
-| `patches` | Our patches to wasm2c and wgpu-core, applied by `cargo xtask setup` ([README](patches/README.md)). |
+| `mise.toml`, `.mise/tasks` | The toolchain and the developer tasks ([mise]): setup, desktop and iOS. |
+| `patches` | Our patches to wasm2c and wgpu-core, applied by `mise run setup` ([README](patches/README.md)). |
 | `third_party/wabt` | wasm2c's sources, pinned (a submodule). `third_party/wgpu-core`, the patched wgpu-core, is made by setup and not in git. |
 
 Symlink your game directory
@@ -48,13 +48,16 @@ build.
 
 ## Building
 
-Requirements: Rust (see `rust-toolchain.toml`), CMake, a C/C++ compiler;
-for iOS, Xcode and [xcodegen].
+Requirements: [mise] and a C/C++ compiler; for iOS, Xcode. mise installs
+Rust, CMake and [xcodegen] (`mise.toml`) on first use.
 
 ```sh
-cargo xtask setup      # once: wgpu-core and wasm2c with our patches
-cargo run --release    # the first build compiles ~1 GB of generated C
+mise run play          # the first build compiles ~1 GB of generated C
 ```
+
+Every task first runs `mise run setup`, which prepares wgpu-core and
+wasm2c with our patches (only when they change). Run cargo by hand
+through mise too: in a shell with `mise activate`, or `mise exec -- cargo ...`.
 
 Compiled C objects are cached in `target/glue5-tools/objcache`, shared by
 debug and release builds; later builds only recompile what changed.
@@ -63,16 +66,20 @@ debug and release builds; later builds only recompile what changed.
 
 | What | Command |
 |---|---|
-| Play | `cargo run -r` |
-| Run without a window: scripted input, PNG shots, statistics | `cargo run -r --example headless -- --press 30 start --for 40 --shots 300 shots` (`-- --help` lists the options) |
-| Tests | `cargo test --workspace`; every translated shader through the adapter and naga's validator: `cargo test -r -p glue5-gpu -- --ignored` |
-| iOS: build, sign, install, launch on the connected device | `GLUE5_TEAM=<team id> cargo xtask ios` |
-| iOS: only check that the app builds | `cargo xtask ios-build` |
-| iOS: launch the installed app again, with its console | `cargo xtask ios-run` |
-| iOS: copy the game into the app's Documents/game | `cargo xtask ios-game` |
+| Play (desktop) | `mise run play` |
+| Run without a window: scripted input, PNG shots, statistics | `mise run headless --press 30 start --for 40 --shots 300 shots` (`--help` lists the options) |
+| Tests | `mise run test`; every translated shader through the adapter and naga's validator: `mise run test:shaders` |
+| iOS: build, sign, install, launch on the connected device | `mise run ios [device]` |
+| iOS: only check that the app builds | `mise run ios:build` |
+| iOS: launch the installed app again, with its console | `mise run ios:run [device]` |
+| iOS: copy the game into the app's Documents/game | `mise run ios:game [device]` |
+
+`mise tasks` lists them all. iOS signing uses the team in `GLUE5_TEAM`:
+put it in `mise.local.toml` (ignored by git) under `[env]`. With several
+phones connected, pass the device (name, identifier or UDID).
 
 The app and headless runner accept these environment variables.
-`cargo xtask ios` and `ios-run` forward `RUST_LOG` and `GLUE5_*` variables
+`mise run ios` and `ios:run` forward `RUST_LOG` and `GLUE5_*` variables
 to the device.
 
 | Variable | Effect |
@@ -142,7 +149,7 @@ The app looks for the game in this order: the command line (desktop),
 `GLUE5_GAME_DIR`, the saved location in `glue5.json`, then platform defaults.
 On desktop, the default is `game` next to the executable or in the
 repository. On iOS, it is `Documents/game`, populated with
-`cargo xtask ios-game`, Finder > device > Files, or the Files app.
+`mise run ios:game`, Finder > device > Files, or the Files app.
 
 If the files are missing, the start page explains where to put them.
 Desktop users can choose a folder; on iOS, the app checks again when it
@@ -165,3 +172,4 @@ and a hook can call the original through `glue5_game::orig`.
 
 [wasm2c]: https://github.com/WebAssembly/wabt/tree/main/wasm2c
 [xcodegen]: https://github.com/yonaskolb/XcodeGen
+[mise]: https://mise.jdx.dev

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#MISE description="Build the iOS app, install it on the device and launch it with its console"
+#MISE depends=["setup"]
+#MISE raw=true
+#USAGE arg "[device]" help="Name, identifier or UDID (default: the only one connected)"
+# Signed with the team in GLUE5_TEAM (e.g. in mise.local.toml).
+. "$(dirname "$0")/lib.sh"
+
+[ -n "${GLUE5_TEAM:-}" ] || die "set GLUE5_TEAM to your Apple development team id (Xcode > Settings > Accounts), e.g. in mise.local.toml"
+pick_device "${usage_device:-}"
+ios_project
+# Built for the device itself: Xcode registers it with the team and puts it
+# in the provisioning profile.
+xcodebuild_app "platform=iOS,id=$udid" -allowProvisioningUpdates -allowProvisioningDeviceRegistration
+xcrun devicectl device install app --device "$device" "$app"
+echo "the game goes in the app's Documents/game: mise run ios:game, or Finder > device > Files > Glue 5"
+# The first launch right after an install often fails ("Invalid argument");
+# one a moment later works.
+started=$SECONDS
+launch || {
+    status=$?
+    [ $((SECONDS - started)) -lt 10 ] || exit $status
+    echo "launch failed; trying again" >&2
+    sleep 3
+    launch
+}

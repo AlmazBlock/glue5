@@ -1,7 +1,7 @@
 //! Turns game.wasm into a native static library:
 //!
 //! 1. find game.wasm under $GLUE5_GAME_DIR and check it is a supported build
-//! 2. translate it to C with the patched wasm2c (`cargo xtask setup`)
+//! 2. translate it to C with the patched wasm2c (`mise run setup`)
 //! 3. apply hooks (hooks.rs) and generate the glue C and Rust bindings
 //! 4. compile everything through an object cache and archive it
 
@@ -80,7 +80,7 @@ fn run() -> Result<()> {
     // 2. wasm2c, once per (game.wasm, wasm2c) pair. Generated sources live outside
     // OUT_DIR so every profile and target shares them and their objects.
     let wasm2c = tools.join("bin/wasm2c");
-    ensure!(wasm2c.exists(), "{} not found: run `cargo xtask setup` first", wasm2c.display());
+    ensure!(wasm2c.exists(), "{} not found: run `mise run setup` first", wasm2c.display());
     let tool_stamp = fs::read_to_string(tools.join("wasm2c.stamp")).unwrap_or_default();
     println!("cargo:rerun-if-changed={}", wasm2c.display());
     let gen_dir = tools.join("gen").join(&sha[..16]);
@@ -111,7 +111,7 @@ fn run() -> Result<()> {
     // 4. Compile.
     let wabt = tools.join("wabt-src");
     let simde = root.join("third_party/wabt/third_party/simde");
-    ensure!(simde.join("simde").exists(), "{} is missing: run `cargo xtask setup`", simde.display());
+    ensure!(simde.join("simde").exists(), "{} is missing: run `mise run setup`", simde.display());
     let mut build = cc::Build::new();
     build
         .include(&gen_dir)

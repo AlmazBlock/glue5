@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Only build the iOS app, unsigned (checks that it links)"
+#MISE depends=["setup"]
+. "$(dirname "$0")/lib.sh"
+
+ios_project
+xcodebuild_app generic/platform=iOS CODE_SIGNING_ALLOWED=NO
+echo "built $app (unsigned)"

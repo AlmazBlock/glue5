@@ -147,7 +147,7 @@ impl Args {
                 args.game_dir = Some(arg.into());
             }
         }
-        // Measurements on a phone, whose screen nobody taps (`cargo xtask ios-run`
+        // Measurements on a phone, whose screen nobody taps (`mise run ios:run`
         // passes GLUE5_* variables on).
         args.play |= std::env::var_os("GLUE5_PLAY").is_some();
         args

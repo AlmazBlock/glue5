@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#MISE description="Copy the game (data/ and the shaders) into the iOS app's Documents/game"
+#USAGE arg "[device]" help="Name, identifier or UDID (default: the only one connected)"
+# From GLUE5_GAME_DIR (default ./game). Unchanged files are skipped, so an
+# interrupted copy resumes.
+. "$(dirname "$0")/lib.sh"
+
+game=$(cd "${GLUE5_GAME_DIR:-game}" && pwd -P)
+pick_device "${usage_device:-}"
+# What the app reads: data/ and each build's translated shaders.
+items=(data)
+for shaders in "$game"/b/*/shaders; do
+    if [ -f "$shaders/index.json" ]; then items+=("${shaders#"$game"/}"); fi
+done
+for item in "${items[@]}"; do
+    echo "copying $item (unchanged files are skipped)"
+    xcrun devicectl device copy to --device "$device" --domain-type appDataContainer \
+        --domain-identifier "$bundle_id" --source "$game/$item" --destination "Documents/game/$item"
+done

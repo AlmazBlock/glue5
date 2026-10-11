@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# xtask is a workspace of its own: it prepares third_party/wgpu-core, which
-# this one needs before it can load.
-exclude = ["third_party", "xtask"]
+# third_party/wgpu-core is prepared by `mise run setup`; this workspace
+# needs it before it can load.
+exclude = ["third_party"]
 default-members = ["crates/glue5"]
 
 [workspace.package]
@@ -41,6 +41,6 @@ debug = "line-tables-only"
 opt-level = 1
 
 # wgpu-core with our patches (patches/wgpu-core) on top of the release,
-# prepared by `cargo xtask setup`.
+# prepared by `mise run setup`.
 [patch.crates-io]
 wgpu-core = { path = "third_party/wgpu-core" }

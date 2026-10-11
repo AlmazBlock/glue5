@@ -1,0 +1,36 @@
+# Toolchain and developer tasks, for everyone: `mise run <task>` (`mise
+# tasks` lists them) installs the tools below on first use; cargo by hand
+# goes through mise too (an activated shell, or `mise exec -- cargo ...`).
+# The longer tasks are scripts in .mise/tasks/.
+# Personal settings, such as GLUE5_TEAM for iOS signing, go in
+# mise.local.toml (ignored by git) under [env].
+
+[tools]
+rust = { version = "stable", targets = "aarch64-apple-ios" }
+cmake = "4.4.1"
+xcodegen = { version = "2.46.0", os = ["macos"] }
+
+[tasks.play]
+description = "Build and play the game (desktop)"
+depends = ["setup"]
+run = "cargo run -r"
+
+[tasks.build]
+description = "Build the desktop app"
+depends = ["setup"]
+run = "cargo build -r"
+
+[tasks.headless]
+description = "Run without a window: scripted input, PNG shots, statistics (--help lists the options)"
+depends = ["setup"]
+run = "cargo run -r --example headless --"
+
+[tasks.test]
+description = "Tests (every translated shader too: mise run test:shaders)"
+depends = ["setup"]
+run = "cargo test --workspace"
+
+[tasks."test:shaders"]
+description = "Every translated shader through the adapter and naga's validator"
+depends = ["setup"]
+run = "cargo test -r -p glue5-gpu -- --ignored"

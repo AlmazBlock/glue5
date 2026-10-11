@@ -1,5 +1,5 @@
 # The iOS app: a thin package around the glue5 library (the same crate as
-# the desktop app). `cargo xtask ios` / `ios-build` build the library, then
+# the desktop app). `mise run ios` / `ios:build` build the library, then
 # generate the Xcode project (Glue5.xcodeproj, Info.plist: ignored by git)
 # next to this file.
 name: Glue5

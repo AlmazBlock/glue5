@@ -1,7 +1,3 @@
-[alias]
-# A workspace of its own (see Cargo.toml): run it from the repository root.
-xtask = "run --quiet --manifest-path xtask/Cargo.toml --"
-
 [env]
 # Directory with the game build (b/<build>/game.wasm, b/<build>/shaders, data/).
 # Override in the environment, or symlink ./game to the real location.

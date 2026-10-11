@@ -1,9 +1,10 @@
 /target
-/xtask/target
 /game
 /third_party/wgpu-core
 /third_party/wgpu-core.tmp
 .DS_Store
+# Personal mise settings (e.g. GLUE5_TEAM).
+/mise.local.toml
 
 # Local design drafts and screenshots may contain personal filesystem paths.
 /docs/mockups/

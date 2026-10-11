@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#MISE description="Prepare the third-party code with our patches (again only when patches/ change)"
+# wgpu-core from crates.io in third_party/<name> (ignored by git), where
+# the workspace's [patch.crates-io] takes it, and wasm2c built
+# from third_party/wabt for the game's build script. A stamp of the upstream
+# version and the patches skips what is already prepared.
+set -euo pipefail
+
+# The crates.io releases the patches in patches/<name> apply to: name,
+# version and the sha256 of the crates.io archive.
+crates=(
+    "wgpu-core 30.0.1 14c018fce9b6270aa203c2fdd56f3cce996713534bd757e4ea58c8560b121f14"
+)
+
+# Where the tools live; glue5-game/build.rs looks in the same place.
+tools=${CARGO_TARGET_DIR:-$PWD/target}/glue5-tools
+
+sha256() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | cut -d' ' -f1; }
+
+# Our patches for a project, patches/<name>/*.patch in order: their names and
+# contents, to stamp what they were applied to.
+patches_key() {
+    for patch in patches/"$1"/*.patch; do
+        printf ' %s:%s' "${patch##*/}" "$(git hash-object "$patch")"
+    done
+}
+
+# Applies the patches for $1 in directory $2. The copies sit inside this
+# repository: git must not discover it (above $3), or `git apply` resolves
+# paths against our root and silently skips everything.
+apply_patches() {
+    for patch in patches/"$1"/*.patch; do
+        echo "applying ${patch##*/}"
+        GIT_CEILING_DIRECTORIES=$3 git -C "$2" apply "$PWD/$patch"
+    done
+}
+
+mkdir -p "$tools"
+for crate in "${crates[@]}"; do
+    read -r name version sha <<<"$crate"
+    dest=third_party/$name
+    key="$version $sha$(patches_key "$name")"
+    if [ "$(cat "$dest/.glue5-stamp" 2>/dev/null)" = "$key" ]; then
+        echo "$name is up to date ($dest)"
+        continue
+    fi
+    archive=$tools/$name-$version.crate
+    if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$sha" ]; then
+        curl -fsSL -o "$archive" "https://static.crates.io/crates/$name/$name-$version.crate"
+        [ "$(sha256 "$archive")" = "$sha" ] || { echo "$archive does not match its checksum" >&2; exit 1; }
+    fi
+    # Unpacked and patched next to its place, then moved there.
+    tmp=$PWD/third_party/$name.tmp
+    rm -rf "$tmp" && mkdir -p "$tmp"
+    tar -xzf "$archive" -C "$tmp"
+    apply_patches "$name" "$tmp/$name-$version" "$tmp"
+    printf '%s' "$key" >"$tmp/$name-$version/.glue5-stamp"
+    rm -rf "$dest" && mv "$tmp/$name-$version" "$dest" && rm -rf "$tmp"
+    echo "prepared $dest"
+done
+
+# wasm2c: only the nested submodules it needs (wabt also pulls large test suites).
+wabt=third_party/wabt
+git submodule update --init --depth 1 "$wabt"
+git -C "$wabt" submodule update --init --depth 1 third_party/picosha2 third_party/simde
+key="$(git -C "$wabt" rev-parse HEAD)$(patches_key wabt)"
+if [ "$(cat "$tools/wasm2c.stamp" 2>/dev/null)" = "$key" ] && [ -x "$tools/bin/wasm2c" ]; then
+    echo "wasm2c is up to date ($tools/bin/wasm2c)"
+    exit 0
+fi
+# A pristine copy of the pinned sources, then our patches on top.
+src=$tools/wabt-src
+rm -rf "$src" && mkdir -p "$src"
+git -C "$wabt" archive --format=tar HEAD | tar -x -C "$src"
+git -C "$wabt/third_party/picosha2" archive --format=tar --prefix=third_party/picosha2/ HEAD | tar -x -C "$src"
+apply_patches wabt "$src" "$tools"
+# A host tool: keep an iOS build environment (e.g. from Xcode) out of it.
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CC -u CXX -u CFLAGS -u CXXFLAGS \
+    cmake -S "$src" -B "$tools/wabt-build" -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTS=OFF -DBUILD_LIBWASM=OFF -DWITH_WASI=OFF -DBUILD_TOOLS=ON
+cmake --build "$tools/wabt-build" --target wasm2c --parallel "$(getconf _NPROCESSORS_ONLN)"
+mkdir -p "$tools/bin"
+cp "$tools/wabt-build/wasm2c" "$tools/bin/wasm2c"
+printf '%s' "$key" >"$tools/wasm2c.stamp"
+echo "built $tools/bin/wasm2c"

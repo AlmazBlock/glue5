@@ -12,7 +12,7 @@ way the operating system starts a process:
 | Platform | Started by | Packaging |
 |---|---|---|
 | macOS, Linux, Windows | the `glue5` binary | `cargo build` |
-| iOS | `platform/ios/main.c` calls `glue5_main`, which hands the process to SDL (`SDL_RunApp`) | an Xcode project generated from `platform/ios/project.yml` by xcodegen links the crate as a static library (`cargo xtask ios`) |
+| iOS | `platform/ios/main.c` calls `glue5_main`, which hands the process to SDL (`SDL_RunApp`) | an Xcode project generated from `platform/ios/project.yml` by xcodegen links the crate as a static library (`mise run ios`) |
 | Android (next) | SDL's Java activity loads the library and calls `SDL_main` | Gradle project with SDL's activity, the library built with the NDK |
 
 Platform-specific Rust code uses `cfg`s for details such as default folders
@@ -53,7 +53,7 @@ interface, translates the engine's command ring to wgpu, adapts the shaders
 and supplies touch controls.
 
 We patch wasm2c and wgpu-core. The patch files live in `patches/` and
-`cargo xtask setup` applies them to pinned sources. Cargo cannot apply
+`mise run setup` applies them to pinned sources. Cargo cannot apply
 patch files directly to a dependency.
 
 The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes
@@ -358,7 +358,7 @@ prompts, aim assist and menu behaviour:
   to finish the previous frame before it starts the next ("Wait on queued
   frames"). Allowing a second queued frame may reduce this wait, at the
   cost of extra latency. Measure the effect with
-  `GLUE5_ENGINE_ARGS=-FrameQueueLimit=2 cargo xtask ios-run`; the result
+  `GLUE5_ENGINE_ARGS=-FrameQueueLimit=2 mise run ios:run`; the result
   depends on the CPU and GPU bottlenecks.
 - **Shader adaptation on naga's IR**: the translated WGSL is adapted as
   text (regular expressions: constant buffers packed, interpolation
