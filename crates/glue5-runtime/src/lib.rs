@@ -90,6 +90,11 @@ impl Config {
         args.push(format!("-height={}", self.height));
         args.push("-forceResolution".into());
         args.extend(["-Script_all=warning", "-replay_all=warning", "-fastscriptcore"].map(String::from));
+        // This build is a BankRelease one: its debug pad took the first pad to
+        // send input, and START and Back with it (START never opened the
+        // pause menu, and after it the pad's other buttons went to the debug
+        // tools). Pads as in a retail build.
+        args.extend(["-disableDebugPadButtons", "-disallowdebugpad"].map(String::from));
         // The engine's limiter counts 60 Hz intervals per frame (0: off).
         let frame_limit = match self.max_fps {
             0 => 0,
@@ -184,7 +189,6 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     }
     let hooks = glue5_game::Hooks {
         pad_update: Some(input::pad_update),
-        pad_debug: Some(input::pad_debug),
         text_box_open: Some(input::text_box_open_hook),
         text_box_close: Some(input::text_box_close_hook),
         want_to_exit: Some(exit::want_to_exit),
