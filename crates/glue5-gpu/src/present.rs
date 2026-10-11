@@ -4,14 +4,32 @@
 //! overlay and presents, and keeps frames at most two ahead of the GPU,
 //! window or not. Before the game runs, the application shows its UI
 //! through the same [`Output`] (see [`crate::Screen`]).
+//!
+//! Frames are shown at an even pace: with a frame rate set, each stays on
+//! screen for at least its share of a second, measured from when the one
+//! before actually appeared. A display faster than the game (120 Hz
+//! ProMotion, a 144 Hz monitor) would otherwise show each frame at the first
+//! refresh after it is ready, for 1, 2 or 3 refreshes as it comes: judder,
+//! though the frames themselves are on time. On Apple platforms the window's
+//! images are taken from its Metal layer and shown by hand, as wgpu does but
+//! with `presentDrawable:afterMinimumDuration:`, and the times they reached
+//! the screen go into the statistics.
 
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+#[cfg(target_vendor = "apple")]
+use objc2::rc::{Retained, autoreleasepool};
+#[cfg(target_vendor = "apple")]
+use objc2::runtime::ProtocolObject;
+#[cfg(target_vendor = "apple")]
+use objc2_quartz_core::CAMetalDrawable;
 use wgpu::TextureFormat;
+#[cfg(target_vendor = "apple")]
+use wgpu::hal::api::Metal;
 
 use crate::done::Work;
 use crate::exec::Gpu;
@@ -76,6 +94,8 @@ struct Shared {
     size: AtomicU64,
     vsync: AtomicBool,
     upscaler: AtomicU8,
+    /// Frames per second at most, shown evenly (0: as they come).
+    frame_rate: AtomicU32,
 }
 
 impl Presentation {
@@ -84,6 +104,7 @@ impl Presentation {
             size: AtomicU64::new(0),
             vsync: AtomicBool::new(vsync),
             upscaler: AtomicU8::new(upscaler as u8),
+            frame_rate: AtomicU32::new(0),
         }));
         p.set_size(width, height);
         p
@@ -117,6 +138,67 @@ impl Presentation {
             _ => Upscaler::Bicubic,
         }
     }
+
+    /// Frames per second at most, each shown for the same time (0: each
+    /// as soon as it is ready). Where the platform cannot pace frames
+    /// (wgpu's surface), the engine's own limiter does it alone.
+    pub fn set_frame_rate(&self, fps: u32) {
+        self.0.frame_rate.store(fps, Ordering::Relaxed);
+    }
+
+    /// How long each frame stays on screen at least.
+    #[cfg(target_vendor = "apple")]
+    fn frame_time(&self) -> Option<Duration> {
+        let fps = self.0.frame_rate.load(Ordering::Relaxed);
+        (fps > 0).then(|| Duration::from_secs_f64(1.0 / fps as f64))
+    }
+}
+
+/// When the window's frames reached the screen (host seconds), since the
+/// statistics last took them.
+static ON_SCREEN: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+
+/// The times frames stayed on screen, in milliseconds, since the last call.
+pub(crate) fn take_on_screen() -> Vec<f32> {
+    let mut times = ON_SCREEN.lock().unwrap();
+    let ms = times.windows(2).map(|w| ((w[1] - w[0]) * 1000.0) as f32).collect();
+    // The last one starts the next interval.
+    let last = times.last().copied();
+    times.clear();
+    times.extend(last);
+    ms
+}
+
+/// Whether the window showing `layer` is at least partly visible: the
+/// drawable of a hidden window waits up to a second for the screen (wgpu's
+/// own acquisition makes the same check, gfx-rs/wgpu#8309).
+#[cfg(target_os = "macos")]
+fn window_visible(layer: &objc2_quartz_core::CAMetalLayer) -> bool {
+    use objc2::Message;
+    use objc2::runtime::NSObject;
+    const VISIBLE: usize = 1 << 1; // NSWindowOcclusionStateVisible
+    // The first layer with a delegate is the window's view.
+    let mut current = Some(layer.retain().into_super());
+    while let Some(l) = current {
+        if let Some(view) = l.delegate() {
+            let window: Option<Retained<NSObject>> = unsafe { objc2::msg_send![&*view, window] };
+            let state: usize = window.map_or(VISIBLE, |w| unsafe { objc2::msg_send![&*w, occlusionState] });
+            return state & VISIBLE != 0;
+        }
+        current = l.superlayer();
+    }
+    true
+}
+
+/// The window's next image, to draw into and then show ([`Output::show`]).
+pub struct Frame {
+    pub texture: wgpu::Texture,
+    /// The format to view it with (the surface's, without sRGB).
+    pub format: TextureFormat,
+    #[cfg(not(target_vendor = "apple"))]
+    surface: wgpu::SurfaceTexture,
+    #[cfg(target_vendor = "apple")]
+    drawable: Retained<ProtocolObject<dyn CAMetalDrawable>>,
 }
 
 /// A window to present into.
@@ -148,6 +230,8 @@ struct Display {
     surface: wgpu::Surface<'static>,
     /// Size and vsync it is configured with.
     configured: Option<(u32, u32, bool)>,
+    /// The surface's format, and the one its images are viewed with (no sRGB).
+    surface_format: Option<TextureFormat>,
     format: Option<TextureFormat>,
     blit: Option<(wgpu::RenderPipeline, wgpu::Sampler)>,
 }
@@ -188,17 +272,13 @@ impl Display {
         if self.format != Some(linear) {
             self.blit = None;
         }
+        self.surface_format = Some(format);
         self.format = Some(linear);
         self.configured = Some((w, h, vsync));
         log::debug!("gpu: surface {w}x{h} {format:?} {present_mode:?}");
     }
 
-    fn acquire(
-        &mut self,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        wanted: (u32, u32, bool),
-    ) -> Option<(wgpu::SurfaceTexture, TextureFormat)> {
+    fn acquire(&mut self, adapter: &wgpu::Adapter, device: &wgpu::Device, wanted: (u32, u32, bool)) -> Option<Frame> {
         if wanted.0 == 0 || wanted.1 == 0 {
             return None;
         }
@@ -209,19 +289,63 @@ impl Display {
             }
             self.configure(&caps, device, wanted);
         }
+        self.next_image(device)
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    fn next_image(&mut self, _: &wgpu::Device) -> Option<Frame> {
         let format = self.format?;
-        match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => Some((t, format)),
+        let surface = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                 self.configured = None;
-                Some((t, format))
+                t
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.configured = None;
-                None
+                return None;
             }
-            _ => None,
+            _ => return None,
+        };
+        Some(Frame { texture: surface.texture.clone(), format, surface })
+    }
+
+    /// The layer's next drawable (waiting for one, as wgpu does), as a
+    /// texture to draw into.
+    #[cfg(target_vendor = "apple")]
+    fn next_image(&mut self, device: &wgpu::Device) -> Option<Frame> {
+        use objc2_metal::{MTLTexture, MTLTextureType};
+        let (surface_format, format) = (self.surface_format?, self.format?);
+        let layer = unsafe { self.surface.as_hal::<Metal>() }.map(|s| s.render_layer().lock().clone())?;
+        #[cfg(target_os = "macos")]
+        if !window_visible(&layer) {
+            return None;
         }
+        let drawable = autoreleasepool(|_| layer.nextDrawable())?;
+        let raw = drawable.texture();
+        let size = wgpu::Extent3d { width: raw.width() as u32, height: raw.height() as u32, depth_or_array_layers: 1 };
+        let extent = wgpu::hal::CopyExtent { width: size.width, height: size.height, depth: 1 };
+        let hal = unsafe {
+            wgpu::hal::metal::Device::texture_from_raw(raw, surface_format, MTLTextureType::Type2D, 1, 1, extent, None)
+        };
+        let view_formats = if format != surface_format { vec![format] } else { vec![] };
+        let texture = unsafe {
+            device.create_texture_from_hal::<Metal>(
+                hal,
+                &wgpu::TextureDescriptor {
+                    label: Some("window"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: surface_format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &view_formats,
+                },
+                wgpu::wgt::TextureUses::UNINITIALIZED,
+            )
+        };
+        Some(Frame { texture, format, drawable })
     }
 
     /// `src` scaled into `rect` (x, y, width, height) of `target`, black around it.
@@ -317,7 +441,13 @@ impl Output {
         Output {
             adapter,
             presentation: window.presentation,
-            display: Display { surface: window.surface, configured: None, format: None, blit: None },
+            display: Display {
+                surface: window.surface,
+                configured: None,
+                surface_format: None,
+                format: None,
+                blit: None,
+            },
             overlay: OverlayRenderer::new(window.overlay),
             #[cfg(target_vendor = "apple")]
             metalfx: crate::metalfx::MetalFx::new(device),
@@ -332,11 +462,46 @@ impl Output {
         false
     }
 
-    /// The next frame to draw into, and its view format (none while the
-    /// window has no area or its surface is being replaced).
-    pub fn acquire(&mut self, device: &wgpu::Device) -> Option<(wgpu::SurfaceTexture, TextureFormat)> {
+    /// The next frame to draw into (none while the window has no area or
+    /// its surface is being replaced).
+    pub fn acquire(&mut self, device: &wgpu::Device) -> Option<Frame> {
         let (w, h) = self.presentation.size();
         self.display.acquire(&self.adapter, device, (w, h, self.presentation.vsync()))
+    }
+
+    /// Shows `frame`, drawn by the commands submitted before.
+    #[cfg(not(target_vendor = "apple"))]
+    pub fn show(&mut self, queue: &wgpu::Queue, frame: Frame) {
+        drop(frame.texture);
+        queue.present(frame.surface);
+    }
+
+    /// Shows `frame`, drawn by the commands submitted before: what wgpu's
+    /// present does (a command buffer of its own that presents the
+    /// drawable, after those on the same queue), paced by the frame rate.
+    #[cfg(target_vendor = "apple")]
+    pub fn show(&mut self, queue: &wgpu::Queue, frame: Frame) {
+        use block2::RcBlock;
+        use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDrawable};
+        let drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*frame.drawable);
+        let on_screen = RcBlock::new(|d: std::ptr::NonNull<ProtocolObject<dyn MTLDrawable>>| {
+            // 0: skipped (a newer frame replaced it).
+            let at = unsafe { d.as_ref() }.presentedTime();
+            if at > 0.0 {
+                ON_SCREEN.lock().unwrap().push(at);
+            }
+        });
+        unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&on_screen)) };
+        let Some(queue) = (unsafe { queue.as_hal::<Metal>() }) else { return };
+        let frame_time = self.presentation.frame_time();
+        autoreleasepool(|_| {
+            let Some(commands) = queue.as_raw().commandBuffer() else { return };
+            match frame_time {
+                Some(t) => commands.presentDrawable_afterMinimumDuration(drawable, t.as_secs_f64()),
+                None => commands.presentDrawable(drawable),
+            }
+            commands.commit();
+        });
     }
 
     /// The commands that draw `frame`: the back buffer `src` scaled into it
@@ -345,10 +510,10 @@ impl Output {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        frame: &wgpu::SurfaceTexture,
-        format: TextureFormat,
+        frame: &Frame,
         src: Option<&Present>,
     ) -> Vec<wgpu::CommandBuffer> {
+        let format = frame.format;
         let target =
             frame.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(format), ..Default::default() });
         let size = (frame.texture.width(), frame.texture.height());

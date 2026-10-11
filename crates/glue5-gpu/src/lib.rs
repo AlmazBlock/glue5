@@ -143,9 +143,9 @@ impl Screen {
     /// window had no frame to give (hidden, minimised, being replaced).
     pub fn show_ui(&mut self) -> bool {
         let Screen { gpu, output } = self;
-        let Some((frame, format)) = output.acquire(&gpu.device) else { return false };
-        gpu.queue.submit(output.compose(&gpu.device, &gpu.queue, &frame, format, None));
-        gpu.queue.present(frame);
+        let Some(frame) = output.acquire(&gpu.device) else { return false };
+        gpu.queue.submit(output.compose(&gpu.device, &gpu.queue, &frame, None));
+        output.show(&gpu.queue, frame);
         true
     }
 
@@ -304,6 +304,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         last_programs: (0, 0),
         chunk_passes: 0,
         batch_since: None,
+        waited_on: false,
         profiler,
         pass_profile: None,
         fast_pipes: Default::default(),

@@ -853,6 +853,7 @@ impl Gpu {
         let (to, row_pitch, slice_pitch, is_buffer, size, flag) =
             (c.addr(9), c.w(11), c.w(12), c.w(13) != 0, c.w(14), c.addr(15));
         self.flush_clears();
+        self.waited_on = true;
         let epoch = self.epoch;
         let done = |flag: u64| Work::Store { at: flag, value: 0 };
         if is_buffer {

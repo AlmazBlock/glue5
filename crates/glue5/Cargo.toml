@@ -17,3 +17,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 wgpu.workspace = true
 sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
+png = "0.18"

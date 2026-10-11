@@ -2,8 +2,7 @@
 //! runs, alone): the start page, the settings, and on touch screens the
 //! settings button and the touch controls. The game's menus stay the game's.
 //!
-//! One window, one page at a time: on a phone a page fills the safe area,
-//! on larger screens it is a panel in the middle. The same widgets
+//! One responsive layout, fitted to the safe area. The same widgets
 //! everywhere, all reachable from a controller or a keyboard: the D-pad,
 //! left stick or arrows move the focus, A / Space / Enter activates, B /
 //! Esc goes back.
@@ -12,16 +11,20 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align2, Color32, FontId, Id, LayerId, Order, Pos2, Rect, Response, RichText, SafeAreaInsets, Sense, Stroke, Vec2,
-    ViewportId, pos2, vec2,
+    Align2, Color32, FontId, Id, LayerId, Order, Pos2, Rect, SafeAreaInsets, Stroke, Vec2, ViewportId, pos2, vec2,
 };
 use sdl3::event::Event;
 use sdl3::keyboard::Scancode;
 use sdl3::mouse::MouseButton;
 use sdl3::video::Window;
 
-use crate::paths::{self, MOBILE};
-use crate::settings::{self, RENDER_SCALES, Settings, TouchMode};
+use crate::settings::Settings;
+
+mod pages;
+mod theme;
+mod widgets;
+use pages::{settings_page, start_page};
+
 use crate::touch::Touch;
 
 /// A page of the application's.
@@ -79,6 +82,8 @@ pub struct Status<'a> {
     /// The window, in pixels.
     pub window: (u32, u32),
     pub metalfx: bool,
+    /// The display's refresh rate at most, in Hz.
+    pub refresh_rate: f32,
 }
 
 /// The settings button over the game: from the safe area's top right
@@ -87,18 +92,20 @@ pub struct Status<'a> {
 const GEAR_AT: Vec2 = vec2(-156.0, 40.0);
 const GEAR_RADIUS: f32 = 20.0;
 
-/// The settings panel; screens with less room than this around it (phones)
-/// get the page over the whole safe area.
-const PANEL: Vec2 = vec2(560.0, 560.0);
-const LABEL_WIDTH: f32 = 130.0;
+const WARN: Color32 = Color32::from_rgb(240, 180, 100);
 
-const ACCENT: Color32 = Color32::from_rgb(52, 120, 230);
-const FOCUS: Color32 = Color32::from_rgb(120, 175, 255);
-const GOOD: Color32 = Color32::from_rgb(90, 200, 120);
-const WARN: Color32 = Color32::from_rgb(240, 180, 70);
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SettingsTab {
+    #[default]
+    Video,
+    Controls,
+    Game,
+}
 
 pub struct Ui {
     ctx: egui::Context,
+    background: Option<egui::TextureHandle>,
+    tab: SettingsTab,
     overlay: glue5_gpu::Overlay,
     events: Vec<egui::Event>,
     pointer: Pos2,
@@ -123,10 +130,12 @@ pub struct Ui {
 impl Ui {
     pub fn new(overlay: glue5_gpu::Overlay) -> Self {
         let ctx = egui::Context::default();
-        ctx.set_theme(egui::Theme::Dark);
-        ctx.all_styles_mut(style);
+        theme::install(&ctx);
+        let background = theme::background(&ctx);
         Ui {
             ctx,
+            background,
+            tab: SettingsTab::default(),
             overlay,
             events: Vec::new(),
             pointer: Pos2::ZERO,
@@ -364,6 +373,9 @@ impl Ui {
             touch.draw(&ctx.layer_painter(LayerId::background()), settings.touch_opacity);
         }
         self.gear = gear.map(|alpha| draw_gear(&ctx, safe, settings.touch_size, alpha));
+        if self.page.is_some() && status.started.is_none() {
+            theme::backdrop(&ctx, self.background.as_ref());
+        }
         match self.page {
             Some(Page::Start) => {
                 if start_page(&ctx, status, starting, &mut actions, &mut go) {
@@ -371,16 +383,8 @@ impl Ui {
                 }
             }
             Some(Page::Settings) => {
-                if status.started.is_some() {
-                    // The game behind, dimmed.
-                    ctx.layer_painter(LayerId::new(Order::Background, Id::new("dim"))).rect_filled(
-                        screen,
-                        0.0,
-                        Color32::from_black_alpha(150),
-                    );
-                }
                 let note = self.note.as_deref();
-                if settings_page(&ctx, settings, status, note, &mut self.scale_edit, &mut actions) {
+                if settings_page(&ctx, settings, status, note, &mut self.tab, &mut self.scale_edit, &mut actions) {
                     go = Some(self.home);
                 }
             }
@@ -405,22 +409,6 @@ impl Ui {
     }
 }
 
-fn style(s: &mut egui::Style) {
-    use egui::TextStyle;
-    s.text_styles.insert(TextStyle::Body, FontId::proportional(15.0));
-    s.text_styles.insert(TextStyle::Button, FontId::proportional(15.0));
-    s.text_styles.insert(TextStyle::Heading, FontId::proportional(22.0));
-    s.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
-    s.spacing.item_spacing = vec2(10.0, 8.0);
-    s.spacing.button_padding = vec2(12.0, 6.0);
-    s.spacing.interact_size.y = if MOBILE { 38.0 } else { 28.0 };
-    s.spacing.slider_width = 180.0;
-    s.visuals.window_corner_radius = 14.into();
-    s.visuals.selection.bg_fill = ACCENT;
-    // The focus (controller, keyboard) stands out.
-    s.visuals.widgets.active.bg_stroke = Stroke::new(2.0, FOCUS);
-}
-
 /// The part of the window clear of notches and rounded corners, in points.
 pub fn safe_rect(window: &Window) -> Rect {
     let (w, h) = window.size();
@@ -441,402 +429,6 @@ fn draw_gear(ctx: &egui::Context, safe: Rect, scale: f32, alpha: f32) -> (Pos2, 
     painter.circle(c, r, white(0.18), Stroke::new(1.5 * scale, white(0.6)));
     painter.text(c, Align2::CENTER_CENTER, "⚙", FontId::proportional(r * 0.95), white(0.9));
     (c, r)
-}
-
-/// How to open the settings in the game.
-fn open_hint() -> &'static str {
-    if MOBILE {
-        "In the game: ⚙ at the top right, or hold Back + Start on a controller."
-    } else {
-        "In the game: F1, or hold Back + Start on a controller."
-    }
-}
-
-/// The start page; true when Play is chosen.
-fn start_page(
-    ctx: &egui::Context,
-    status: &Status,
-    starting: bool,
-    actions: &mut Vec<Action>,
-    go: &mut Option<Option<Page>>,
-) -> bool {
-    let mut play = false;
-    let area = ctx.content_rect().shrink(12.0);
-    // A phone held sideways is short: its buttons and its cards side by side.
-    let wide = area.height() < 560.0 && area.width() >= 2.0 * START_COLUMN + START_GAP;
-    let column = START_COLUMN.min(area.width());
-    egui::Area::new(Id::new("start")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-        egui::ScrollArea::vertical().max_height(area.height()).show(ui, |ui| {
-            if wide {
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(column);
-                        play = start_buttons(ui, column, status, starting, actions, go);
-                    });
-                    ui.add_space(START_GAP);
-                    ui.vertical(|ui| {
-                        ui.set_width(column);
-                        start_cards(ui, status, actions);
-                    });
-                });
-            } else {
-                ui.set_width(column);
-                play = start_buttons(ui, column, status, starting, actions, go);
-                ui.add_space(12.0);
-                start_cards(ui, status, actions);
-            }
-        });
-    });
-    play
-}
-
-/// Width of the start page's column (two of them on a short screen).
-const START_COLUMN: f32 = 360.0;
-const START_GAP: f32 = 20.0;
-
-/// The start page's title and buttons; true when Play is chosen.
-fn start_buttons(
-    ui: &mut egui::Ui,
-    width: f32,
-    status: &Status,
-    starting: bool,
-    actions: &mut Vec<Action>,
-    go: &mut Option<Option<Page>>,
-) -> bool {
-    let mut play = false;
-    ui.vertical_centered(|ui| ui.label(RichText::new("Glue 5").size(34.0).strong()));
-    ui.add_space(12.0);
-    let label = if starting { "Starting…" } else { "Play" };
-    let button = egui::Button::new(RichText::new(label).size(19.0).strong().color(Color32::WHITE)).fill(ACCENT);
-    ui.add_enabled_ui(status.game_dir.is_some() && !starting, |ui| {
-        play = focus(ui.add_sized([width, 50.0], button)).clicked();
-    });
-    let half = (width - ui.spacing().item_spacing.x) / 2.0;
-    ui.horizontal(|ui| {
-        if focus(ui.add_sized([half, 40.0], egui::Button::new("Settings"))).clicked() {
-            *go = Some(Some(Page::Settings));
-        }
-        let (label, action) =
-            if MOBILE { ("Look again", Action::FindGame) } else { ("Game folder…", Action::ChooseGame) };
-        if focus(ui.add_sized([half, 40.0], egui::Button::new(label))).clicked() {
-            actions.push(action);
-        }
-    });
-    if !MOBILE && focus(ui.add_sized([width, 34.0], egui::Button::new("Quit"))).clicked() {
-        actions.push(Action::Quit);
-    }
-    play
-}
-
-/// The start page's state: the game's files, the last game's failure, and
-/// how to come back here.
-fn start_cards(ui: &mut egui::Ui, status: &Status, actions: &mut Vec<Action>) {
-    card(ui, |ui| game_files(ui, status));
-    if let Some(why) = status.last_failure {
-        ui.add_space(8.0);
-        card(ui, |ui| last_failure(ui, why, status.graphics_reset, actions));
-    }
-    ui.add_space(8.0);
-    ui.vertical_centered(|ui| ui.label(RichText::new(open_hint()).small().weak()));
-}
-
-fn game_files(ui: &mut egui::Ui, status: &Status) {
-    match status.game_dir {
-        Some(dir) => {
-            dot_title(ui, GOOD, "Game files found");
-            ui.label(RichText::new(dir.display().to_string()).small().weak());
-        }
-        None => {
-            dot_title(ui, WARN, "Game files not found");
-            if let Some(problem) = status.problem {
-                ui.label(RichText::new(problem).color(WARN));
-            }
-            ui.label(paths::where_the_game_goes());
-            ui.label(RichText::new(paths::game_layout()).monospace().small().weak());
-        }
-    }
-}
-
-/// The last game stopped: why, and the way out of a graphics setting the
-/// engine cannot run with (which stops it before its menu can change it).
-fn last_failure(ui: &mut egui::Ui, why: &str, reset: bool, actions: &mut Vec<Action>) {
-    dot_title(ui, WARN, "The last game stopped");
-    ui.label(RichText::new(why).small().weak());
-    if reset {
-        ui.label(graphics_reset_note());
-    } else {
-        ui.label("If it stops again at the same point, one of its graphics settings may be the cause.");
-        if focus(ui.button("Reset the game's graphics settings")).clicked() {
-            actions.push(Action::ResetGraphics);
-        }
-    }
-}
-
-fn graphics_reset_note() -> RichText {
-    RichText::new("The game's graphics settings are back to their defaults (the old ones: settings.xml.bak).")
-        .color(GOOD)
-}
-
-fn dot_title(ui: &mut egui::Ui, color: Color32, title: &str) {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-        ui.painter().circle_filled(rect.center(), 5.0, color);
-        ui.label(RichText::new(title).strong());
-    });
-}
-
-fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(10)
-        .inner_margin(14)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add(ui)
-        })
-        .inner
-}
-
-/// The settings page; true when it is closed.
-fn settings_page(
-    ctx: &egui::Context,
-    settings: &mut Settings,
-    status: &Status,
-    note: Option<&str>,
-    scale_edit: &mut Option<f32>,
-    actions: &mut Vec<Action>,
-) -> bool {
-    let area = ctx.content_rect();
-    let phone = area.width() < PANEL.x + 48.0 || area.height() < PANEL.y;
-    let margin = if phone { 14.0 } else { 20.0 };
-    let frame = egui::Frame::window(&ctx.global_style()).inner_margin(margin);
-    let window = egui::Window::new("Settings").title_bar(false).resizable(false).collapsible(false).frame(frame);
-    let (window, height) = if phone {
-        (window.fixed_rect(area), area.height())
-    } else {
-        let height = (area.height() - 64.0).min(PANEL.y);
-        (window.anchor(Align2::CENTER_CENTER, [0.0, 0.0]).fixed_size([PANEL.x, height]), height)
-    };
-    let mut close = false;
-    window.show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading("Settings");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let done = if status.started.is_some() { "Back to the game" } else { "Done" };
-                if focus(ui.button(done)).clicked() {
-                    close = true;
-                }
-            });
-        });
-        if let Some(note) = note {
-            ui.label(RichText::new(note).color(WARN));
-        }
-        ui.separator();
-        let left = height - ui.min_rect().height() - 2.0 * margin;
-        egui::ScrollArea::vertical()
-            .max_height(left.max(80.0))
-            .auto_shrink([false, false])
-            .show(ui, |ui| settings_items(ui, settings, status, scale_edit, actions));
-    });
-    close
-}
-
-fn settings_items(
-    ui: &mut egui::Ui,
-    settings: &mut Settings,
-    status: &Status,
-    scale_edit: &mut Option<f32>,
-    actions: &mut Vec<Action>,
-) {
-    let started = status.started;
-    section(ui, "Video");
-    grid(ui, "video", |ui| {
-        ui.label("Resolution");
-        let mut scale = scale_edit.unwrap_or(settings.render_scale());
-        let slider = egui::Slider::new(&mut scale, RENDER_SCALES)
-            .step_by(0.05)
-            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0));
-        let r = focus(ui.add(slider));
-        // Applied when let go: the game rebuilds its render targets for each
-        // new size.
-        if r.dragged() {
-            *scale_edit = Some(scale);
-        } else if r.changed() || r.drag_stopped() {
-            settings.render_scale = Some(settings::round_scale(scale));
-            *scale_edit = None;
-        }
-        ui.end_row();
-        ui.label("");
-        ui.horizontal(|ui| {
-            let (rw, rh) = settings::render_size(status.window, scale, settings.low_memory);
-            let (ww, wh) = status.window;
-            ui.label(RichText::new(format!("{rw} × {rh} for a window of {ww} × {wh}")).small().weak());
-            // Phone windows never change size: the engine's device reset
-            // never runs there, and a new size waits for the next start.
-            later(ui, MOBILE && started.is_some_and(|s| s.render_scale != settings.render_scale()));
-        });
-        ui.end_row();
-        if status.metalfx {
-            ui.label("Upscaling");
-            choice(ui, &mut settings.metalfx, &[(false, "Bicubic"), (true, "MetalFX")])
-                .on_hover_text("How the game's image is scaled up to the window");
-            ui.end_row();
-        }
-        ui.label("VSync");
-        toggle(ui, &mut settings.vsync);
-        ui.end_row();
-        ui.label("Frame rate");
-        ui.horizontal(|ui| {
-            let unlimited = if settings.vsync { "Display" } else { "Unlimited" };
-            choice(ui, &mut settings.max_fps, &[(0, unlimited), (60, "60"), (30, "30")]);
-            later(ui, started.is_some_and(|s| s.max_fps != settings.max_fps));
-        });
-        ui.end_row();
-    });
-
-    section(ui, "Controls");
-    grid(ui, "controls", |ui| {
-        ui.label("Touch controls");
-        choice(
-            ui,
-            &mut settings.touch,
-            &[(TouchMode::Auto, "Auto"), (TouchMode::Always, "Always"), (TouchMode::Off, "Off")],
-        )
-        .on_hover_text("Auto: on touch screens, hidden while a controller or keyboard is used");
-        ui.end_row();
-        ui.label("Size");
-        focus(ui.add(egui::Slider::new(&mut settings.touch_size, 0.7..=1.5).fixed_decimals(1)));
-        ui.end_row();
-        ui.label("Opacity");
-        focus(ui.add(egui::Slider::new(&mut settings.touch_opacity, 0.2..=1.0).fixed_decimals(1)));
-        ui.end_row();
-    });
-    ui.label(RichText::new(open_hint()).small().weak());
-
-    section(ui, "Game");
-    grid(ui, "game", |ui| {
-        ui.label("Low memory");
-        ui.horizontal(|ui| {
-            if toggle(ui, &mut settings.low_memory).changed() && settings.low_memory {
-                settings.low_preset_written = false;
-            }
-            later(ui, started.is_some_and(|s| s.low_memory != settings.low_memory));
-        });
-        ui.end_row();
-        ui.label("");
-        ui.label(
-            RichText::new("Smaller engine pools. Turning it on lowers the game's graphics settings once.")
-                .small()
-                .weak(),
-        );
-        ui.end_row();
-        ui.label("Folder");
-        ui.vertical(|ui| {
-            // Before the game, the folder found; in it, the one the next start uses.
-            let dir = if started.is_some() { settings.game_dir.as_deref() } else { status.game_dir };
-            let shown = dir.map_or_else(|| "not found".to_owned(), |d| d.display().to_string());
-            ui.label(RichText::new(shown).small().weak());
-            ui.horizontal(|ui| {
-                if !MOBILE && focus(ui.button("Choose…")).clicked() {
-                    actions.push(Action::ChooseGame);
-                }
-                later(ui, started.is_some_and(|s| Some(s.game_dir.as_path()) != settings.game_dir.as_deref()));
-            });
-        });
-        ui.end_row();
-    });
-    ui.label(
-        RichText::new("Graphics quality is the game's own: its menu, Settings › Graphics (Esc / Start).")
-            .small()
-            .weak(),
-    );
-    // Before the game only: a running engine holds its settings and saves them.
-    if started.is_none() {
-        if status.graphics_reset {
-            ui.label(graphics_reset_note().small());
-        } else if focus(ui.button("Reset the game's graphics settings")).clicked() {
-            actions.push(Action::ResetGraphics);
-        }
-    }
-    if started.is_some() && !MOBILE {
-        ui.add_space(12.0);
-        if focus(ui.button("Quit the game")).clicked() {
-            actions.push(Action::Quit);
-        }
-    }
-}
-
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(10.0);
-    ui.label(RichText::new(title.to_uppercase()).small().strong().color(ui.visuals().weak_text_color()));
-    ui.add_space(2.0);
-}
-
-fn grid(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Grid::new(id).num_columns(2).min_col_width(LABEL_WIDTH).spacing(vec2(16.0, 10.0)).show(ui, add);
-}
-
-/// A focusable widget: brought into view when it gets the focus (moved there
-/// by a controller or the keyboard).
-fn focus(r: Response) -> Response {
-    if r.gained_focus() {
-        r.scroll_to_me(None);
-    }
-    r
-}
-
-/// "next start" beside a setting changed while the game runs that applies
-/// when it starts again.
-fn later(ui: &mut egui::Ui, differs: bool) {
-    if differs {
-        ui.label(RichText::new("next start").small().color(WARN));
-    }
-}
-
-/// One of a few values, side by side on a common ground.
-fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) -> Response {
-    let ground = egui::Frame::new().fill(ui.visuals().widgets.inactive.weak_bg_fill).corner_radius(6).inner_margin(2);
-    ground
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let mut all: Option<Response> = None;
-                for &(v, label) in options {
-                    let r = focus(ui.selectable_label(*value == v, label));
-                    if r.clicked() {
-                        *value = v;
-                    }
-                    all = Some(match all {
-                        Some(a) => a | r,
-                        None => r,
-                    });
-                }
-                all.expect("options")
-            })
-            .inner
-        })
-        .inner
-}
-
-/// An on/off switch.
-fn toggle(ui: &mut egui::Ui, on: &mut bool) -> Response {
-    let h = 24.0;
-    let (rect, mut r) = ui.allocate_exact_size(vec2(h * 1.8, h), Sense::click());
-    if r.clicked() {
-        *on = !*on;
-        r.mark_changed();
-    }
-    let value = *on;
-    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, value, ""));
-    let t = ui.ctx().animate_bool_responsive(r.id, value);
-    let visuals = ui.style().interact_selectable(&r, value);
-    let fill = if value { ACCENT } else { ui.visuals().widgets.inactive.bg_fill };
-    let radius = h / 2.0;
-    ui.painter().rect(rect, radius, fill, visuals.bg_stroke, egui::StrokeKind::Outside);
-    let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
-    ui.painter().circle_filled(pos2(x, rect.center().y), radius * 0.75, Color32::WHITE);
-    focus(r)
 }
 
 fn key(sc: Scancode) -> Option<egui::Key> {

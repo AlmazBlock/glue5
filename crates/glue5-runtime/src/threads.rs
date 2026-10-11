@@ -130,10 +130,18 @@ unsafe fn init_tls(env: *mut Env) -> Result<(), Trap> {
 /// `__pthread_create_js`: returns 0 or an errno.
 pub(crate) unsafe fn create(env: *mut Env, pthread: u64, start: u64, arg: u64) -> u32 {
     rt().threads.reap(env);
+    let name = engine_name(rt().memory.mem(), arg);
+    // The threads a frame waits on: the render thread builds and sends it to
+    // the GPU, the mixer feeds the sound device. The engine's other threads
+    // (workers, streaming) just below, with the renderer's compile threads.
+    let qos = match &name {
+        Some(n) if n.contains("RenderThread") || n.contains("mixer") => crate::qos::Qos::Interactive,
+        _ => crate::qos::Qos::Initiated,
+    };
     let spawned = thread::Builder::new()
-        .name(format!("pthread {pthread:#x}"))
+        .name(name.unwrap_or_else(|| format!("pthread {pthread:#x}")))
         .stack_size(PTHREAD_STACK)
-        .spawn(move || run_pthread(pthread, start, arg));
+        .spawn(move || run_pthread(pthread, start, arg, qos));
     match spawned {
         Ok(_) => 0,
         Err(e) => {
@@ -143,8 +151,26 @@ pub(crate) unsafe fn create(env: *mut Env, pthread: u64, start: u64, arg: u64) -
     }
 }
 
-fn run_pthread(pthread: u64, start: u64, arg: u64) {
-    crate::qos::set(crate::qos::Qos::Initiated);
+/// The engine's name for a thread it starts: RAGE's thread entry takes its
+/// parameters, with the name inline at +24 (the names the engine's log
+/// lists as `engine thread n: ...`). None for threads started otherwise.
+fn engine_name(mem: crate::memory::Mem, arg: u64) -> Option<String> {
+    if arg == 0 {
+        return None;
+    }
+    let mut name = Vec::new();
+    for i in 0..48 {
+        match mem.u8(arg + 24 + i) {
+            0 => break,
+            b if b == b' ' || b.is_ascii_graphic() => name.push(b),
+            _ => return None,
+        }
+    }
+    (name.len() >= 3 && name.len() < 48).then(|| String::from_utf8_lossy(&name).into_owned())
+}
+
+fn run_pthread(pthread: u64, start: u64, arg: u64, qos: crate::qos::Qos) {
+    crate::qos::set(qos);
     let env = new_env();
     let mem = rt().memory.mem();
     let result = (|| -> Result<(), Trap> {

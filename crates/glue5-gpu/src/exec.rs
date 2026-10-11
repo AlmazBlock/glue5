@@ -190,8 +190,11 @@ pub struct Gpu {
     pub last_programs: (u32, u32),
     /// Render passes recorded since the last submit.
     pub chunk_passes: u32,
-    /// When the commands not yet handed over started (see `idle`).
+    /// When the work not yet handed over started gathering (see `idle`).
     pub batch_since: Option<Instant>,
+    /// The engine may be blocked on that work (a readback): it goes to the
+    /// GPU as soon as the ring is idle.
+    pub waited_on: bool,
     /// GPU time per pass (`GLUE5_GPU_PROFILE`).
     pub profiler: Option<crate::profile::Profiler>,
     /// The timestamps of the open draw pass, until its first draw names it.
@@ -234,7 +237,7 @@ pub struct Gpu {
 }
 
 /// Recorded work waits this long for more before an idle ring submits it.
-const IDLE_BATCH_MS: u64 = 4;
+const IDLE_BATCH: Duration = Duration::from_millis(4);
 
 impl Gpu {
     pub fn run(mut self) {
@@ -245,20 +248,19 @@ impl Gpu {
             let head = reader.head();
             if reader.is_empty(head) {
                 self.idle();
-                let timeout = if !self.works.is_empty() || !self.maps.is_empty() {
-                    1
-                } else if self.encoder.is_some() {
-                    IDLE_BATCH_MS
-                } else {
-                    100
+                // Until the work gathered is ripe (see `idle`).
+                let timeout = match self.batch_since {
+                    Some(t) => IDLE_BATCH.saturating_sub(t.elapsed()).max(Duration::from_millis(1)),
+                    None => Duration::from_millis(100),
                 };
-                reader.wait(Duration::from_millis(timeout));
+                reader.wait(timeout);
                 continue;
             }
             let t0 = Instant::now();
             self.execute_until(&mut reader, head);
             self.stats.busy += t0.elapsed();
-            if self.encoder.is_some() && self.batch_since.is_none() {
+            let gathering = self.encoder.is_some() || !self.works.is_empty() || !self.maps.is_empty();
+            if gathering && self.batch_since.is_none() {
                 self.batch_since = Some(t0);
             }
         }
@@ -279,15 +281,16 @@ impl Gpu {
 
     /// Nothing to do: complete what the engine may be waiting on, compile ahead.
     fn idle(&mut self) {
-        // What the engine may be waiting on goes to the GPU now; other
-        // recorded work once it has been gathering for a few milliseconds
-        // (a slow engine thread pauses often, and every submit costs), else
-        // with the next chunk or present.
-        // (Occlusion results are polled frames later: they can wait.)
-        let waited_on = !self.works.is_empty() || !self.maps.is_empty();
-        let ripe = self.encoder.is_some()
-            && self.batch_since.is_some_and(|t| t.elapsed() >= Duration::from_millis(IDLE_BATCH_MS));
-        if waited_on || ripe {
+        // A readback the engine may be blocked on goes to the GPU now. Other
+        // work once it has been gathering for a few milliseconds, else with
+        // the next chunk, fence or present: the engine pauses many times a
+        // frame, and every submit costs (a Metal command buffer each, about
+        // thirty a frame when every pause submitted). Query results (events,
+        // occlusion) are polled, frames later: they can wait as long.
+        let ripe = self.batch_since.is_some_and(|t| t.elapsed() >= IDLE_BATCH);
+        if self.waited_on {
+            self.flush("idle (readback)");
+        } else if ripe {
             self.flush("idle");
         }
         self.compile_ahead(Duration::from_millis(2));
@@ -557,6 +560,7 @@ impl Gpu {
         self.counter_slot = 0;
         self.chunk_passes = 0;
         self.batch_since = None;
+        self.waited_on = false;
     }
 
     // ---- objects -----------------------------------------------------------------
@@ -1017,7 +1021,7 @@ impl Gpu {
             buffers >> 20,
             self.uniforms.bytes_allocated() >> 20
         );
-        let frames_line = frame_times(st.frame_ms);
+        let frames_line = frame_times(st.frame_ms) + &on_screen(crate::present::take_on_screen());
         let [encode, submit, gpu_wait, drawable, present, release] = self.submitter.stats.take();
         let per_frame = |d: Duration| d.as_secs_f64() * 1000.0 / frames as f64;
         let mut skipped: Vec<_> = st.skipped.iter().map(|(k, n)| format!("{k} {n}")).collect();
@@ -1099,6 +1103,25 @@ fn frame_times(mut ms: Vec<f32>) -> String {
         "frame ms p50 {median:.1} p95 {:.1} p99 {:.1} max {:.1}, {hitches} over 1.5x",
         at(0.95),
         at(0.99),
+        ms[ms.len() - 1]
+    )
+}
+
+/// How long frames stayed on screen (where the platform tells): percentiles,
+/// and how often a frame stayed for another time than the one before (by
+/// half a 120 Hz refresh or more): the judder an uneven pace shows as.
+fn on_screen(mut ms: Vec<f32>) -> String {
+    if ms.len() < 2 {
+        return String::new();
+    }
+    let changes = ms.windows(2).filter(|w| (w[1] - w[0]).abs() >= 4.0).count();
+    ms.sort_by(f32::total_cmp);
+    let at = |q: f64| ms[((ms.len() - 1) as f64 * q).round() as usize];
+    format!(
+        "; on screen ms p5 {:.1} p50 {:.1} p95 {:.1} max {:.1}, {changes} changes",
+        at(0.05),
+        at(0.5),
+        at(0.95),
         ms[ms.len() - 1]
     )
 }

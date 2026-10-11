@@ -604,6 +604,7 @@ dependencies = [
  "glue5-gpu",
  "glue5-runtime",
  "log",
+ "png",
  "sdl3",
  "serde",
  "serde_json",
@@ -627,6 +628,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bcdec_rs",
+ "block2",
  "bytemuck",
  "egui",
  "egui-wgpu",
@@ -636,6 +638,7 @@ dependencies = [
  "objc2",
  "objc2-metal",
  "objc2-metal-fx",
+ "objc2-quartz-core",
  "png",
  "pollster",
  "regex",
@@ -1032,6 +1035,7 @@ dependencies = [
  "bitflags 2.13.2",
  "block2",
  "objc2",
+ "objc2-core-foundation",
  "objc2-foundation",
 ]
 

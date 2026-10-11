@@ -13,6 +13,7 @@ pub mod gpu;
 mod imports;
 pub mod input;
 pub mod memory;
+mod msaa;
 pub mod qos;
 mod skin;
 mod threads;
@@ -199,6 +200,9 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         largest_block: Some(memory::largest_block),
         skin_light_pass: Some(skin::skin_light_pass),
         get_settings: Some(skin::get_settings),
+        settings_load: Some(msaa::settings_load),
+        settings_request: Some(msaa::settings_request),
+        settings_instance: None,
     };
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;

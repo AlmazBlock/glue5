@@ -34,4 +34,10 @@ pub const HOOKS: &[(&str, &str)] = &[
     // have; it is shown settings with PostFX at Very High (see skin.rs).
     ("skin_light_pass", "DeferredLighting::ExecuteSkinLightPass(rage::grcRenderTarget*, bool)"),
     ("get_settings", "CSettingsManager::GetSettings()"),
+    // MSAA stays off: the game's shaders cannot draw it (see msaa.rs). The
+    // settings loaded from the file and those the menu asks for; the
+    // manager, for the host.
+    ("settings_load", "CSettingsManager::Load()"),
+    ("settings_request", "CSettingsManager::RequestNewSettings(Settings)"),
+    ("settings_instance", "CSettingsManager::GetInstance()"),
 ];

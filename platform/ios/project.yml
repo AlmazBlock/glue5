@@ -24,9 +24,14 @@ targets:
   Glue5:
     type: application
     platform: iOS
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: Glue5
     scheme: {}
     sources:
       - path: main.c
+      - path: ../shared/Glue5.icon
+        buildPhase: resources
     dependencies:
       - sdk: AudioToolbox.framework
       - sdk: AVFoundation.framework

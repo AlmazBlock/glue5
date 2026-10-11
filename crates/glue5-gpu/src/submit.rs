@@ -7,7 +7,7 @@
 //! destroyed objects released, the overlay drawn and the frame presented.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -89,6 +89,8 @@ type Job = (Vec<wgpu::CommandEncoder>, Sender<Vec<wgpu::CommandBuffer>>);
 pub struct Submitter {
     jobs: Sender<Job>,
     batches: SyncSender<(Batch, Encoded)>,
+    /// Batches handed to the encoding threads and not encoded yet.
+    encoding: Arc<AtomicUsize>,
     pub stats: Arc<SubmitStats>,
 }
 
@@ -101,10 +103,11 @@ impl Submitter {
         output: Option<Output>,
     ) -> Submitter {
         let stats = Arc::new(SubmitStats::default());
+        let encoding = Arc::new(AtomicUsize::new(0));
         let (jobs, rx) = channel::<Job>();
         let rx = Arc::new(Mutex::new(rx));
         for i in 0..ENCODE_THREADS {
-            let (rx, stats) = (rx.clone(), stats.clone());
+            let (rx, stats, encoding) = (rx.clone(), stats.clone(), encoding.clone());
             std::thread::Builder::new()
                 .name(format!("gpu encode {i}"))
                 .spawn(move || {
@@ -114,6 +117,7 @@ impl Submitter {
                         let Ok((encoders, back)) = job else { return };
                         let t = Instant::now();
                         let buffers: Vec<_> = encoders.into_iter().map(|e| e.finish()).collect();
+                        encoding.fetch_sub(1, Ordering::Release);
                         stats.encode_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         let _ = back.send(buffers);
                     }
@@ -121,15 +125,15 @@ impl Submitter {
                 .expect("spawning a GPU encoding thread");
         }
         let (batches, rx) = sync_channel(PENDING);
-        let thread_stats = stats.clone();
+        let (thread_stats, thread_encoding) = (stats.clone(), encoding.clone());
         std::thread::Builder::new()
             .name("gpu submit".into())
             .spawn(move || {
                 glue5_runtime::qos::set(glue5_runtime::qos::Qos::Interactive);
-                run(device, queue, done, free, output, rx, thread_stats)
+                run(device, queue, done, free, output, rx, thread_stats, thread_encoding)
             })
             .expect("spawning the GPU submit thread");
-        Submitter { jobs, batches, stats }
+        Submitter { jobs, batches, encoding, stats }
     }
 
     /// Hands a batch over: encoded now on another thread, submitted after
@@ -140,12 +144,14 @@ impl Submitter {
         if encoders.is_empty() {
             let _ = back.send(Vec::new());
         } else {
+            self.encoding.fetch_add(1, Ordering::Release);
             let _ = self.jobs.send((encoders, back));
         }
         let _ = self.batches.send((batch, encoded));
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -154,8 +160,13 @@ fn run(
     mut output: Option<Output>,
     rx: Receiver<(Batch, Encoded)>,
     stats: Arc<SubmitStats>,
+    encoding: Arc<AtomicUsize>,
 ) {
     let mut in_flight: VecDeque<wgpu::SubmissionIndex> = VecDeque::new();
+    // Destroyed objects whose batches are submitted, and the frames ended
+    // since they began waiting.
+    let mut graves: Vec<Grave> = Vec::new();
+    let mut graves_frames = 0;
     while let Ok((batch, encoded)) = rx.recv() {
         let Ok(mut buffers) = encoded.recv() else { return };
         let mut frame = None;
@@ -163,9 +174,9 @@ fn run(
             let t = Instant::now();
             let acquired = out.acquire(&device);
             stats.drawable_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            if let Some((surface, format)) = acquired {
-                buffers.extend(out.compose(&device, &queue, &surface, format, Some(p)));
-                frame = Some(surface);
+            if let Some(acquired) = acquired {
+                buffers.extend(out.compose(&device, &queue, &acquired, Some(p)));
+                frame = Some(acquired);
             }
         }
         let t = Instant::now();
@@ -177,19 +188,29 @@ fn run(
         }
         done.after(submission.clone(), works);
         stats.submit_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        if let Some(surface) = frame {
+        if let (Some(frame), Some(out)) = (frame, output.as_mut()) {
             let t = Instant::now();
-            queue.present(surface);
+            out.show(&queue, frame);
             stats.present_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
-        let t = Instant::now();
-        for grave in batch.graves {
-            match grave {
-                Grave::Texture(t) => t.destroy(),
-                Grave::Buffer(b) => b.destroy(),
+        // Destroying takes wgpu's device-wide resource lock for writing: it
+        // waits for the encoding threads, which hold it through a whole
+        // batch, and whatever takes it meanwhile waits behind (the command
+        // thread's recording too; 7-9 ms a frame where the engine streams).
+        // So objects go when no batch is being encoded, or two frames on.
+        graves.extend(batch.graves);
+        graves_frames += (batch.frame && !graves.is_empty()) as u32;
+        if !graves.is_empty() && (encoding.load(Ordering::Acquire) == 0 || graves_frames >= 2) {
+            let t = Instant::now();
+            for grave in graves.drain(..) {
+                match grave {
+                    Grave::Texture(t) => t.destroy(),
+                    Grave::Buffer(b) => b.destroy(),
+                }
             }
+            graves_frames = 0;
+            stats.release_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
-        stats.release_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if batch.frame {
             in_flight.push_back(submission);
             if in_flight.len() > FRAMES_IN_FLIGHT {

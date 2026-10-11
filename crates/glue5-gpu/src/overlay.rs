@@ -20,6 +20,13 @@ struct Frame {
     pixels_per_point: f32,
 }
 
+impl Drop for Frame {
+    fn drop(&mut self) {
+        // Pending uploads can be discarded once the overlay is no longer used.
+        self.textures.clear();
+    }
+}
+
 impl Overlay {
     /// Replaces what is drawn (an empty list draws nothing).
     pub fn submit(&self, primitives: Vec<ClippedPrimitive>, textures: TexturesDelta, pixels_per_point: f32) {
@@ -56,7 +63,7 @@ impl OverlayRenderer {
         format: wgpu::TextureFormat,
         size: [u32; 2],
     ) {
-        let (primitives, textures, pixels_per_point) = self.overlay.take();
+        let (primitives, mut textures, pixels_per_point) = self.overlay.take();
         if primitives.is_empty() && textures.is_empty() {
             return;
         }
@@ -89,5 +96,27 @@ impl OverlayRenderer {
         for id in &textures.free {
             renderer.free_texture(id);
         }
+        textures.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_before_the_first_present_discards_pending_uploads() {
+        let overlay = Overlay::default();
+        let mut textures = TexturesDelta::default();
+        textures.push(
+            egui::TextureId::Managed(0),
+            egui::epaint::ImageDelta::full(
+                egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
+                egui::TextureOptions::LINEAR,
+            ),
+        );
+        overlay.submit(Vec::new(), textures, 1.0);
+        // TexturesDelta asserts on drop unless consumed or explicitly cleared.
+        drop(overlay);
     }
 }

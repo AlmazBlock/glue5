@@ -58,9 +58,10 @@ patch files directly to a dependency.
 
 The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes
 and a fixed memory base. The wgpu-core patches clear usage scopes by their
-members and stop pipelines from retaining shader modules, reducing CPU
-work during pass encoding and memory use. We would like to submit both
-sets upstream.
+members, stop pipelines from retaining shader modules and let a device
+poll wait for the GPU without holding the device's resource lock,
+reducing CPU work during pass encoding, memory use and stalls between
+threads. We would like to submit both sets upstream.
 
 ## Game files are never in the app
 
@@ -133,8 +134,17 @@ The application uses [egui] for:
 
 All pages share the game's window. SDL's mobile backends restrict multiple
 windows, while a second desktop window would add another surface and
-separate focus and input routing. On phones, pages fill the safe area. On
-larger screens, they appear as a centered panel over a dimmed game frame.
+separate focus and input routing. One responsive home layout stacks the
+menu and status on narrow screens and places them side by side when space
+allows. Settings use a centered, fixed floating window fitted to the safe
+area. Its tabs scroll with the options; each option shares the same rounded
+row and right-aligned control. Home and pre-game settings share an embedded
+image and gradient; in-game settings leave the game frame visible.
+
+The UI is split into SDL input/overlay integration, pages, shared widgets
+and a theme. Fonts and the home image are embedded, so appearance does not
+depend on installed system fonts. Barlow SemiBold and Barlow Condensed Bold
+are distributed with their SIL Open Font License in `crates/glue5/assets/ui`.
 The widgets support controllers and keyboards: D-pad, left stick or arrows
 move focus, A / Enter activates, and B / Esc goes back. Held directions
 repeat.
@@ -220,6 +230,29 @@ it requires identifying the targets in the engine's command stream and
 hooking its camera and TAA. MetalFX frame interpolation uses the same depth
 and motion inputs (see Future work).
 
+## Frame pacing
+
+A display faster than the game shows each frame at the first refresh
+after it is ready. On a 120 Hz ProMotion phone or a 144 Hz monitor, a game
+running at 40-50 fps then shows frames for one, two or three refreshes in
+turn: judder, although no frame is late. With a frame rate set (Settings
+› Frame rate), each frame stays on screen for at least its share of a
+second, counted from when the previous one appeared. On Apple platforms
+the renderer takes the window's drawables from its Metal layer itself and
+presents them with `presentDrawable:afterMinimumDuration:`, which wgpu's
+present does not offer. Held drawables also slow the engine down to that
+rate. Elsewhere, frames are not paced and the engine's limiter works alone.
+
+The statistics report how long frames stayed on screen (`on screen ms`,
+from the drawables' presented times) and how often that time changed.
+On an iPhone 16 Pro in the prologue (2,500-3,300 draws per frame, the phone
+hot), frames at 60 stayed 16.7, 25 or 33 ms (200-280 changes in 10 s); at
+30 every frame stayed 33.3 ms. 40 (every third refresh) is offered on
+120 Hz displays only, and is even only while the panel runs at 120 Hz:
+iOS lowers it to 60 Hz when the phone is hot, and 40 then becomes 33 ms.
+The engine's own limiter (`-frameLimit`, in 60 Hz intervals) stays: it
+saves the CPU time of frames that would wait anyway.
+
 ## Input
 
 Input is routed through the game's PC interfaces to preserve controller
@@ -266,6 +299,16 @@ prompts, aim assist and menu behaviour:
   would override the menu at each start. App settings control back buffer
   size (`-forceResolution`), frame rate (`-frameLimit`), memory pools and
   touch controls.
+- MSAA stays off, whatever the game's menu says. The game's shaders are
+  its DirectX 10 set (`win32_40`), whose multisampled effects are an older
+  revision than the code that drives them: a depth resolve pass and ten
+  post-processing passes are missing, and the tiled lighting's
+  multisampled depth reduction has no translation. With MSAA on, the
+  render thread trapped at the first frame of a scene, and post-processing
+  drew the wrong passes into a black image. The engine turns MSAA off
+  itself on DirectX 10 (`-DX10`); hooks on `CSettingsManager::Load` and
+  `RequestNewSettings` do the same for the settings loaded and those the
+  menu asks for. Reflection MSAA (water) works and is left as chosen.
 - The low-memory profile defaults on for phones and tablets with less than
   8 GB of RAM. It uses smaller pools and lowers texture quality, LOD,
   density, variety and shadows to the WASM build's low preset. The normal

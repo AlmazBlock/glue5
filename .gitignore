@@ -4,3 +4,7 @@
 /third_party/wgpu-core
 /third_party/wgpu-core.tmp
 .DS_Store
+
+# Local design drafts and screenshots may contain personal filesystem paths.
+/docs/mockups/
+/docs/icon-concepts/

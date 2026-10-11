@@ -96,6 +96,7 @@ pub fn run() -> Result<()> {
     if !MOBILE {
         text_input.start(&window);
     }
+    let refresh_rate = window_refresh_rate(&window);
     let mut app = App {
         pads: pads::Pads::new(sdl.gamepad().map_err(|e| anyhow!("SDL gamepad: {e}"))?),
         mouse: sdl.mouse(),
@@ -118,6 +119,7 @@ pub fn run() -> Result<()> {
         last_failure: None,
         graphics_reset: false,
         metalfx: screen.has_metalfx(),
+        refresh_rate,
         screen: Some(screen),
         game: None,
     };
@@ -149,6 +151,9 @@ impl Args {
                 args.game_dir = Some(arg.into());
             }
         }
+        // Measurements on a phone, whose screen nobody taps (`cargo xtask ios-run`
+        // passes GLUE5_* variables on).
+        args.play |= std::env::var_os("GLUE5_PLAY").is_some();
         args
     }
 }
@@ -185,6 +190,8 @@ struct App {
     /// The game's graphics settings went back to their defaults.
     graphics_reset: bool,
     metalfx: bool,
+    /// The display's refresh rate at most, in Hz.
+    refresh_rate: f32,
     /// The renderer, until the game takes it over.
     screen: Option<Screen>,
     game: Option<Running>,
@@ -227,7 +234,7 @@ impl App {
             // Before the game the loop sleeps until there is input or the UI
             // animates; with it, it keeps the touch controls and pads current.
             let wait = if self.game.is_some() { Duration::from_millis(8) } else { self.ui.idle_for() };
-            let first = self.events.wait_event_timeout(wait);
+            let first = wait_event(&mut self.events, wait);
             let events: Vec<Event> = first.into_iter().chain(self.events.poll_iter()).collect();
             for event in events {
                 if self.event(event) {
@@ -337,8 +344,9 @@ impl App {
             self.ui.nav(nav);
         }
 
-        // What applies at once.
+        // What applies at once (the engine's own frame limiter at its next start).
         self.presentation.set_vsync(self.settings.vsync);
+        self.presentation.set_frame_rate(self.settings.max_fps);
         self.presentation.set_upscaler(upscaler(&self.settings));
         self.resize_game();
 
@@ -353,6 +361,7 @@ impl App {
                 graphics_reset: self.graphics_reset,
                 window: self.window.size_in_pixels(),
                 metalfx: self.metalfx,
+                refresh_rate: self.refresh_rate,
             };
             // The settings button: on touch screens always, so that it stays
             // with a controller in use or the touch controls off.
@@ -565,6 +574,36 @@ impl App {
         }
         self.ui.repaint();
     }
+}
+
+/// The next event, waiting up to `timeout` for one.
+#[cfg(not(target_os = "ios"))]
+fn wait_event(events: &mut sdl3::EventPump, timeout: Duration) -> Option<Event> {
+    events.wait_event_timeout(timeout)
+}
+
+/// On iOS SDL cannot sleep until an event: its wait runs the run loop for
+/// a moment every millisecond (a sixth of a core, all the time). The run
+/// loop itself sleeps until a source fires (a touch, a controller, a timer)
+/// or the time is up; SDL then has the events it queued.
+#[cfg(target_os = "ios")]
+fn wait_event(events: &mut sdl3::EventPump, timeout: Duration) -> Option<Event> {
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        static kCFRunLoopDefaultMode: *const c_void;
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: u8) -> i32;
+    }
+    if let Some(event) = events.poll_event() {
+        return Some(event);
+    }
+    unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout.as_secs_f64(), 1) };
+    events.poll_event()
+}
+
+/// The refresh rate of the window's display (60 if unknown).
+fn window_refresh_rate(window: &sdl3::video::Window) -> f32 {
+    let rate = window.get_display().ok().and_then(|d| d.get_mode().ok()).map_or(0.0, |m| m.refresh_rate);
+    if rate > 0.0 { rate } else { 60.0 }
 }
 
 fn upscaler(settings: &Settings) -> Upscaler {

@@ -82,6 +82,7 @@ to the device.
 | `GLUE5_ENGINE_LOG=stdout` | The engine's log on the terminal too (it is always in `<user dir>/game.log`). |
 | `GLUE5_ENGINE_ARGS` | More engine switches, e.g. `-FrameQueueLimit=2`. |
 | `GLUE5_GPU_PROFILE=1` | GPU time per pass in the statistics. |
+| `GLUE5_PLAY=1` | Start the game without the start page (as `--play`; on a phone too). |
 | `GLUE5_NO_BC=1`, `GLUE5_NO_FLOAT32_FILTER=1` | Mobile GPU fallbacks on a desktop GPU: BC textures decoded on the CPU, 32-bit float textures unfiltered. |
 | `GAMERESOURCEMB`, `KEEPTHREADS` | The engine's module settings (`gameResourceMB`, `keepThreads`), read like the browser build reads them under Node. |
 | `GLUE5_ALLOW_UNKNOWN_BUILD=1` | Build against a `game.wasm` other than the supported one. |
@@ -121,7 +122,9 @@ The back buffer follows the window: its size in pixels times the render
 scale (Settings › Resolution). The present step scales it to the window
 using MetalFX on supported Apple GPUs or a bicubic filter otherwise
 (Settings › Upscaling). The app's UI is drawn afterwards at the window's
-resolution.
+resolution. With a frame rate set, Apple platforms show frames at that pace,
+each for the same time ([frame pacing](docs/design.md#frame-pacing)): on
+120 Hz displays 40 is offered too.
 
 Pipeline recipes are recorded in `<user dir>/cache/pipelines.jsonl` and, with
 the game's seed (`shaders/pipelines.json`), compiled ahead on later runs. The

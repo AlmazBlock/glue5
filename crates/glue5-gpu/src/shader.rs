@@ -693,23 +693,17 @@ pub fn reflect_bindings(text: &str) -> Vec<(u32, Binding)> {
                     dim: view_dim(dim).unwrap_or(wgpu::TextureViewDimension::D2),
                     multisampled: ms,
                 }
-            } else if let Some(dim) = name.strip_prefix("multisampled_") {
-                Kind::Texture {
-                    sample: Sample::Float,
-                    dim: view_dim(dim).unwrap_or(wgpu::TextureViewDimension::D2),
-                    multisampled: true,
-                }
             } else {
                 let sample = match arg {
                     "u32" => Sample::Uint,
                     "i32" => Sample::Sint,
                     _ => Sample::Float,
                 };
-                Kind::Texture {
-                    sample,
-                    dim: view_dim(name).unwrap_or(wgpu::TextureViewDimension::D2),
-                    multisampled: false,
-                }
+                let (multisampled, dim) = match name.strip_prefix("multisampled_") {
+                    Some(dim) => (true, dim),
+                    None => (false, name),
+                };
+                Kind::Texture { sample, dim: view_dim(dim).unwrap_or(wgpu::TextureViewDimension::D2), multisampled }
             }
         } else {
             log::warn!("gpu: unsupported declaration {}", &c[0]);
@@ -1098,6 +1092,16 @@ fn f(uv : vec2<f32>, r : vec4<f32>) -> f32 {
         naga::front::wgsl::parse_str(&out).unwrap();
         let grad = "@group(1u) @binding(32u) var t0 : texture_2d<f32>;\n@group(1u) @binding(16u) var s0 : sampler;\nfn f(u : vec2<f32>) -> vec4<f32> { return textureSampleGrad(t0, s0, u, u, u); }\n";
         assert!(with_depth_reads(grad, 1).is_none());
+    }
+
+    #[test]
+    fn reflects_multisampled_sample_types() {
+        let text = "@group(1u) @binding(32u) var t0 : texture_multisampled_2d<f32>;
+@group(1u) @binding(33u) var t1 : texture_multisampled_2d<u32>;
+";
+        let kinds: Vec<Kind> = reflect_bindings(text).into_iter().map(|(_, b)| b.kind).collect();
+        let ms = |sample| Kind::Texture { sample, dim: wgpu::TextureViewDimension::D2, multisampled: true };
+        assert_eq!(kinds, [ms(Sample::Float), ms(Sample::Uint)]);
     }
 
     #[test]

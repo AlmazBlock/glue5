@@ -1,0 +1,88 @@
+{
+  "fill": {
+    "solid": "srgb:0.04,0.04,0.05,1.0"
+  },
+  "groups": [
+    {
+      "name": "02 Five foreground",
+      "layers": [
+        {
+          "name": "Five",
+          "image-name": "02-five.png",
+          "glass": true,
+          "position": {
+            "scale": 0.82,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          },
+          "fill-specializations": [
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1,1,1,1"
+              }
+            }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "specular": true,
+      "blur-material": 0,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.15
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    },
+    {
+      "name": "01 Sunset background",
+      "layers": [
+        {
+          "name": "Sunset skyline",
+          "image-name": "01-background.png",
+          "glass": false,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          },
+          "opacity-specializations": [
+            {
+              "value": 1
+            },
+            {
+              "appearance": "dark",
+              "value": 0.8
+            },
+            {
+              "appearance": "tinted",
+              "value": 0.15
+            }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "specular": false,
+      "blur-material": 0,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared",
+    "circles": []
+  }
+}
