@@ -13,7 +13,8 @@ const USAGE: &str = "\
 usage: cargo run -r --example headless -- [options]
 
 The game is GLUE5_GAME_DIR (./game under cargo). The run ends after --for,
-or when the game exits or asks to restart (its menu).
+when the game exits or asks to restart (its menu), or, with status 1, when
+it stops working (an engine thread's trap).
 
   --for <s>             end after s seconds
   --press <s> <button>  press a pad button at s seconds (start, select, south
@@ -160,6 +161,9 @@ fn main() -> Result<()> {
         if let Some(exit) = glue5_runtime::exit::requested() {
             log::info!("the engine asked for {exit:?} at {t:.1} s");
             std::process::exit(0);
+        }
+        if glue5_runtime::exit::failed().is_some() {
+            std::process::exit(1);
         }
         std::thread::sleep(Duration::from_millis(10));
     }

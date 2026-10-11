@@ -4,7 +4,10 @@
 //! the shutdown never finishes (it waits on work that never comes), so the
 //! engine is kept running and the host ends the process instead, starting it
 //! again for a restart.
+//!
+//! And the way it ends without asking: a thread of its failing ([`failed`]).
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
@@ -27,6 +30,24 @@ pub fn requested() -> Option<Exit> {
         2 => Some(Exit::Restart),
         _ => None,
     }
+}
+
+static FAILURE: OnceLock<String> = OnceLock::new();
+
+/// Why the game has stopped working, if it has: a thread of the engine's hit
+/// a trap (an `unreachable`, a memory fault), or a host thread serving it
+/// panicked. Its other threads then wait for it forever and the screen
+/// stops: the host should say so and end.
+pub fn failed() -> Option<&'static str> {
+    FAILURE.get().map(String::as_str)
+}
+
+/// Records why the game has stopped (the first reason: what follows may be
+/// its consequence).
+pub fn fail(why: impl Into<String>) {
+    let why = why.into();
+    log::error!("the game has stopped: {why}");
+    let _ = FAILURE.set(why);
 }
 
 /// The engine's "restart pending" flag (a byte, at this address in this

@@ -126,6 +126,9 @@ pub struct Layout {
     pub slots: Vec<(u32, u32)>,
 }
 
+/// No input layout: draws whose vertex shader reads no vertex attributes.
+pub static NO_LAYOUT: Layout = Layout { elements: Vec::new(), slots: Vec::new() };
+
 pub struct State {
     pub words: Box<[u32]>,
     /// Sampler states (kind 3).

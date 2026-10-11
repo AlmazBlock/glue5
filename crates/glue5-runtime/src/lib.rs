@@ -14,6 +14,7 @@ mod imports;
 pub mod input;
 pub mod memory;
 pub mod qos;
+mod skin;
 mod threads;
 mod time;
 pub mod vfs;
@@ -189,6 +190,8 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         rl_shutdown: Some(exit::rl_shutdown),
         grow_heap: Some(memory::grow_heap),
         heap_size: None,
+        skin_light_pass: Some(skin::skin_light_pass),
+        get_settings: Some(skin::get_settings),
     };
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;

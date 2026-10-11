@@ -28,4 +28,8 @@ pub const HOOKS: &[(&str, &str)] = &[
     // GetHeapSize, to know the heap's size).
     ("grow_heap", "rage::sysMemGrowBuddyAllocator::GrowHeap()"),
     ("heap_size", "rage::sysMemGrowBuddyAllocator::GetHeapSize() const"),
+    // At PostFX Ultra the skin pass asks for a pass the game's shaders do not
+    // have; it is shown settings with PostFX at Very High (see skin.rs).
+    ("skin_light_pass", "DeferredLighting::ExecuteSkinLightPass(rage::grcRenderTarget*, bool)"),
+    ("get_settings", "CSettingsManager::GetSettings()"),
 ];

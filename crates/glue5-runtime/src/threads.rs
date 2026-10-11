@@ -89,7 +89,7 @@ fn run_main() -> i32 {
             }
         }
         Err(trap) => {
-            log::error!("engine main: {trap}");
+            crate::exit::fail(format!("the engine's main thread stopped ({trap})"));
             1
         }
     }
@@ -172,6 +172,7 @@ fn run_pthread(pthread: u64, start: u64, arg: u64) {
         }
         Err(trap) => {
             log::error!("thread {pthread:#x}: {trap}");
+            crate::exit::fail(format!("an engine thread stopped ({trap})"));
             let _ = unsafe { exports::_emscripten_thread_crashed(env) };
         }
     }

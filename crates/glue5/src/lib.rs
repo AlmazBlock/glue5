@@ -25,6 +25,15 @@ use sdl3::messagebox::{MessageBoxFlag, show_simple_message_box};
 /// Runs the application; returns the process exit code.
 pub fn main() -> i32 {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // A host thread serving the engine (the renderer's, ...) that panics
+    // leaves it waiting forever, as an engine thread's trap does.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        report(info);
+        let thread = std::thread::current();
+        let what = info.payload_as_str().unwrap_or("panic");
+        glue5_runtime::exit::fail(format!("its {} thread stopped ({what})", thread.name().unwrap_or("unnamed")));
+    }));
     match app::run() {
         Ok(()) => 0,
         Err(e) => {

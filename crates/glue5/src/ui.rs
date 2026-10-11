@@ -40,6 +40,8 @@ pub enum Action {
     ChooseGame,
     /// Look for the game's files again (mobile: copied in meanwhile).
     FindGame,
+    /// The game's graphics settings back to the engine's defaults.
+    ResetGraphics,
 }
 
 /// Navigation from a controller.
@@ -70,6 +72,10 @@ pub struct Status<'a> {
     pub problem: Option<&'a str>,
     /// The game runs (and started with these).
     pub started: Option<&'a Started>,
+    /// Why the last game stopped, if it did.
+    pub last_failure: Option<&'a str>,
+    /// The game's graphics settings went back to their defaults.
+    pub graphics_reset: bool,
     /// The window, in pixels.
     pub window: (u32, u32),
     pub metalfx: bool,
@@ -443,6 +449,10 @@ fn start_page(
         ui.vertical_centered(|ui| ui.label(RichText::new("Glue 5").size(34.0).strong()));
         ui.add_space(12.0);
         card(ui, |ui| game_files(ui, status));
+        if let Some(why) = status.last_failure {
+            ui.add_space(8.0);
+            card(ui, |ui| last_failure(ui, why, status.graphics_reset, actions));
+        }
         ui.add_space(12.0);
         let label = if starting { "Starting…" } else { "Play" };
         let button = egui::Button::new(RichText::new(label).size(19.0).strong().color(Color32::WHITE)).fill(ACCENT);
@@ -484,6 +494,26 @@ fn game_files(ui: &mut egui::Ui, status: &Status) {
             ui.label(RichText::new(paths::game_layout()).monospace().small().weak());
         }
     }
+}
+
+/// The last game stopped: why, and the way out of a graphics setting the
+/// engine cannot run with (which stops it before its menu can change it).
+fn last_failure(ui: &mut egui::Ui, why: &str, reset: bool, actions: &mut Vec<Action>) {
+    dot_title(ui, WARN, "The last game stopped");
+    ui.label(RichText::new(why).small().weak());
+    if reset {
+        ui.label(graphics_reset_note());
+    } else {
+        ui.label("If it stops again at the same point, one of its graphics settings may be the cause.");
+        if focus(ui.button("Reset the game's graphics settings")).clicked() {
+            actions.push(Action::ResetGraphics);
+        }
+    }
+}
+
+fn graphics_reset_note() -> RichText {
+    RichText::new("The game's graphics settings are back to their defaults (the old ones: settings.xml.bak).")
+        .color(GOOD)
 }
 
 fn dot_title(ui: &mut egui::Ui, color: Color32, title: &str) {
@@ -660,6 +690,14 @@ fn settings_items(
             .small()
             .weak(),
     );
+    // Before the game only: a running engine holds its settings and saves them.
+    if started.is_none() {
+        if status.graphics_reset {
+            ui.label(graphics_reset_note().small());
+        } else if focus(ui.button("Reset the game's graphics settings")).clicked() {
+            actions.push(Action::ResetGraphics);
+        }
+    }
     if started.is_some() && !MOBILE {
         ui.add_space(12.0);
         if focus(ui.button("Quit the game")).clicked() {

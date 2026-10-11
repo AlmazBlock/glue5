@@ -6,8 +6,7 @@
 //! changed there before it loads, and a game that fails while starting is
 //! not started again by itself. Play starts the engine, which then owns the
 //! frames; the application's UI goes over them. `glue5 --play` (a restart
-//! the game asks for) and a game folder on the command line start the game
-//! without the start page.
+//! the game asks for) starts the game without the start page.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -34,6 +33,10 @@ const START_MODE: u32 = 1;
 /// The settings button's opacity over the game while the touch controls
 /// are hidden (a controller in use, or touch off): there, but faint.
 const GEAR_ALONE: f32 = 0.35;
+
+/// In the user directory: why the last game stopped, for the start page
+/// (gone once the game is started again).
+const FAILURE_FILE: &str = "last-failure.txt";
 
 pub fn run() -> Result<()> {
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL: {e}"))?;
@@ -112,18 +115,23 @@ pub fn run() -> Result<()> {
         folder: None,
         game_dir: None,
         problem: None,
+        last_failure: None,
+        graphics_reset: false,
         metalfx: screen.has_metalfx(),
         screen: Some(screen),
         game: None,
     };
+    app.last_failure = std::fs::read_to_string(app.user_dir.join(FAILURE_FILE)).ok();
     app.find_game(args.game_dir.as_deref());
-    if (args.play || args.game_dir.is_some()) && app.game_dir.is_some() {
+    if args.play && app.game_dir.is_some() {
         app.play()?;
     }
     app.run()
 }
 
-/// The command line (desktop): `glue5 [--play] [game folder]`.
+/// The command line (desktop): `glue5 [--play] [game folder]`; the start
+/// page is skipped only with `--play` (a folder alone is where the game is:
+/// a game that fails is not started again by itself).
 struct Args {
     /// Start the game without the start page.
     play: bool,
@@ -172,6 +180,10 @@ struct App {
     game_dir: Option<PathBuf>,
     /// Why it was not, or a folder chosen that is not one.
     problem: Option<String>,
+    /// Why the last game stopped, if it did.
+    last_failure: Option<String>,
+    /// The game's graphics settings went back to their defaults.
+    graphics_reset: bool,
     metalfx: bool,
     /// The renderer, until the game takes it over.
     screen: Option<Screen>,
@@ -195,8 +207,12 @@ impl App {
             if let Some(exit) = glue5_runtime::exit::requested() {
                 self.settings.save(&self.user_dir);
                 if exit == Exit::Restart {
-                    restart();
+                    relaunch(true);
                 }
+                return Ok(());
+            }
+            if let Some(why) = glue5_runtime::exit::failed() {
+                self.stopped(why);
                 return Ok(());
             }
             if let Some(game) = &mut self.game
@@ -333,6 +349,8 @@ impl App {
                 game_dir: self.game_dir.as_deref(),
                 problem: self.problem.as_deref(),
                 started: self.game.as_ref().map(|g| &g.started),
+                last_failure: self.last_failure.as_deref(),
+                graphics_reset: self.graphics_reset,
                 window: self.window.size_in_pixels(),
                 metalfx: self.metalfx,
             };
@@ -354,6 +372,7 @@ impl App {
                 Action::Play => self.play()?,
                 Action::ChooseGame => self.folder = Some(FolderPick::start(&self.window)),
                 Action::FindGame => self.find_game(None),
+                Action::ResetGraphics => self.reset_graphics(),
             }
         }
         if let Some(choice) = self.folder.as_ref().and_then(FolderPick::poll) {
@@ -425,6 +444,8 @@ impl App {
             }
         }
         self.settings.save(&self.user_dir);
+        // A new attempt: the last one's failure is history.
+        let _ = std::fs::remove_file(self.user_dir.join(FAILURE_FILE));
         log::info!("game: {}, user data: {}", game_dir.display(), self.user_dir.display());
         let s = &self.settings;
         let back_buffer = settings::render_size(self.window.size_in_pixels(), s.render_scale(), s.low_memory);
@@ -454,6 +475,53 @@ impl App {
         self.game = Some(Running { game, input: None, started, back_buffer, _audio: audio });
         self.ui.game_started();
         Ok(())
+    }
+
+    /// The game has stopped working (a thread of the engine's failed): the
+    /// window shows its last frame for good. Says so, and records it for the
+    /// start page, which offers the way out of a graphics setting the engine
+    /// cannot run with; on desktop it opens again on that page.
+    fn stopped(&mut self, why: &str) {
+        if let Err(e) = std::fs::write(self.user_dir.join(FAILURE_FILE), why) {
+            log::warn!("cannot record the failure: {e}");
+        }
+        self.settings.save(&self.user_dir);
+        self.mouse.set_relative_mouse_mode(&self.window, false);
+        let page = if MOBILE { "when the app is opened again, its start page" } else { "the start page" };
+        let text = format!(
+            "The game has stopped: {why}.\n\nIf it stops again at the same point, one of its graphics settings \
+             may be the cause: {page} can put them back to their defaults."
+        );
+        use sdl3::messagebox::{ButtonData, ClickedButton, MessageBoxButtonFlag as Button, MessageBoxFlag};
+        let buttons: &[ButtonData] = if MOBILE {
+            &[ButtonData { flags: Button::RETURNKEY_DEFAULT, button_id: 0, text: "OK" }]
+        } else {
+            &[
+                ButtonData { flags: Button::ESCAPEKEY_DEFAULT, button_id: 0, text: "Quit" },
+                ButtonData { flags: Button::RETURNKEY_DEFAULT, button_id: 1, text: "Start page" },
+            ]
+        };
+        let shown =
+            sdl3::messagebox::show_message_box(MessageBoxFlag::ERROR, buttons, "Glue 5", &text, &self.window, None);
+        if let Ok(ClickedButton::CustomButton(ButtonData { button_id: 1, .. })) = shown {
+            relaunch(false);
+        }
+    }
+
+    /// The game's graphics settings back to the engine's defaults (asked for
+    /// on the start page).
+    fn reset_graphics(&mut self) {
+        match glue5_runtime::game_settings::reset_graphics(&self.user_dir) {
+            Ok(()) => {
+                log::info!("the game's graphics settings: back to the defaults");
+                self.graphics_reset = true;
+                // The low-memory profile lowers them again at the next start.
+                self.settings.low_preset_written = false;
+                self.settings.save(&self.user_dir);
+            }
+            Err(e) => self.ui.note(format!("Cannot reset the game's graphics settings: {e}")),
+        }
+        self.ui.repaint();
     }
 
     /// Looks for the game: the folder named on the command line or by
@@ -554,15 +622,20 @@ fn game_input(
     }
 }
 
-/// Starts the application again, straight into the game (desktop; a phone
-/// app cannot, and the player reopens it).
-fn restart() {
+/// Starts the application again, straight into the game with `play`, else on
+/// its start page (desktop; a phone app cannot, and the player reopens it).
+fn relaunch(play: bool) {
     if MOBILE {
         return;
     }
-    let args = std::env::args_os().skip(1).filter(|a| a != "--play");
-    let started =
-        std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--play").args(args).spawn());
+    let args: Vec<_> = std::env::args_os().skip(1).filter(|a| a != "--play").collect();
+    let started = std::env::current_exe().and_then(|exe| {
+        let mut command = std::process::Command::new(exe);
+        if play {
+            command.arg("--play");
+        }
+        command.args(args).spawn()
+    });
     if let Err(e) = started {
         log::warn!("cannot start again: {e}");
     }

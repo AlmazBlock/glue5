@@ -5,7 +5,7 @@
 //!
 //! The host never overrides them on the command line, which would undo the
 //! menu's choices at every start: it only writes the low-memory preset over
-//! them, once.
+//! them, once, and puts them back to the engine's defaults when asked.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -51,6 +51,30 @@ pub fn apply_low_preset(user_dir: &Path) -> io::Result<()> {
     std::fs::write(&path, xml)
 }
 
+/// Puts the graphics settings back to the engine's defaults, keeping the
+/// file as it was in `settings.xml.bak` (the rest of it, and the saves,
+/// stay): the way out of a setting the engine cannot run with, which stops
+/// it before its menu can change it back.
+pub fn reset_graphics(user_dir: &Path) -> io::Result<()> {
+    let path = path(user_dir);
+    let Ok(xml) = std::fs::read_to_string(&path) else {
+        return Ok(()); // none: the engine starts from its defaults
+    };
+    std::fs::write(path.with_extension("xml.bak"), &xml)?;
+    std::fs::write(&path, with_graphics(&xml, DEFAULTS))
+}
+
+/// `xml` with the `<graphics>` section of `from` (all of `from` if either
+/// lacks one).
+fn with_graphics(xml: &str, from: &str) -> String {
+    const END: &str = "</graphics>";
+    let section = |s: &str| Some(s.find("<graphics>")?..s.find(END)? + END.len());
+    match (section(xml), section(from)) {
+        (Some(mine), Some(theirs)) => format!("{}{}{}", &xml[..mine.start], &from[theirs], &xml[mine.end..]),
+        _ => from.to_string(),
+    }
+}
+
 /// `xml` with `<name value="..." />` set to `value` (unchanged if absent).
 fn set(xml: &str, name: &str, value: &str) -> String {
     let tag = format!("<{name} value=\"");
@@ -71,6 +95,16 @@ mod tests {
             "<LodScale value=\"0.000000\" />\n<MaxLodScale value=\"1.000000\" />"
         );
         assert_eq!(set(xml, "Missing", "0"), xml);
+    }
+
+    #[test]
+    fn graphics_only_go_back_to_the_defaults() {
+        let xml = "<Settings>\n  <graphics>\n    <MSAA value=\"2\" />\n  </graphics>\n  <video>\n    <VSync value=\"0\" />\n  </video>\n</Settings>";
+        let reset = with_graphics(xml, DEFAULTS);
+        assert!(reset.contains("<MSAA value=\"0\" />"));
+        assert!(reset.contains("<VSync value=\"0\" />\n  </video>\n</Settings>"));
+        assert_eq!(reset.matches("<graphics>").count(), 1);
+        assert_eq!(with_graphics("broken", DEFAULTS), DEFAULTS);
     }
 
     #[test]

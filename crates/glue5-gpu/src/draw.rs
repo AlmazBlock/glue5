@@ -8,7 +8,7 @@ use wgpu::{TextureFormat, TextureViewDimension};
 
 use crate::exec::{Bound, Clear, Gpu, PassInfo, depth_attachment};
 use crate::format;
-use crate::objects::{Objects, View};
+use crate::objects::{NO_LAYOUT, Objects, View};
 use crate::pipeline::{self, Recipe};
 use crate::shader::{self, Kind, Program, Sample, Stage};
 use crate::uniforms::{Alloc, Uniforms};
@@ -312,7 +312,7 @@ impl Gpu {
             return Some(p.clone());
         }
         let info = self.pass_info.as_ref()?;
-        let layout = self.objs.layout(self.s.layout)?;
+        let layout = self.objs.layout(self.s.layout).unwrap_or(&NO_LAYOUT);
         let (_, strip) = format::topology(self.s.topology);
         let strip = if strip && self.s.ib.0 != 0 { if self.s.ib.1 == format::INDEX_U16 { 1 } else { 2 } } else { 0 };
         let stride = |slot: u32| {
@@ -475,7 +475,8 @@ impl Gpu {
                 Kind::Texture { dim, .. } => {
                     let slot = b.binding - shader::SRVS;
                     let id = self.s.srv[st][slot as usize];
-                    let res = self.objs.srv(id).filter(|v| !v.is_buffer && !self.reads_target(prog, stage, slot, v, *dim));
+                    let res =
+                        self.objs.srv(id).filter(|v| !v.is_buffer && !self.reads_target(prog, stage, slot, v, *dim));
                     match res.and_then(|v| self.objs.tex(v.res)) {
                         Some(t) => {
                             t.used.set(epoch);
@@ -744,7 +745,10 @@ impl Gpu {
         let hit = stage != Stage::Compute && self.is_target(srv, dim);
         if hit {
             crate::log_once(&format!("srvrt{}{slot}", prog.label), || {
-                format!("{}: t{slot} reads a render target of its pass: unbound for the draw, as D3D11 does", prog.label)
+                format!(
+                    "{}: t{slot} reads a render target of its pass: unbound for the draw, as D3D11 does",
+                    prog.label
+                )
             });
         }
         hit
@@ -880,7 +884,12 @@ impl Gpu {
                 None => return self.skip("pixel shader unusable"),
             },
         };
-        if self.objs.layout(self.s.layout).is_none() {
+        // D3D draws without an input layout when the vertex shader reads no
+        // vertex attributes (a full-screen triangle from SV_VertexID, as the
+        // highest post-processing level draws): no vertex buffers then.
+        if self.objs.layout(self.s.layout).is_none()
+            && self.objs.shader(self.s.shader[0]).is_some_and(|s| !s.sig.is_empty())
+        {
             return self.skip("no input layout");
         }
         let vs = self.for_bound_formats(vs, Stage::Vertex);
@@ -942,7 +951,7 @@ impl Gpu {
         let epoch = self.epoch;
         let mut avail = [0u64; 16];
         let mut vbs: Vec<(u32, Option<(wgpu::Buffer, u32)>, u64)> = Vec::new();
-        let layout = self.objs.layout(self.s.layout).unwrap();
+        let layout = self.objs.layout(self.s.layout).unwrap_or(&NO_LAYOUT);
         for &(slot, class) in &layout.slots {
             let v = self.s.vb[slot as usize];
             match self.objs.buf(v.buf).and_then(|b| b.gpu.as_ref().map(|g| (b, g))) {
