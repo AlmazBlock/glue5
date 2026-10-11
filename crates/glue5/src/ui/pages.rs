@@ -331,6 +331,8 @@ fn settings_items(
                 |ui| choice(ui, &mut settings.max_fps, &rates),
             );
             setting(ui, "VSync", Control::Toggle, None, |ui| toggle(ui, &mut settings.vsync));
+            #[cfg(target_vendor = "apple")]
+            setting(ui, "Metal HUD", Control::Toggle, None, |ui| toggle(ui, &mut settings.metal_hud));
         }
         SettingsTab::Controls => {
             setting(ui, "Touch controls", Control::Choice, None, |ui| {
@@ -458,16 +460,29 @@ mod tests {
         }
     }
     #[test]
-    fn phone_settings_use_the_height_and_show_all_video_options() {
+    fn phone_settings_use_the_height_and_keep_video_options_reachable() {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let mut settings = Settings::default();
         let mut tab = SettingsTab::Video;
-        for pass in 0..4 {
+        for pass in 0..8 {
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(874.0, 402.0))),
                     time: Some(pass as f64),
+                    events: if pass == 4 {
+                        vec![
+                            egui::Event::PointerMoved(Pos2::new(430.0, 300.0)),
+                            egui::Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: vec2(0.0, -150.0),
+                                phase: egui::TouchPhase::Move,
+                                modifiers: egui::Modifiers::default(),
+                            },
+                        ]
+                    } else {
+                        Vec::new()
+                    },
                     safe_area_insets: Some(SafeAreaInsets(egui::epaint::MarginF32 {
                         left: 62.0,
                         right: 62.0,
@@ -481,7 +496,7 @@ mod tests {
                 },
             );
             output.textures_delta.clear();
-            if pass == 3 {
+            if pass == 3 || pass == 7 {
                 let rows: Vec<_> = output
                     .shapes
                     .iter()
@@ -490,9 +505,12 @@ mod tests {
                         _ => None,
                     })
                     .collect();
-                assert_eq!(rows.len(), 4);
-                for (rect, clip) in rows {
-                    assert!(clip.contains_rect(rect), "clipped option: {rect:?} in {clip:?}");
+                assert_eq!(rows.len(), if cfg!(target_vendor = "apple") { 5 } else { 4 });
+                // The original options fit without scrolling. On Apple, the
+                // additional HUD row must be fully reachable by scrolling.
+                let visible = if pass == 3 { &rows[..4] } else { &rows[rows.len() - 1..] };
+                for (rect, clip) in visible {
+                    assert!(clip.contains_rect(*rect), "clipped option: {rect:?} in {clip:?}");
                 }
             }
         }

@@ -636,6 +636,7 @@ dependencies = [
  "log",
  "naga",
  "objc2",
+ "objc2-foundation",
  "objc2-metal",
  "objc2-metal-fx",
  "objc2-quartz-core",

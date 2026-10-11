@@ -93,6 +93,7 @@ struct Shared {
     /// The window's size in pixels, width << 32 | height.
     size: AtomicU64,
     vsync: AtomicBool,
+    metal_hud: AtomicBool,
     upscaler: AtomicU8,
     /// Frames per second at most, shown evenly (0: as they come).
     frame_rate: AtomicU32,
@@ -103,6 +104,7 @@ impl Presentation {
         let p = Presentation(Arc::new(Shared {
             size: AtomicU64::new(0),
             vsync: AtomicBool::new(vsync),
+            metal_hud: AtomicBool::new(false),
             upscaler: AtomicU8::new(upscaler as u8),
             frame_rate: AtomicU32::new(0),
         }));
@@ -122,6 +124,11 @@ impl Presentation {
 
     pub fn set_vsync(&self, on: bool) {
         self.0.vsync.store(on, Ordering::Relaxed);
+    }
+
+    /// Shows Apple's Metal performance HUD at the next frame.
+    pub fn set_metal_hud(&self, on: bool) {
+        self.0.metal_hud.store(on, Ordering::Relaxed);
     }
 
     fn vsync(&self) -> bool {
@@ -234,6 +241,8 @@ struct Display {
     surface_format: Option<TextureFormat>,
     format: Option<TextureFormat>,
     blit: Option<(wgpu::RenderPipeline, wgpu::Sampler)>,
+    #[cfg(target_vendor = "apple")]
+    metal_hud: Option<bool>,
 }
 
 impl Display {
@@ -275,10 +284,20 @@ impl Display {
         self.surface_format = Some(format);
         self.format = Some(linear);
         self.configured = Some((w, h, vsync));
+        #[cfg(target_vendor = "apple")]
+        {
+            self.metal_hud = None;
+        }
         log::debug!("gpu: surface {w}x{h} {format:?} {present_mode:?}");
     }
 
-    fn acquire(&mut self, adapter: &wgpu::Adapter, device: &wgpu::Device, wanted: (u32, u32, bool)) -> Option<Frame> {
+    fn acquire(
+        &mut self,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        wanted: (u32, u32, bool),
+        metal_hud: bool,
+    ) -> Option<Frame> {
         if wanted.0 == 0 || wanted.1 == 0 {
             return None;
         }
@@ -289,11 +308,11 @@ impl Display {
             }
             self.configure(&caps, device, wanted);
         }
-        self.next_image(device)
+        self.next_image(device, metal_hud)
     }
 
     #[cfg(not(target_vendor = "apple"))]
-    fn next_image(&mut self, _: &wgpu::Device) -> Option<Frame> {
+    fn next_image(&mut self, _: &wgpu::Device, _: bool) -> Option<Frame> {
         let format = self.format?;
         let surface = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -313,10 +332,23 @@ impl Display {
     /// The layer's next drawable (waiting for one, as wgpu does), as a
     /// texture to draw into.
     #[cfg(target_vendor = "apple")]
-    fn next_image(&mut self, device: &wgpu::Device) -> Option<Frame> {
+    fn next_image(&mut self, device: &wgpu::Device, metal_hud: bool) -> Option<Frame> {
         use objc2_metal::{MTLTexture, MTLTextureType};
         let (surface_format, format) = (self.surface_format?, self.format?);
         let layer = unsafe { self.surface.as_hal::<Metal>() }.map(|s| s.render_layer().lock().clone())?;
+        if self.metal_hud != Some(metal_hud) {
+            use objc2_foundation::{NSDictionary, NSString, ns_string};
+            // Clearing the mode key hides the HUD, including when globally enabled.
+            let properties = if metal_hud {
+                NSDictionary::from_slices(&[ns_string!("mode")], &[ns_string!("default")])
+            } else {
+                NSDictionary::<NSString, NSString>::new()
+            };
+            // SAFETY: HUD properties are string keys and string values; the cast
+            // only erases NSDictionary's generic types for the Objective-C API.
+            unsafe { layer.setDeveloperHUDProperties(Some(&Retained::cast_unchecked(properties))) };
+            self.metal_hud = Some(metal_hud);
+        }
         #[cfg(target_os = "macos")]
         if !window_visible(&layer) {
             return None;
@@ -447,6 +479,8 @@ impl Output {
                 surface_format: None,
                 format: None,
                 blit: None,
+                #[cfg(target_vendor = "apple")]
+                metal_hud: None,
             },
             overlay: OverlayRenderer::new(window.overlay),
             #[cfg(target_vendor = "apple")]
@@ -466,7 +500,12 @@ impl Output {
     /// its surface is being replaced).
     pub fn acquire(&mut self, device: &wgpu::Device) -> Option<Frame> {
         let (w, h) = self.presentation.size();
-        self.display.acquire(&self.adapter, device, (w, h, self.presentation.vsync()))
+        self.display.acquire(
+            &self.adapter,
+            device,
+            (w, h, self.presentation.vsync()),
+            self.presentation.0.metal_hud.load(Ordering::Relaxed),
+        )
     }
 
     /// Shows `frame`, drawn by the commands submitted before.

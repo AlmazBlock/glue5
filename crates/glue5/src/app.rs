@@ -67,6 +67,7 @@ pub fn run() -> Result<()> {
     settings.for_screen(pixels.1);
 
     let presentation = Presentation::new(pixels, settings.vsync, upscaler(&settings));
+    presentation.set_metal_hud(settings.metal_hud);
     let overlay = glue5_gpu::Overlay::default();
     let instance = glue5_gpu::instance();
     // The window outlives the renderer: the process exits with it.
@@ -341,6 +342,7 @@ impl App {
 
         // What applies at once (the engine's own frame limiter at its next start).
         self.presentation.set_vsync(self.settings.vsync);
+        self.presentation.set_metal_hud(self.settings.metal_hud);
         self.presentation.set_frame_rate(self.settings.max_fps);
         self.presentation.set_upscaler(upscaler(&self.settings));
         self.resize_game();

@@ -54,6 +54,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: Glue 5
+        # Enable the machinery; the layer hides it until Settings > Display enables it.
+        MetalHUDEnabled: true
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         # ProMotion iPhones run faster than 60 Hz only with this.

@@ -69,6 +69,18 @@ impl Settings {
 
 /// The wgpu instance for this platform (create surfaces with it).
 pub fn instance() -> wgpu::Instance {
+    // Enable the HUD machinery before Metal creates a device. Each layer's
+    // properties control visibility; this fallback is not saved to preferences.
+    #[cfg(target_vendor = "apple")]
+    {
+        use objc2::runtime::AnyObject;
+        use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults, ns_string};
+        let enabled = NSNumber::new_bool(true);
+        let defaults =
+            NSDictionary::<NSString, AnyObject>::from_slices(&[ns_string!("MetalForceHudEnabled")], &[&*enabled]);
+        // SAFETY: the dictionary contains a string key and a boolean preference.
+        unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+    }
     let backends = if cfg!(target_vendor = "apple") { wgpu::Backends::METAL } else { wgpu::Backends::VULKAN };
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = backends;

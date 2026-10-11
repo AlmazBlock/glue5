@@ -29,6 +29,8 @@ pub struct Settings {
     pub max_fps: u32,
     /// MetalFX upscaling, where the GPU has it (Apple).
     pub metalfx: bool,
+    /// Apple's driver-level performance overlay.
+    pub metal_hud: bool,
     pub touch: TouchMode,
     pub touch_opacity: f32,
     pub touch_size: f32,
@@ -65,6 +67,7 @@ impl Default for Settings {
             // Phones hold a steady 60 for longer than they hold 120 (heat).
             max_fps: if MOBILE { 60 } else { 0 },
             metalfx: true,
+            metal_hud: false,
             touch: TouchMode::Auto,
             touch_opacity: 0.6,
             touch_size: 1.0,
