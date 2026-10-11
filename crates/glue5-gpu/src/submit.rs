@@ -38,6 +38,8 @@ pub struct Batch {
     pub present: Option<Present>,
     /// The batch ends a frame (paces frames in flight, window or not).
     pub frame: bool,
+    /// The recording thread's count of batches (its epoch).
+    pub epoch: u64,
 }
 
 /// A back buffer to show after its batch.
@@ -101,6 +103,7 @@ impl Submitter {
         done: Done,
         free: FreeChunks,
         output: Option<Output>,
+        finished: Arc<AtomicU64>,
     ) -> Submitter {
         let stats = Arc::new(SubmitStats::default());
         let encoding = Arc::new(AtomicUsize::new(0));
@@ -130,7 +133,7 @@ impl Submitter {
             .name("gpu submit".into())
             .spawn(move || {
                 glue5_runtime::qos::set(glue5_runtime::qos::Qos::Interactive);
-                run(device, queue, done, free, output, rx, thread_stats, thread_encoding)
+                run(device, queue, done, free, output, rx, thread_stats, thread_encoding, finished)
             })
             .expect("spawning the GPU submit thread");
         Submitter { jobs, batches, encoding, stats }
@@ -161,6 +164,7 @@ fn run(
     rx: Receiver<(Batch, Encoded)>,
     stats: Arc<SubmitStats>,
     encoding: Arc<AtomicUsize>,
+    finished: Arc<AtomicU64>,
 ) {
     let mut in_flight: VecDeque<wgpu::SubmissionIndex> = VecDeque::new();
     // Destroyed objects whose batches are submitted, and the frames ended
@@ -181,6 +185,11 @@ fn run(
         }
         let t = Instant::now();
         let submission = queue.submit(buffers);
+        // Batches the GPU has finished (objects destroyed in them can be reused).
+        let (finished, epoch) = (finished.clone(), batch.epoch);
+        queue.on_submitted_work_done(move || {
+            finished.fetch_max(epoch, Ordering::Release);
+        });
         crate::uploads::recycle(batch.staging, &free);
         // Readbacks first: a fence of the batch then means the readbacks
         // asked before it are in wasm memory (the engine waits on one

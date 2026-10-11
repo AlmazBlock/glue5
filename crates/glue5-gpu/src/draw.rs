@@ -628,8 +628,14 @@ impl Gpu {
     /// copies, see `prepare_proxies`); on GPUs that cannot filter 32-bit
     /// float textures, those declared unfilterable. The samplers used with
     /// either are non-filtering (nearest instead of linear).
-    fn for_bound_formats(&self, prog: Arc<Program>, stage: Stage) -> Arc<Program> {
+    fn for_bound_formats(&mut self, prog: Arc<Program>, stage: Stage) -> Arc<Program> {
         let st = stage as usize;
+        // Nothing it depends on changed since the last draw with this program.
+        if let Some((id, seen, variant)) = &self.bound_formats[st]
+            && (*id, *seen) == (prog.id, self.formats_seen[st])
+        {
+            return variant.clone();
+        }
         let (mut unfiltered, mut depth) = (0u128, 0u128);
         for b in &prog.bindings {
             let Kind::Texture { sample: Sample::Float, multisampled: false, .. } = b.kind else {
@@ -649,7 +655,9 @@ impl Gpu {
                 unfiltered |= bit;
             }
         }
-        prog.for_bindings(&self.device, unfiltered, depth)
+        let variant = prog.for_bindings(&self.device, unfiltered, depth);
+        self.bound_formats[st] = Some((prog.id, self.formats_seen[st], variant.clone()));
+        variant
     }
 
     /// Whether a depth texture can be sampled by this draw: not while it is

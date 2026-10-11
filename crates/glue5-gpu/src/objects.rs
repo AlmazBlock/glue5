@@ -27,6 +27,9 @@ pub struct Tex {
     pub dropped: u32,
     pub samples: u32,
     pub bytes: u64,
+    /// Its description, to be reused for a texture like it once the engine
+    /// destroys it (see `recycle.rs`); `None`: not reused.
+    pub recycle: Option<crate::recycle::TexKey>,
     /// Render-target / clear views, by (format, mip, layer).
     pub views: Vec<((TextureFormat, u32, u32), wgpu::TextureView)>,
     /// Encoder epoch of the last command that used it.

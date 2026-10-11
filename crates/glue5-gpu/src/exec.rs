@@ -14,7 +14,7 @@ use crate::format::{self, Caps, Upload};
 use crate::objects::{Buf, Layout, Obj, Objects, Query, Shader, State, Tex, View};
 use crate::pipeline::{self, Compiler, Recipe, SigElement};
 use crate::pool::Pool;
-use crate::shader::{Library, Stage};
+use crate::shader::{Library, Program, Stage};
 use crate::uniforms::Uniforms;
 
 #[derive(Clone, Copy, Default)]
@@ -186,6 +186,11 @@ pub struct Gpu {
     pub last_pipe: Option<Arc<pipeline::Cell>>,
     /// Program ids (vertex, pixel) of the last draw.
     pub last_programs: (u32, u32),
+    /// Per stage, changes to what decides its program variant (see
+    /// `for_bound_formats`): the textures bound, the depth target, objects
+    /// destroyed; and the variant last picked for that count.
+    pub formats_seen: [u64; 3],
+    pub bound_formats: [Option<(u32, u64, Arc<Program>)>; 3],
     /// Render passes recorded since the last submit.
     pub chunk_passes: u32,
     /// When the work not yet handed over started gathering (see `idle`).
@@ -212,6 +217,11 @@ pub struct Gpu {
     pub blits: crate::ops::Blits,
     pub computes: Arc<crate::ops::Computes>,
     pub next_buffer_uid: u32,
+    pub recycler: crate::recycle::Recycler,
+    /// BC textures decoded on the CPU, by threads of their own (made when
+    /// the first one comes): copied in at the next flush.
+    pub decoder: Option<Pool>,
+    pub decodes: Vec<Decode>,
 
     // queries
     pub occlusion: crate::ops::Occlusion,
@@ -227,6 +237,20 @@ pub struct Gpu {
     pub started: Instant,
     pub last_stats: Instant,
     pub last_save: Instant,
+}
+
+/// A texture upload being decoded: copied in when its batch is handed over
+/// (a batch's uploads go before its commands anyway).
+pub struct Decode {
+    data: std::sync::mpsc::Receiver<Vec<u8>>,
+    texture: wgpu::Texture,
+    level: u32,
+    origin: wgpu::Origin3d,
+    bpr: u32,
+    src_rows: u32,
+    rows: u32,
+    extent: wgpu::Extent3d,
+    row_bytes: u32,
 }
 
 /// Recorded work waits this long for more before an idle ring submits it.
@@ -428,10 +452,15 @@ impl Gpu {
                     (_, 0..=2) => &mut self.s.sampler[stage],
                     _ => return,
                 };
+                let mut changed = false;
                 for i in 0..count {
                     if let Some(s) = slots.get_mut(start + i) {
+                        changed |= *s != c.w(3 + i);
                         *s = c.w(3 + i);
                     }
+                }
+                if changed && c.op == op::SET_SRVS {
+                    self.formats_seen[stage] += 1;
                 }
             }
             op::SET_UAVS => {
@@ -452,8 +481,12 @@ impl Gpu {
                     self.s.rt[i] =
                         Target { tex: c.w(i * 4), mip: c.w(i * 4 + 1), slice: c.w(i * 4 + 2), format: c.w(i * 4 + 3) };
                 }
+                let (ds_tex, ds_flags) = (self.s.ds.tex, self.s.ds_flags);
                 self.s.ds = Target { tex: c.w(32), mip: c.w(33), slice: c.w(34), format: c.w(35) };
                 self.s.ds_flags = c.w(36);
+                if (ds_tex, ds_flags) != (self.s.ds.tex, self.s.ds_flags) {
+                    self.formats_seen.iter_mut().for_each(|n| *n += 1);
+                }
                 self.pdirty = true;
             }
             op::SET_BLEND => {
@@ -482,6 +515,7 @@ impl Gpu {
             op::CLEAR_STATE => {
                 self.s = D3d::default();
                 self.pdirty = true;
+                self.formats_seen.iter_mut().for_each(|n| *n += 1);
             }
             op::COPY_REGION => self.copy_region(&c),
             op::COPY_RESOURCE => self.copy_resource(c.w(0), c.w(1)),
@@ -536,6 +570,8 @@ impl Gpu {
         self.uniforms.flush(&mut self.uploads);
         self.resolve_occlusion();
         self.resolve_profile();
+        self.finish_decodes();
+        self.recycler.trim(self.epoch, &mut self.graveyard);
         let (uploads, staging) = self.uploads.finish();
         let encoders = uploads.into_iter().chain(self.encoder.take()).collect();
         *self.stats.submits.entry(reason).or_default() += 1;
@@ -547,6 +583,7 @@ impl Gpu {
             graves: std::mem::take(&mut self.graveyard),
             present,
             frame,
+            epoch: self.epoch,
         });
         self.epoch += 1;
         self.counter_slot = 0;
@@ -609,23 +646,41 @@ impl Gpu {
             height: (size.height >> dropped).max(1),
             depth_or_array_layers: size.depth_or_array_layers,
         };
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: gpu_size,
-            mip_level_count: mips.max(1) - dropped,
-            sample_count: samples,
-            dimension,
+        let key = crate::recycle::TexKey {
             format: tf.format,
+            view: tf.view,
+            dim: dimension,
+            size: gpu_size,
+            mips: mips.max(1) - dropped,
+            samples,
             usage,
-            view_formats: &view_formats,
-        });
-        if let Some(e) = pollster::block_on(scope.pop()) {
-            crate::log_once(&format!("tex{:?}{dim}{samples}", tf.format), || {
-                format!("texture {w}x{h}x{layers} {:?} x{samples} (DXGI {dxgi}, bind {bind:#x}) failed: {e}", tf.format)
-            });
-            return;
-        }
+        };
+        let tex = match self.recycler.texture(&key) {
+            Some(tex) => tex,
+            None => {
+                let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: gpu_size,
+                    mip_level_count: key.mips,
+                    sample_count: samples,
+                    dimension,
+                    format: tf.format,
+                    usage,
+                    view_formats: &view_formats,
+                });
+                if let Some(e) = pollster::block_on(scope.pop()) {
+                    crate::log_once(&format!("tex{:?}{dim}{samples}", tf.format), || {
+                        format!(
+                            "texture {w}x{h}x{layers} {:?} x{samples} (DXGI {dxgi}, bind {bind:#x}) failed: {e}",
+                            tf.format
+                        )
+                    });
+                    return;
+                }
+                tex
+            }
+        };
         let bytes = texture_bytes(tf.format, gpu_size, mips.max(1) - dropped, dimension) * samples as u64;
         self.objs.insert(
             id,
@@ -641,6 +696,7 @@ impl Gpu {
                 dropped,
                 samples,
                 bytes,
+                recycle: Some(key),
                 views: Vec::new(),
                 used: Default::default(),
                 uploaded: Default::default(),
@@ -690,12 +746,15 @@ impl Gpu {
         );
     }
 
-    fn new_gpu_buffer(&self, bytes: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: bytes,
-            usage,
-            mapped_at_creation: false,
+    /// A buffer the engine destroyed (see `recycle.rs`), else a new one.
+    fn new_gpu_buffer(&mut self, bytes: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        self.recycler.buffer(bytes, usage).unwrap_or_else(|| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: bytes,
+                usage,
+                mapped_at_creation: false,
+            })
         })
     }
 
@@ -719,12 +778,11 @@ impl Gpu {
                 // D3D map-discard: commands already recorded keep the old
                 // contents; a new allocation takes the new ones.
                 let (bytes, usage) = (b.bytes, b.usage);
-                let fresh = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: None,
-                    size: bytes,
-                    usage,
-                    mapped_at_creation: false,
-                });
+                let old = b.gpu.take();
+                let fresh = self.new_gpu_buffer(bytes, usage);
+                if let Some(old) = old {
+                    self.recycler.keep_buffer(self.epoch, old);
+                }
                 self.next_buffer_uid += 1;
                 let b = self.objs.buf_mut(id).unwrap();
                 b.gpu = Some(fresh);
@@ -770,6 +828,36 @@ impl Gpu {
         let data = &c.bytes_from(12)[..size as usize];
         let origin = wgpu::Origin3d { x, y, z: if t.is_3d() { z } else { slice } };
         let d = d.max(1);
+        if let Upload::Bc(bc) = t.upload {
+            // Decoded by a thread of its own while recording goes on, copied
+            // in at the flush; the decoded texels, cropped to the mip
+            // (block-padded regions may overhang it).
+            let (cols, block_rows) = (w.div_ceil(4), h.div_ceil(4));
+            let src_rows = rows.max(block_rows) as usize;
+            let (mw, mh) = ((t.width >> mip).max(1), (t.height >> mip).max(1));
+            let (cw, ch) = (w.min(mw.saturating_sub(x)), h.min(mh.saturating_sub(y)));
+            let texel = bc.texel_bytes() as u32;
+            let (texture, src) = (t.tex.clone(), data.to_vec());
+            t.uploaded.set(self.epoch);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let bpr = bpr as usize;
+            self.decoder.get_or_insert_with(|| Pool::new("gpu decode", 2)).urgent(move || {
+                let texels = crate::bc::decode(bc, &src, bpr, src_rows, cols as usize, block_rows as usize, d as usize);
+                let _ = tx.send(texels);
+            });
+            self.decodes.push(Decode {
+                data: rx,
+                texture,
+                level,
+                origin,
+                bpr: cols * 4 * texel,
+                src_rows: block_rows * 4,
+                rows: ch,
+                extent: wgpu::Extent3d { width: cw, height: ch, depth_or_array_layers: d },
+                row_bytes: cw * texel,
+            });
+            return;
+        }
         let converted;
         // Source (data, bytes per row, rows per layer), rows to copy, copy extent (w, h), bytes per row.
         let (data, bpr, src_rows, copy_rows, (width, height), row_bytes) = match t.upload {
@@ -792,17 +880,7 @@ impl Gpu {
                 converted = out;
                 (&converted[..], w * 4, h, h, (w, h), w * 4)
             }
-            Upload::Bc(bc) => {
-                let (cols, block_rows) = (w.div_ceil(4), h.div_ceil(4));
-                let src_rows = rows.max(block_rows) as usize;
-                converted =
-                    crate::bc::decode(bc, data, bpr as usize, src_rows, cols as usize, block_rows as usize, d as usize);
-                // Decoded texels, cropped to the mip (block-padded regions may overhang it).
-                let (mw, mh) = ((t.width >> mip).max(1), (t.height >> mip).max(1));
-                let (cw, ch) = (w.min(mw.saturating_sub(x)), h.min(mh.saturating_sub(y)));
-                let texel = bc.texel_bytes() as u32;
-                (&converted[..], cols * 4 * texel, block_rows * 4, ch, (cw, ch), cw * texel)
-            }
+            Upload::Bc(_) => unreachable!("decoded on another thread"),
         };
         let extent = wgpu::Extent3d { width, height, depth_or_array_layers: d };
         let tex = t.tex.clone();
@@ -816,6 +894,21 @@ impl Gpu {
             extent,
             row_bytes,
         );
+    }
+
+    /// Copies in the textures decoded since the last flush (waiting for
+    /// those not done yet).
+    fn finish_decodes(&mut self) {
+        for d in std::mem::take(&mut self.decodes) {
+            let Ok(texels) = d.data.recv() else { continue };
+            let target = wgpu::TexelCopyTextureInfo {
+                texture: &d.texture,
+                mip_level: d.level,
+                origin: d.origin,
+                aspect: wgpu::TextureAspect::All,
+            };
+            self.uploads.texture(target, &texels, d.bpr, d.src_rows, d.rows, d.extent, d.row_bytes);
+        }
     }
 
     fn create_shader(&mut self, c: &Command) {
@@ -899,11 +992,16 @@ impl Gpu {
         // Memory goes right after the next submit: batches handed over
         // earlier may still be waiting for theirs. Cached bind groups must
         // not keep it.
+        // What decides program variants may have gone with it.
+        self.formats_seen.iter_mut().for_each(|n| *n += 1);
         match self.objs.remove(id) {
-            Some(Obj::Texture(t)) => self.graveyard.push(Grave::Texture(t.tex)),
+            Some(Obj::Texture(t)) => match t.recycle {
+                Some(key) => self.recycler.keep_texture(self.epoch, key, t.tex, t.bytes),
+                None => self.graveyard.push(Grave::Texture(t.tex)),
+            },
             Some(Obj::Buffer(b)) => {
                 if let Some(g) = b.gpu {
-                    self.graveyard.push(Grave::Buffer(g));
+                    self.recycler.keep_buffer(self.epoch, g);
                 }
             }
             _ => {}
@@ -1007,10 +1105,11 @@ impl Gpu {
             }
         }
         let memory = format!(
-            "textures {} MiB, buffers {} MiB, constants {} MiB",
+            "textures {} MiB, buffers {} MiB, constants {} MiB; {} reused",
             textures >> 20,
             buffers >> 20,
-            self.uniforms.bytes_allocated() >> 20
+            self.uniforms.bytes_allocated() >> 20,
+            std::mem::take(&mut self.recycler.reused)
         );
         let frames_line = frame_times(st.frame_ms) + &on_screen(crate::present::take_on_screen());
         let [encode, submit, gpu_wait, drawable, present, release] = self.submitter.stats.take();

@@ -26,6 +26,7 @@ mod pool;
 mod prepare;
 mod present;
 mod profile;
+mod recycle;
 mod shader;
 mod submit;
 mod uniforms;
@@ -332,6 +333,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
 
     let profiler = profile.then(|| profile::Profiler::new(&device, &queue));
     let uploads = uploads::Uploads::new(device.clone());
+    let recycler = recycle::Recycler::default();
     Ok(exec::Gpu {
         submitter: submit::Submitter::start(
             device.clone(),
@@ -339,6 +341,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
             done::Done::start(device.clone(), ring.mem(), staging.clone()),
             uploads.free_chunks(),
             output,
+            recycler.finished.clone(),
         ),
         uniforms: uniforms::Uniforms::new(limits.min_uniform_buffer_offset_alignment),
         uploads,
@@ -348,7 +351,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         limits,
         library,
         compiler,
-        pool: pool::Pool::new(threads),
+        pool: pool::Pool::new("gpu compile", threads),
         staging,
         ring,
         settings,
@@ -367,6 +370,8 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         pdirty: true,
         last_pipe: None,
         last_programs: (0, 0),
+        formats_seen: [0; 3],
+        bound_formats: Default::default(),
         chunk_passes: 0,
         batch_since: None,
         waited_on: false,
@@ -383,6 +388,9 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         blits: Default::default(),
         computes: Default::default(),
         next_buffer_uid: 0,
+        recycler,
+        decoder: None,
+        decodes: Vec::new(),
         occlusion: Default::default(),
         counter_src: None,
         counter_slot: 0,

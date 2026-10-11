@@ -19,12 +19,12 @@ pub struct Pool {
 }
 
 impl Pool {
-    pub fn new(threads: usize) -> Pool {
+    pub fn new(name: &str, threads: usize) -> Pool {
         let queues: Arc<(Mutex<Queues>, Condvar)> = Arc::default();
         for i in 0..threads {
             let q = queues.clone();
             std::thread::Builder::new()
-                .name(format!("gpu compile {i}"))
+                .name(format!("{name} {i}"))
                 .spawn(move || {
                     glue5_runtime::qos::set(glue5_runtime::qos::Qos::Initiated);
                     loop {

@@ -360,6 +360,7 @@ impl Gpu {
                 dropped: 0,
                 samples: 1,
                 bytes: 0,
+                recycle: None,
                 views: Vec::new(),
                 used: Default::default(),
                 uploaded: Default::default(),
