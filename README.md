@@ -1,4 +1,8 @@
-# Glue 5
+<p align="center">
+  <img src="docs/assets/glue5-logo.png" alt="Glue 5 logo" width="160" height="160">
+</p>
+
+<h1 align="center">Glue 5</h1>
 
 Glue 5 is a recompilation toolchain and native compatibility layer for
 GTA V's WebAssembly build. It turns user-supplied game code into a native
@@ -27,6 +31,14 @@ with sound); keyboard, mouse, gamepads and touch controls work. Next:
 Android packaging.
 
 See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
+
+<p align="center">
+  <img src="docs/screenshots/ios-gameplay.png" alt="GTA V running in Glue 5 on iOS, driving through Los Santos with on-screen touch controls" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/ios-launcher.jpg" alt="Glue 5 start page on iOS with Play, Settings and Find Files buttons and game files ready" width="100%">
+</p>
 
 ## Layout
 
