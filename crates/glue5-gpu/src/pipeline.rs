@@ -49,7 +49,9 @@ pub struct Recipe {
     pub read_only: u8,
     /// The programs' variants for what is bound (`Program::for_bindings`):
     /// vertex unfiltered and depth, pixel unfiltered and depth (bits by SRV
-    /// slot; unfiltered includes the depth bits).
+    /// slot; unfiltered includes the depth bits). Recorded as on a GPU that
+    /// cannot filter 32-bit floats, the same on every device (see
+    /// [`Recipe::for_device`]).
     pub variant: [u128; 4],
     /// Uses the HUD coverage program rather than the original depth blit.
     pub hud_mask: bool,
@@ -452,6 +454,31 @@ fn dual_source_fallback(f: wgpu::BlendFactor, _features: Features) -> wgpu::Blen
 // ---- recipes on disk (the browser build's JSON format, with the signature) ----
 
 impl Recipe {
+    /// The pipeline this device makes of a recipe recorded on any device:
+    /// recipes say what the game drew, as on a GPU with every format and
+    /// unable to filter 32-bit floats. A GPU that filters them needs no
+    /// unfilterable bindings; one without 32-bit float depth with stencil,
+    /// or without 16-bit normalized formats, has their stand-ins (see
+    /// `format::texture`). Recipes recorded here already have them.
+    pub fn for_device(&self, caps: &Caps) -> Recipe {
+        let mut r = self.clone();
+        if caps.float32_filter {
+            r.variant[0] = r.variant[1];
+            r.variant[2] = r.variant[3];
+        }
+        let format = |f: TextureFormat| match f {
+            TextureFormat::Depth32FloatStencil8 if !caps.features.contains(Features::DEPTH32FLOAT_STENCIL8) => {
+                TextureFormat::Depth24PlusStencil8
+            }
+            TextureFormat::Rgba16Unorm if !caps.norm16 => TextureFormat::Rgba16Float,
+            TextureFormat::Rg16Unorm if !caps.norm16 => TextureFormat::Rg16Float,
+            f => f,
+        };
+        r.targets.iter_mut().flatten().for_each(|f| *f = format(*f));
+        r.depth_format = r.depth_format.map(format);
+        r
+    }
+
     pub fn to_json(&self) -> Value {
         let words = |w: &Option<Box<[u32]>>| w.as_ref().map(|w| json!(w.to_vec()));
         let strip = ["", "uint16", "uint32"][self.strip as usize];
@@ -544,7 +571,7 @@ impl Recipe {
 }
 
 /// The recipes seen while playing this game build, gathered from several
-/// devices (`mise run shaders:seed`).
+/// devices and automated runs (`mise run shaders:seed`, `shaders:collect`).
 const SEED: &str = include_str!("../seed/pipelines.jsonl");
 
 /// The recipes known before the game starts: the seed and this device's
@@ -559,4 +586,46 @@ pub fn known_recipes(cache_dir: Option<&std::path::Path>) -> Vec<Arc<Recipe>> {
         .filter(|r| seen.insert(r.clone()))
         .map(Arc::new)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(features: Features, norm16: bool, float32_filter: bool) -> Caps {
+        Caps { features, norm16, indirect: true, float32_filter }
+    }
+
+    fn recipe() -> Recipe {
+        let line = SEED.lines().next().unwrap();
+        let mut r = Recipe::from_json(&serde_json::from_str(line).unwrap()).unwrap();
+        r.targets = vec![Some(TextureFormat::Rgba16Unorm), None, Some(TextureFormat::Rg16Unorm)];
+        r.depth_format = Some(TextureFormat::Depth32FloatStencil8);
+        // A 32-bit float texture in slot 0, a depth read in slot 1.
+        r.variant = [0b11, 0b10, 0b01, 0];
+        r
+    }
+
+    #[test]
+    fn seed_parses() {
+        let lines = SEED.lines().filter(|l| l.contains("\"sig\":")).count();
+        assert_eq!(known_recipes(None).len(), lines);
+    }
+
+    #[test]
+    fn a_gpu_with_everything_filters_float32() {
+        let r = recipe().for_device(&caps(Features::DEPTH32FLOAT_STENCIL8, true, true));
+        assert_eq!(r.variant, [0b10, 0b10, 0, 0]);
+        assert_eq!(r.targets, recipe().targets);
+        assert_eq!(r.depth_format, recipe().depth_format);
+    }
+
+    #[test]
+    fn a_gpu_without_formats_has_their_stand_ins() {
+        let r = recipe().for_device(&caps(Features::empty(), false, false));
+        assert_eq!(r.variant, recipe().variant);
+        assert_eq!(r.targets, [Some(TextureFormat::Rgba16Float), None, Some(TextureFormat::Rg16Float)]);
+        assert_eq!(r.depth_format, Some(TextureFormat::Depth24PlusStencil8));
+        assert_eq!(r.for_device(&caps(Features::empty(), false, false)), r);
+    }
 }

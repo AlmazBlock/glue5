@@ -77,11 +77,6 @@ impl Caps {
         Caps { features, norm16, indirect, float32_filter }
     }
 
-    /// Whether views of `format` can be sampled with filtering.
-    pub fn filterable(&self, format: F) -> bool {
-        self.float32_filter || !matches!(format, F::R32Float | F::Rg32Float | F::Rgba32Float)
-    }
-
     pub fn border(&self) -> bool {
         self.features.contains(Features::ADDRESS_MODE_CLAMP_TO_BORDER)
     }
@@ -207,6 +202,11 @@ pub fn view(dxgi: u32, base: F, caps: &Caps) -> F {
     let f = texture(dxgi, base.is_depth_stencil_format(), caps).format;
     // Only sRGB reinterpretation changes the format of a view.
     if f != base && f.remove_srgb_suffix() == base.remove_srgb_suffix() { f } else { base }
+}
+
+/// 32-bit float colour formats: not filterable on many mobile GPUs.
+pub fn is_float32(f: F) -> bool {
+    matches!(f, F::R32Float | F::Rg32Float | F::Rgba32Float)
 }
 
 pub fn is_depth(f: F) -> bool {

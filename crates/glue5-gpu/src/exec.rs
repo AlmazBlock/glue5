@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glue5_runtime::gpu::{Command, GpuRing, Reader, op};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use wgpu::TextureFormat;
 
 use crate::Settings;
@@ -184,13 +184,14 @@ pub struct Gpu {
     // pipelines
     pub pdirty: bool,
     pub last_pipe: Option<Arc<pipeline::Cell>>,
-    /// Program ids (vertex, pixel) of the last draw.
-    pub last_programs: (u32, u32),
+    /// Program ids (vertex, pixel) of the last draw, and the textures that
+    /// make their recipes' variants (see `for_bound_formats`).
+    pub last_programs: (u32, u32, u128, u128),
     /// Per stage, changes to what decides its program variant (see
     /// `for_bound_formats`): the textures bound, the depth target, objects
     /// destroyed; and the variant last picked for that count.
     pub formats_seen: [u64; 3],
-    pub bound_formats: [Option<(u32, u64, Arc<Program>)>; 3],
+    pub bound_formats: [Option<(u32, u64, Arc<Program>, u128)>; 3],
     /// Render passes recorded since the last submit.
     pub chunk_passes: u32,
     /// When the work not yet handed over started gathering (see `idle`).
@@ -203,7 +204,10 @@ pub struct Gpu {
     /// The timestamps of the open draw pass, until its first draw names it.
     pub pass_profile: Option<u32>,
     pub fast_pipes: FxHashMap<Box<[u32]>, Arc<pipeline::Cell>>,
+    /// Pipelines by recipe for this device (`Recipe::for_device`).
     pub pipes: FxHashMap<Arc<Recipe>, Arc<pipeline::Cell>>,
+    /// Recipes as recorded: those of the seed, of earlier runs and of this one.
+    pub known: FxHashSet<Arc<Recipe>>,
     pub pass_tails: FxHashMap<(Vec<Option<TextureFormat>>, Option<TextureFormat>, u32, u8), u32>,
     pub recipes_new: Vec<Arc<Recipe>>,
     pub key: Vec<u32>,

@@ -305,8 +305,14 @@ impl Gpu {
     // ---- pipelines -------------------------------------------------------------------
 
     /// The pipeline for the bound state (`None`: not drawable; a pending cell
-    /// is still compiling).
-    fn pipeline(&mut self, vs: &Arc<Program>, ps: Option<&Arc<Program>>) -> Option<Arc<pipeline::Cell>> {
+    /// is still compiling). `float32`: per stage, the textures bound that
+    /// GPUs without 32-bit float filtering read unfiltered (for the recipe).
+    fn pipeline(
+        &mut self,
+        vs: &Arc<Program>,
+        ps: Option<&Arc<Program>>,
+        float32: [u128; 2],
+    ) -> Option<Arc<pipeline::Cell>> {
         if !self.pdirty
             && let Some(p) = &self.last_pipe
         {
@@ -325,6 +331,7 @@ impl Gpu {
         key.extend([vs.id, ps.map_or(0, |p| p.id), self.s.layout, self.s.topology, strip as u32]);
         key.extend([self.s.blend, self.s.depth_stencil, self.s.raster, info.tail]);
         key.extend(layout.slots.iter().map(|&(slot, _)| stride(slot)));
+        key.extend(float32.iter().flat_map(|m| (0..4).map(move |i| (m >> (32 * i)) as u32)));
         let cell = match self.fast_pipes.get(&key[..]) {
             Some(cell) => cell.clone(),
             None => {
@@ -344,7 +351,12 @@ impl Gpu {
                     samples: info.samples,
                     depth_format: info.depth,
                     read_only: info.read_only,
-                    variant: [vs.unfiltered, vs.depth, ps.map_or(0, |p| p.unfiltered), ps.map_or(0, |p| p.depth)],
+                    variant: [
+                        float32[0] | vs.depth,
+                        vs.depth,
+                        ps.map_or(0, |p| float32[1] | p.depth),
+                        ps.map_or(0, |p| p.depth),
+                    ],
                     hud_mask: ps.is_some_and(|p| p.hud_mask),
                 };
                 let cell = self.pipeline_for(Arc::new(recipe), vs.clone(), ps.cloned());
@@ -357,14 +369,18 @@ impl Gpu {
     }
 
     /// The pipeline of a recipe: prepared before the game started (see
-    /// `prepare.rs`), else compiled now, in the background.
+    /// `prepare.rs`), else compiled now, in the background. Recipes not seen
+    /// before are kept for the next start.
     fn pipeline_for(&mut self, recipe: Arc<Recipe>, vs: Arc<Program>, ps: Option<Arc<Program>>) -> Arc<pipeline::Cell> {
+        if self.known.insert(recipe.clone()) {
+            self.recipes_new.push(recipe.clone());
+        }
+        let recipe = Arc::new(recipe.for_device(&self.caps));
         if let Some(cell) = self.pipes.get(&recipe) {
             return cell.clone();
         }
         let cell: Arc<pipeline::Cell> = Arc::new(OnceLock::new());
         self.pipes.insert(recipe.clone(), cell.clone());
-        self.recipes_new.push(recipe.clone());
         let (compiler, c) = (self.compiler.clone(), cell.clone());
         let job = move || {
             c.get_or_init(|| compiler.compile(&vs, ps.as_deref(), &recipe));
@@ -627,16 +643,18 @@ impl Gpu {
     /// directly as depth textures where WebGPU allows it (else through float
     /// copies, see `prepare_proxies`); on GPUs that cannot filter 32-bit
     /// float textures, those declared unfilterable. The samplers used with
-    /// either are non-filtering (nearest instead of linear).
-    fn for_bound_formats(&mut self, prog: Arc<Program>, stage: Stage) -> Arc<Program> {
+    /// either are non-filtering (nearest instead of linear). Also the
+    /// textures unfilterable on such GPUs, whatever this one does: what
+    /// recipes record (see `Recipe::for_device`).
+    fn for_bound_formats(&mut self, prog: Arc<Program>, stage: Stage) -> (Arc<Program>, u128) {
         let st = stage as usize;
         // Nothing it depends on changed since the last draw with this program.
-        if let Some((id, seen, variant)) = &self.bound_formats[st]
+        if let Some((id, seen, variant, float32)) = &self.bound_formats[st]
             && (*id, *seen) == (prog.id, self.formats_seen[st])
         {
-            return variant.clone();
+            return (variant.clone(), *float32);
         }
-        let (mut unfiltered, mut depth) = (0u128, 0u128);
+        let (mut float32, mut depth) = (0u128, 0u128);
         for b in &prog.bindings {
             let Kind::Texture { sample: Sample::Float, multisampled: false, .. } = b.kind else {
                 continue;
@@ -648,16 +666,17 @@ impl Gpu {
             if format::is_depth(tex.format) {
                 if tex.samples == 1 && self.may_sample_depth(srv.res, tex.format, stage) {
                     depth |= bit;
-                } else if !self.caps.float32_filter {
-                    unfiltered |= bit; // its R32Float copy
+                } else {
+                    float32 |= bit; // its R32Float copy
                 }
-            } else if !self.caps.filterable(format::view(srv.format, tex.format, &self.caps)) {
-                unfiltered |= bit;
+            } else if format::is_float32(format::view(srv.format, tex.format, &self.caps)) {
+                float32 |= bit;
             }
         }
+        let unfiltered = if self.caps.float32_filter { 0 } else { float32 };
         let variant = prog.for_bindings(&self.device, unfiltered, depth);
-        self.bound_formats[st] = Some((prog.id, self.formats_seen[st], variant.clone()));
-        variant
+        self.bound_formats[st] = Some((prog.id, self.formats_seen[st], variant.clone(), float32));
+        (variant, float32)
     }
 
     /// Whether a depth texture can be sampled by this draw: not while it is
@@ -869,10 +888,17 @@ impl Gpu {
         {
             return self.skip("no input layout");
         }
-        let vs = self.for_bound_formats(vs, Stage::Vertex);
-        let ps = ps.map(|ps| self.for_bound_formats(ps, Stage::Pixel));
-        // Same state, other textures, can mean another program variant.
-        let programs = (vs.id, ps.as_ref().map_or(0, |p| p.id));
+        let (vs, vs_float32) = self.for_bound_formats(vs, Stage::Vertex);
+        let (ps, ps_float32) = match ps {
+            Some(ps) => {
+                let (ps, float32) = self.for_bound_formats(ps, Stage::Pixel);
+                (Some(ps), float32)
+            }
+            None => (None, 0),
+        };
+        // Same state, other textures, can mean another program variant
+        // (or, here, only another recipe).
+        let programs = (vs.id, ps.as_ref().map_or(0, |p| p.id), vs_float32, ps_float32);
         if programs != self.last_programs {
             self.last_programs = programs;
             self.pdirty = true;
@@ -884,7 +910,7 @@ impl Gpu {
         if !self.ensure_pass() {
             return self.skip("no render target");
         }
-        let Some(cell) = self.pipeline(&vs, ps.as_ref()) else {
+        let Some(cell) = self.pipeline(&vs, ps.as_ref(), [vs_float32, ps_float32]) else {
             return self.skip("no pipeline");
         };
         let Some(pipe_slot) = cell.get() else {
@@ -1110,7 +1136,7 @@ impl Gpu {
         let Some(cs) = self.program(self.s.shader[2]) else {
             return self.skip("no compute shader");
         };
-        let cs = self.for_bound_formats(cs, Stage::Compute);
+        let (cs, _) = self.for_bound_formats(cs, Stage::Compute);
         self.prepare_proxies(&cs);
         self.end_pass();
         // Storage textures are declared with a guessed format; the pipeline

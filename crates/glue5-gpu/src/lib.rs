@@ -326,7 +326,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         Some(p) => p.thread.join().map_err(|_| anyhow::anyhow!("preparing the pipelines panicked"))??,
         None => prepare::prepare(&gpu, &settings, &Default::default())?,
     };
-    let prepare::Prepared { library, compiler, pipes } = prepared;
+    let prepare::Prepared { library, compiler, pipes, known } = prepared;
     let Device { adapter, device, queue, features: _, profile } = gpu;
     device.on_uncaptured_error(error_handler(Some(ring)));
     let caps = compiler.caps;
@@ -374,7 +374,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         maps: Vec::new(),
         pdirty: true,
         last_pipe: None,
-        last_programs: (0, 0),
+        last_programs: (0, 0, 0, 0),
         formats_seen: [0; 3],
         bound_formats: Default::default(),
         chunk_passes: 0,
@@ -384,6 +384,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         pass_profile: None,
         fast_pipes: Default::default(),
         pipes,
+        known,
         pass_tails: Default::default(),
         recipes_new: Vec::new(),
         key: Vec::new(),

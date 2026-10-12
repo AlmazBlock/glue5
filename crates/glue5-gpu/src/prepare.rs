@@ -16,18 +16,19 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use anyhow::Result;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::pipeline::{self, Cell, Compiler, Recipe};
 use crate::shader::{Library, Program, Stage};
 use crate::{Device, Settings};
 
-/// What the renderer takes over: the shaders, the compiler and the
-/// pipelines compiled.
+/// What the renderer takes over: the shaders, the compiler, the pipelines
+/// compiled (by recipe for this device) and the recipes known (as recorded).
 pub struct Prepared {
     pub library: Arc<Library>,
     pub compiler: Arc<Compiler>,
     pub pipes: FxHashMap<Arc<Recipe>, Arc<Cell>>,
+    pub known: FxHashSet<Arc<Recipe>>,
 }
 
 /// Pipelines compiled so far, of how many.
@@ -42,7 +43,11 @@ pub(crate) fn prepare(gpu: &Device, settings: &Settings, progress: &Progress) ->
     let t0 = Instant::now();
     let library = Arc::new(Library::open(&settings.shader_dir)?);
     let compiler = Arc::new(crate::compiler(gpu, settings));
-    let recipes = pipeline::known_recipes(settings.cache_dir.as_deref());
+    let known = pipeline::known_recipes(settings.cache_dir.as_deref());
+    // Recipes from other devices can make the same pipeline here.
+    let mut recipes: Vec<Arc<Recipe>> = known.iter().map(|r| Arc::new(r.for_device(&compiler.caps))).collect();
+    let mut seen = FxHashSet::default();
+    recipes.retain(|r| seen.insert(r.clone()));
     progress.total.store(recipes.len(), Ordering::Relaxed);
     let cells: Vec<Arc<Cell>> = recipes.iter().map(|_| Arc::new(OnceLock::new())).collect();
     let next = AtomicUsize::new(0);
@@ -68,11 +73,13 @@ pub(crate) fn prepare(gpu: &Device, settings: &Settings, progress: &Progress) ->
     drop(modules);
     let failed = cells.iter().filter(|c| matches!(c.get(), Some(None))).count();
     log::info!(
-        "gpu: {} known pipelines prepared in {:.1} s ({failed} not usable, {threads} threads)",
+        "gpu: {} known pipelines prepared in {:.1} s ({} recipes, {failed} not usable, {threads} threads)",
         recipes.len(),
-        t0.elapsed().as_secs_f64()
+        t0.elapsed().as_secs_f64(),
+        known.len()
     );
-    Ok(Prepared { library, compiler, pipes: recipes.into_iter().zip(cells).collect() })
+    let known = known.into_iter().collect();
+    Ok(Prepared { library, compiler, pipes: recipes.into_iter().zip(cells).collect(), known })
 }
 
 /// The programs of a recipe, prepared as when the engine creates them and
