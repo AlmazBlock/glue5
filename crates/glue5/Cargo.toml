@@ -32,8 +32,18 @@ egui.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 wgpu.workspace = true
-sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
 png = "0.18"
+
+# SDL, built from its sources and linked in; on Android a shared library of
+# its own next to ours (libSDL3.so), as SDL's Java side expects: it registers
+# its native methods from its JNI_OnLoad, which a Rust cdylib would not export.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+sdl3 = { version = "0.20", features = ["build-from-source", "raw-window-handle"] }
+# Logs to logcat (stderr goes nowhere there).
+android_logger = { version = "0.15", default-features = false }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 # The Taptic Engine, for the touch controls' haptics (UIKit and CoreHaptics

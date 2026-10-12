@@ -45,6 +45,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "android_log-sys"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84521a3cf562bc62942e294181d9eef17eb38ceb8c68677bc49f144e4c3d4f8d"
+
+[[package]]
+name = "android_logger"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbb4e440d04be07da1f1bf44fb4495ebd58669372fe0cffa6e48595ac5bd88a3"
+dependencies = [
+ "android_log-sys",
+ "env_filter 0.1.4",
+ "log",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,6 +446,15 @@ dependencies = [
 
 [[package]]
 name = "env_filter"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bf3c259d255ca70051b30e2e95b5446cdb8949ac4cd22c0d7fd634d89f568e2"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
@@ -445,7 +471,7 @@ checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
 dependencies = [
  "anstream",
  "anstyle",
- "env_filter",
+ "env_filter 2.0.0",
  "jiff",
  "log",
 ]
@@ -598,6 +624,7 @@ dependencies = [
 name = "glue5"
 version = "0.1.0"
 dependencies = [
+ "android_logger",
  "anyhow",
  "egui",
  "env_logger",
@@ -1341,6 +1368,7 @@ dependencies = [
  "raw-window-handle",
  "sdl3-image-sys",
  "sdl3-mixer-sys",
+ "sdl3-net-sys",
  "sdl3-sys",
  "sdl3-ttf-sys",
 ]
@@ -1383,6 +1411,24 @@ dependencies = [
  "sdl3-mixer-src",
  "sdl3-sys",
  "vcpkg",
+]
+
+[[package]]
+name = "sdl3-net-src"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0461903a7545a85fc0ae64bdd642ca86fc58c7e0a9422aa7ab108aba25dc1b9"
+
+[[package]]
+name = "sdl3-net-sys"
+version = "0.7.0+SDL-net-3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2db35fcc4c810d47fbac59147c1157618d84d7b52aa8644c997e995eef43c5c3"
+dependencies = [
+ "cmake",
+ "rpkg-config",
+ "sdl3-net-src",
+ "sdl3-sys",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 //! Glue 5: the game as one application for every platform — desktop (macOS,
-//! Linux, Windows) and mobile (iOS; Android next).
+//! Linux, Windows) and mobile (iOS, Android).
 //!
 //! The engine runs on its own threads ([`glue5_runtime`]) and renders with
 //! [`glue5_gpu`]; this crate is the platform side, through SDL: window,
@@ -9,7 +9,8 @@
 //! - desktop: the `glue5` binary calls [`main`];
 //! - iOS: the Xcode project's `main` calls `glue5_main`, which hands the
 //!   process to SDL (`SDL_RunApp` / `UIApplicationMain`);
-//! - Android: SDL's Java activity loads the library and calls `SDL_main`.
+//! - Android: SDL's Java activity (`platform/android`) loads SDL's library
+//!   and this one (built as `libglue5.so`), then calls `SDL_main`.
 
 mod app;
 mod audio;
@@ -25,7 +26,10 @@ use sdl3::messagebox::{MessageBoxFlag, show_simple_message_box};
 
 /// Runs the application; returns the process exit code.
 pub fn main() -> i32 {
+    #[cfg(not(target_os = "android"))]
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    #[cfg(target_os = "android")]
+    android_logger::init_once(android_logger::Config::default().with_tag("glue5").with_max_level(log::LevelFilter::Info));
     // A host thread serving the engine (the renderer's, ...) that panics
     // leaves it waiting forever, as an engine thread's trap does.
     let report = std::panic::take_hook();
@@ -60,5 +64,8 @@ pub extern "C" fn glue5_main(argc: std::ffi::c_int, argv: *mut *mut std::ffi::c_
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub extern "C" fn SDL_main(_: std::ffi::c_int, _: *mut *mut std::ffi::c_char) -> std::ffi::c_int {
-    main()
+    // The process ends with main, as on desktop and iOS: the engine's threads
+    // never end, and SDL's activity only finishes when main returns, leaving
+    // them running in the process Android keeps cached.
+    std::process::exit(main())
 }
