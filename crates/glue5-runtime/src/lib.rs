@@ -193,6 +193,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     let log = gamelog::start(&config.user_dir).context("creating the engine log")?;
     log::info!("engine log: {} (GLUE5_ENGINE_LOG=stdout also prints it)", log.display());
     glue5_game::set_trap_hook(trap_site::record);
+    time::fine_timers();
     let vfs = Vfs::new(data.clone(), config.user_dir.clone()).with_context(|| format!("opening {}", data.display()))?;
     let memory = WasmMemory::reserve()?;
     let runtime = Runtime {

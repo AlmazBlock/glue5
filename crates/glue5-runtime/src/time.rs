@@ -33,6 +33,17 @@ pub(crate) fn date_now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64)
 }
 
+/// Timed waits that end on time. Windows wakes them at its timer tick,
+/// 15.6 ms by default: the engine's short sleeps (Emscripten's, futex waits
+/// with a timeout) would last that long. 1 ms, as games ask for; for this
+/// process only since Windows 10 2004. Elsewhere waits are precise already.
+pub(crate) fn fine_timers() {
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::Media::timeBeginPeriod(1);
+    }
+}
+
 // struct tm (wasm64): nine i32 fields, then tm_gmtoff (i64) at 40.
 const TM_SEC: u64 = 0;
 const TM_MIN: u64 = 4;
