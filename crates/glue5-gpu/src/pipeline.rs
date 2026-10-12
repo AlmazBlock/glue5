@@ -41,6 +41,7 @@ pub struct Recipe {
     pub strip: u8,
     pub blend: Option<Box<[u32]>>,
     pub depth: Option<Box<[u32]>>,
+    /// Without its depth bias (see [`without_depth_bias`]).
     pub raster: Option<Box<[u32]>>,
     pub targets: Vec<Option<TextureFormat>>,
     pub samples: u32,
@@ -67,6 +68,19 @@ pub fn slots(elements: &[Element]) -> Vec<(u32, u32)> {
         }
     }
     out
+}
+
+/// A D3D11 rasterizer state's words without its depth bias (DepthBias,
+/// DepthBiasClamp, SlopeScaledDepthBias): draws set it on the render pass
+/// (`RenderPass::set_depth_bias`, our wgpu patch), as Vulkan's dynamic
+/// state. The engine's shadows use about two hundred biases (by cascade and
+/// light): with them in the pipeline, each would be another pipeline.
+pub fn without_depth_bias(words: &[u32]) -> Box<[u32]> {
+    let mut words: Box<[u32]> = words.into();
+    for w in words.iter_mut().skip(3).take(3) {
+        *w = 0;
+    }
+    words
 }
 
 /// What a vertex buffer slot must hold for n elements: (n - 1) * stride + last.
@@ -239,8 +253,6 @@ impl Compiler {
         }
 
         let (topology, _) = format::topology(r.topology);
-        let triangles =
-            matches!(topology, wgpu::PrimitiveTopology::TriangleList | wgpu::PrimitiveTopology::TriangleStrip);
         let mut primitive = wgpu::PrimitiveState {
             topology,
             strip_index_format: match r.strip {
@@ -299,15 +311,6 @@ impl Compiler {
             }
             if r.read_only & 2 != 0 {
                 d.stencil.write_mask = 0;
-            }
-            if let Some(w) = &r.raster
-                && triangles
-            {
-                d.bias = wgpu::DepthBiasState {
-                    constant: w[3] as i32,
-                    slope_scale: f32::from_bits(w[5]),
-                    clamp: f32::from_bits(w[4]),
-                };
             }
             d
         });
@@ -553,7 +556,7 @@ impl Recipe {
             },
             blend: words("b")?,
             depth: words("d")?,
-            raster: words("r")?,
+            raster: words("r")?.map(|w| without_depth_bias(&w)),
             targets: v.get("rt")?.as_array()?.iter().map(|t| t.as_str().and_then(format::by_name)).collect(),
             samples: u("n").unwrap_or(1),
             depth_format: v.get("ds").and_then(Value::as_str).and_then(format::by_name),
@@ -593,7 +596,7 @@ mod tests {
     use super::*;
 
     fn caps(features: Features, norm16: bool, float32_filter: bool) -> Caps {
-        Caps { features, norm16, indirect: true, float32_filter }
+        Caps { features, norm16, indirect: true, float32_filter, depth_bias_clamp: true }
     }
 
     fn recipe() -> Recipe {

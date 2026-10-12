@@ -118,6 +118,8 @@ pub struct Bound {
     pub scissor: Option<[u32; 4]>,
     pub blend: Option<[f32; 4]>,
     pub stencil_ref: Option<u32>,
+    /// D3D words (bias, clamp, slope); zero: the pipelines' own (none).
+    pub depth_bias: [u32; 3],
 }
 
 /// A clear not recorded yet: the next pass that targets the subresource

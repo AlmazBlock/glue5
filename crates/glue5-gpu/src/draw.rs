@@ -346,7 +346,7 @@ impl Gpu {
                     strip,
                     blend: words(self.s.blend),
                     depth: words(self.s.depth_stencil),
-                    raster: words(self.s.raster),
+                    raster: words(self.s.raster).map(|w| pipeline::without_depth_bias(&w)),
                     targets: info.targets.clone(),
                     samples: info.samples,
                     depth_format: info.depth,
@@ -1053,6 +1053,12 @@ impl Gpu {
         };
         let blend = self.s.blend_factor;
         let stencil_ref = self.s.stencil_ref;
+        // The rasterizer state's depth bias, set on the pass rather than
+        // made part of the pipeline (see `pipeline::without_depth_bias`).
+        let depth_bias = match self.objs.state(self.s.raster).and_then(|r| r.words.get(3..6)) {
+            Some(&[constant, clamp, slope]) => [constant, if self.caps.depth_bias_clamp { clamp } else { 0 }, slope],
+            _ => [0; 3],
+        };
         let zero = if vbs.iter().any(|v| v.1.is_none()) { Some(self.dummies.vertices(&self.device)) } else { None };
         let bound = &mut self.bound;
         let pass = self.pass.as_mut().unwrap();
@@ -1116,6 +1122,15 @@ impl Gpu {
         if bound.stencil_ref != Some(stencil_ref) {
             pass.set_stencil_reference(stencil_ref);
             bound.stencil_ref = Some(stencil_ref);
+        }
+        if bound.depth_bias != depth_bias {
+            let [constant, clamp, slope] = depth_bias;
+            pass.set_depth_bias(wgpu::DepthBiasState {
+                constant: constant as i32,
+                slope_scale: f32::from_bits(slope),
+                clamp: f32::from_bits(clamp),
+            });
+            bound.depth_bias = depth_bias;
         }
         match indirect {
             Some((args, offset)) if kind == 4 => pass.draw_indexed_indirect(&args, offset),

@@ -55,6 +55,8 @@ pub struct Caps {
     pub indirect: bool,
     /// 32-bit float textures filterable (not on many mobile GPUs).
     pub float32_filter: bool,
+    /// Depth bias clamp (missing on some mobile GPUs).
+    pub depth_bias_clamp: bool,
 }
 
 impl Caps {
@@ -74,7 +76,9 @@ impl Caps {
                 features.contains(Features::FLOAT32_FILTERABLE)
             }
         });
-        Caps { features, norm16, indirect, float32_filter }
+        let depth_bias_clamp =
+            adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::DEPTH_BIAS_CLAMP);
+        Caps { features, norm16, indirect, float32_filter, depth_bias_clamp }
     }
 
     pub fn border(&self) -> bool {
