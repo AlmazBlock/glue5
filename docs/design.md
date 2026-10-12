@@ -72,7 +72,8 @@ cannot apply patch files directly to a dependency.
 
 The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes,
 a fixed memory base, a hook where traps occur and, on Windows, longjmp
-without unwinding. The wgpu-core patches clear usage scopes by their
+without unwinding and inline floating-point classification. The wgpu-core
+patches clear usage scopes by their
 members, stop pipelines from retaining shader modules and let a device
 poll wait for the GPU without holding the device's resource lock,
 reducing CPU work during pass encoding, memory use and stalls between
