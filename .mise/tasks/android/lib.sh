@@ -82,7 +82,8 @@ launch() {
     adb logcat -v brief --pid="$pid" &
     logcat=$!
     trap 'kill ${logcat:-} 2>/dev/null' EXIT
-    while [ "$(adb shell pidof -s "$package" || true)" = "$pid" ]; do sleep 1; done
+    # Waits on the device (polling through adb would log a line per call).
+    adb shell "while [ -d /proc/$pid ]; do sleep 1; done"
     sleep 1
     adb logcat -d -b crash -v brief -T "$since"
 }
