@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The shared icon (platform/shared/Glue5.icon): its two layers, which the
+     android tasks copy in as drawables. The five covers 0.82 of the visible
+     icon, as on iOS: the visible part is the middle 72 of the 108 dp. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/glue5_background" />
+    <foreground>
+        <inset android:drawable="@drawable/glue5_five" android:inset="22.6%" />
+    </foreground>
+    <monochrome>
+        <inset android:drawable="@drawable/glue5_five" android:inset="22.6%" />
+    </monochrome>
+</adaptive-icon>

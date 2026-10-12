@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#MISE description="Copy the game (data/ and the shaders) into the Android app's Android/data/<app>/files/game"
+#USAGE arg "[device]" help="Serial number (adb devices; default: the only one connected)"
+# From GLUE5_GAME_DIR (default ./game). Files already there and not older are
+# skipped, so an interrupted copy resumes.
+. "$(dirname "$0")/lib.sh"
+
+sdk_packages
+if [ -n "${usage_device:-}" ]; then export ANDROID_SERIAL=$usage_device; fi
+game=$(cd "${GLUE5_GAME_DIR:-game}" && pwd -P)
+dest=/sdcard/Android/data/$package/files/game
+# What the app reads: data/ and each build's translated shaders.
+items=(data)
+for shaders in "$game"/b/*/shaders; do
+    if [ -f "$shaders/index.json" ]; then items+=("${shaders#"$game"/}"); fi
+done
+for item in "${items[@]}"; do
+    echo "copying $item (files already there are skipped)"
+    adb shell mkdir -p "$dest/$(dirname "$item")"
+    adb push --sync "$game/$item" "$dest/$(dirname "$item")/"
+done

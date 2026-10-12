@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Launch the installed Android app again, with its log"
+#MISE raw=true
+#USAGE arg "[device]" help="Serial number (adb devices; default: the only one connected)"
+. "$(dirname "$0")/lib.sh"
+
+sdk_packages
+if [ -n "${usage_device:-}" ]; then export ANDROID_SERIAL=$usage_device; fi
+launch

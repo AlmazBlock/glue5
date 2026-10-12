@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#MISE description="Build the Android app, install it on the device and launch it with its log"
+#MISE depends=["setup"]
+#MISE raw=true
+#USAGE arg "[device]" help="Serial number (adb devices; default: the only one connected)"
+. "$(dirname "$0")/lib.sh"
+
+sdk_packages
+android_libs
+android_apk
+if [ -n "${usage_device:-}" ]; then export ANDROID_SERIAL=$usage_device; fi
+adb install -r "$apk"
+echo "the game goes in Android/data/$package/files/game on the device: mise run android:game"
+launch
