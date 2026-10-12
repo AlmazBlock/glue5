@@ -46,6 +46,8 @@ pub struct Batch {
 pub struct Present {
     /// Its colour as stored (sRGB formats read raw).
     pub view: wgpu::TextureView,
+    /// For MetalFX.
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
     pub texture: wgpu::Texture,
     pub width: u32,
     pub height: u32,

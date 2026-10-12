@@ -93,6 +93,7 @@ pub struct Status<'a> {
     pub window: (u32, u32),
     pub metalfx: bool,
     /// Apple's Metal HUD can show (it was on at launch).
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
     pub metal_hud: bool,
     /// The display's refresh rate at most, in Hz.
     pub refresh_rate: f32,
