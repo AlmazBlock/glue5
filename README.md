@@ -91,6 +91,7 @@ debug and release builds; later builds only recompile what changed.
 | Run without a window: scripted input, PNG shots, statistics | `mise run headless --press 30 start --for 40 --shots 300 shots` (`mise run headless -- --help` lists the options) |
 | Tests | `mise run test`; every translated shader through the adapter and naga's validator: `mise run test:shaders` |
 | Merge recorded pipelines into the app's seed | `mise run shaders:seed <pipelines.jsonl>...` |
+| Record pipelines on automated runs (benchmark, map tour, graphics settings) into the seed | `mise run shaders:collect [default low min mid high max random]` |
 | iOS: build, sign, install, launch on the connected device | `mise run ios [device]` |
 | iOS: only check that the app builds | `mise run ios:build` |
 | iOS: launch the installed app again, with its console | `mise run ios:run [device]` |
@@ -197,9 +198,16 @@ the game starts, Play compiles the pipelines known for it (the app's seed,
 `crates/glue5-gpu/seed/`, and the recorded ones) while the start page shows
 how far it is: minutes on a phone's first run (an iPhone 13 Pro takes ~200 ms
 of CPU per pipeline the system has not seen), about a second after, when
-Metal's system cache or the saved Vulkan pipeline cache has them. Merge
-recordings from new playthroughs into the seed with
-`mise run shaders:seed <pipelines.jsonl>...`.
+Metal's system cache or the saved Vulkan pipeline cache has them. Recipes
+are the same on every device (each makes its own pipeline of one), so the
+seed is grown on a computer: `mise run shaders:collect` runs the game
+headless with sets of graphics settings (a new player's, the low-memory
+devices', every setting at its minimum, middle, high and maximum level, and
+random combinations), each time through the game's benchmark (a fly-through
+of the map) and a tour of the map (`crates/glue5/examples/tour.txt`:
+interiors, city, countryside, water, at several hours and weathers), and
+merges what they drew into the seed (about two hours). Recordings from
+playthroughs on devices go in with `mise run shaders:seed <pipelines.jsonl>...`.
 
 ## Platforms
 

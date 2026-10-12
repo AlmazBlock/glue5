@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#MISE description="Record pipeline recipes on automated runs (benchmark, map tour) at many graphics settings, into the app's seed"
+#MISE depends=["setup"]
+#USAGE arg "[configs]..." var=#true help="default low min mid high max random (all when none)"
+set -euo pipefail
+# Every pipeline the game makes has to be compiled before it draws: those
+# known in advance (the seed) compile before the game starts, the others
+# while playing, their draws missing meanwhile. This finds them without
+# anyone playing: headless runs with each set of graphics settings, each
+# one the game's benchmark (a fly-through of the map) and a tour of the map
+# (crates/glue5/examples/tour.txt: interiors, city, countryside, water, at
+# hours and weathers), every frame drawn (--sync-pipelines). Recipes are the
+# same on every device (`Recipe::for_device`): collected here, they serve
+# phones too.
+#
+# Configurations: default (a new player's), low (the low-memory devices'),
+# min, mid, high, max (every setting at that level), and random (more
+# combinations, benchmark only: COLLECT_RANDOM of them, 6 by default, from
+# COLLECT_SEED). About 15 minutes each, 4 for a random one.
+
+stay=${COLLECT_STAY:-12}
+tour=crates/glue5/examples/tour.txt
+out="${TMPDIR:-/tmp/}"
+out="${out%/}/glue5-collect"
+export GLUE5_GAME_DIR="${GLUE5_GAME_DIR:-$PWD/game}"
+
+cargo build -r --example headless
+exe=target/release/examples/headless
+
+# Every level of each setting: (name, lowest, highest); booleans apart.
+levels=(
+    "ShaderQuality 0 2" "ShadowQuality 1 3" "ReflectionQuality 0 3" "SSAO 0 2" "ParticleQuality 0 2"
+    "WaterQuality 0 2" "GrassQuality 0 3" "PostFX 0 3" "Shadow_SoftShadows 0 5"
+)
+switches=(FXAA_Enabled Lighting_FogVolumes DoF Shadow_ParticleShadows Shadow_LongShadows UltraShadows_Enabled Reflection_MipBlur)
+# The settings at level i of 3: each setting's own range, scaled.
+at_level() {
+    local i=$1 s=() name lo hi
+    for l in "${levels[@]}"; do
+        read -r name lo hi <<<"$l"
+        s+=("$name=$((lo + (hi - lo) * i / 3))")
+    done
+    for name in "${switches[@]}"; do
+        s+=("$name=$([ "$i" -ge 2 ] && echo true || echo false)")
+    done
+    s+=("MotionBlurStrength=$([ "$i" -ge 2 ] && echo 1.000000 || echo 0.000000)")
+    # The most to draw at the top level: density, variety, distance.
+    if [ "$i" = 3 ]; then
+        s+=(CityDensity=1.000000 PedVarietyMultiplier=1.000000 VehicleVarietyMultiplier=1.000000)
+        s+=(LodScale=1.000000 MaxLodScale=1.000000)
+    fi
+    echo "${s[@]}"
+}
+RANDOM=${COLLECT_SEED:-1}
+random_settings() {
+    local s=() name lo hi
+    for l in "${levels[@]}"; do
+        read -r name lo hi <<<"$l"
+        s+=("$name=$((lo + RANDOM % (hi - lo + 1)))")
+    done
+    for name in "${switches[@]}"; do
+        s+=("$name=$([ $((RANDOM % 2)) = 1 ] && echo true || echo false)")
+    done
+    echo "${s[@]}"
+}
+
+# One run: name, what to do (bench or tour), then settings and options.
+recorded=()
+run() {
+    local name=$1 kind=$2 dir="$out/$1-$2" args=()
+    shift 2
+    for a in "$@"; do
+        case $a in
+            --*) args+=("$a") ;;
+            *) args+=(--setting "$a") ;;
+        esac
+    done
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    case $kind in
+        bench) args+=(--for 480) ;;
+        tour)
+            local stops
+            stops=$(grep -cvE '^[[:space:]]*(#|$)' "$tour")
+            args+=(--sandbox --tour "$tour" "$stay" --for $((stops * stay + 180)))
+            # Along the way: the phone, the map (the pause menu: START opens
+            # it, B closes it) and the camera's views.
+            args+=(--press 45 up --press 52 east --press 60 start --press 75 east --press 77 east)
+            args+=(--press 95 select --press 110 select)
+            ;;
+    esac
+    printf '%-24s' "$name $kind"
+    local t0=$SECONDS status=0
+    GLUE5_ENGINE_ARGS="${engine_args[*]:-}" "$exe" --sync-pipelines --user-dir "$dir" "${args[@]}" >"$dir/log.txt" 2>&1 ||
+        status=$?
+    local file="$dir/cache/pipelines.jsonl" n=0 total
+    [ -f "$file" ] && n=$(wc -l <"$file" | tr -d ' ') && recorded+=("$file")
+    total=$( ((${#recorded[@]})) && cat "${recorded[@]}" | sort -u | wc -l | tr -d ' ' || echo 0)
+    printf '%5d s  %5d new recipes, %5d in all runs%s\n' $((SECONDS - t0)) "$n" "$total" \
+        "$([ $status = 0 ] || echo "  FAILED (exit $status, $dir/log.txt)")"
+}
+config() {
+    local name=$1
+    shift
+    engine_args=(-benchmark -benchmarkIterations=1)
+    run "$name" bench "$@"
+    [[ $name = random* ]] && return
+    engine_args=()
+    run "$name" tour "$@"
+}
+
+configs=("$@")
+[ ${#configs[@]} = 0 ] && configs=(default low min mid high max random)
+echo "runs in $out"
+for c in "${configs[@]}"; do
+    case $c in
+        default) config default ;;
+        low) config low --low ;;
+        min) config min $(at_level 0) ;;
+        mid) config mid $(at_level 1) ;;
+        high) config high $(at_level 2) ;;
+        max) config max $(at_level 3) ;;
+        random)
+            for i in $(seq "${COLLECT_RANDOM:-6}"); do
+                settings=$(random_settings)
+                echo "random$i: $settings"
+                config "random$i" $settings
+            done
+            ;;
+        *) echo "unknown configuration $c" >&2 && exit 1 ;;
+    esac
+done
+if ((${#recorded[@]})); then
+    .mise/tasks/shaders/seed "${recorded[@]}"
+fi
