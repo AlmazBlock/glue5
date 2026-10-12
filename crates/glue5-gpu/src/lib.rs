@@ -325,7 +325,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
     let Device { adapter, device, queue, features: _, profile } = gpu;
     device.on_uncaptured_error(error_handler(Some(ring)));
     let caps = compiler.caps;
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(2).clamp(2, 6);
+    let threads = glue5_runtime::cores().saturating_sub(2).clamp(2, 6);
     let staging = Arc::new(done::StagingPool::default());
     let limits = device.limits();
     let window = output.is_some();

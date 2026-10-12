@@ -32,6 +32,14 @@ use anyhow::{Context, Result};
 
 pub use glue5_game::GAME_BUILD;
 
+/// The CPU cores the process may use, asked once: on Linux and Android the
+/// standard library reads the cgroup quotas each time, which Android's
+/// sandbox denies (and logs).
+pub fn cores() -> usize {
+    static CORES: OnceLock<usize> = OnceLock::new();
+    *CORES.get_or_init(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+}
+
 /// The game directory's layout, as the whale5 server serves it: the engine's
 /// files under `data/`, this build's translated shaders under
 /// `b/<build>/shaders/`.

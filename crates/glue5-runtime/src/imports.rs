@@ -139,7 +139,7 @@ pub unsafe extern "C" fn emscripten_resize_heap(_: *mut Env, requested: u64) -> 
 pub unsafe extern "C" fn emscripten_num_logical_cores(_: *mut Env) -> u32 {
     // All of them: the browser's low-memory profile reported 2 because each
     // Web Worker was a heavy instance; native threads are not.
-    std::thread::available_parallelism().map_or(4, |n| n.get()) as u32
+    crate::cores() as u32
 }
 
 pub unsafe extern "C" fn emscripten_stack_snapshot(_: *mut Env) -> u64 {

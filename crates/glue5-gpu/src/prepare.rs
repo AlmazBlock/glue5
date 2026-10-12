@@ -46,7 +46,7 @@ pub(crate) fn prepare(gpu: &Device, settings: &Settings, progress: &Progress) ->
     progress.total.store(recipes.len(), Ordering::Relaxed);
     let cells: Vec<Arc<Cell>> = recipes.iter().map(|_| Arc::new(OnceLock::new())).collect();
     let next = AtomicUsize::new(0);
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let threads = glue5_runtime::cores();
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {

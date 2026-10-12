@@ -36,7 +36,7 @@ pub fn decode(bc: Bc, src: &[u8], src_bpr: usize, src_rows: usize, cols: usize, 
     // Block rows, all layers: split into bands across threads for big uploads.
     let jobs: Vec<(usize, &mut [u8])> = out.chunks_mut(band).enumerate().collect();
     let threads = if cols * rows * layers >= 4096 {
-        std::thread::available_parallelism().map_or(1, |n| n.get()).min(8)
+        glue5_runtime::cores().min(8)
     } else {
         1
     };
