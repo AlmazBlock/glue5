@@ -40,6 +40,14 @@ trap handling around calls into the module, Emscripten's setjmp/longjmp
 wrappers (`invoke_*`) and an instance per thread. Trap handling uses setjmp
 and must stay in C.
 
+A longjmp crosses host frames: a trap or an Emscripten longjmp under a hook
+that called back into the module, or an import that unwinds on purpose
+(`emscripten_exit_with_live_runtime`). On Unix it only restores registers.
+MSVC's longjmp instead unwinds like an exception, running the handlers of
+those frames, and Rust aborts in an `extern "C"` function it unwinds. On
+Windows the jump buffers lose their frame before the jump, which makes the
+CRT's longjmp behave as everywhere else (`glue5.h`, `patches/wabt/0006`).
+
 On Windows the C is compiled with clang-cl, Clang with MSVC's command line,
 headers and ABI, and linked by link.exe with the Rust side. cl.exe
 truncates identifiers past 2047 characters, which the engine's mangled
@@ -62,8 +70,9 @@ We patch wasm2c, wgpu-core and wgpu-hal. The patch files live in
 `patches/` and `mise run setup` applies them to pinned sources. Cargo
 cannot apply patch files directly to a dependency.
 
-The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes
-and a fixed memory base. The wgpu-core patches clear usage scopes by their
+The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes,
+a fixed memory base, a hook where traps occur and, on Windows, longjmp
+without unwinding. The wgpu-core patches clear usage scopes by their
 members, stop pipelines from retaining shader modules and let a device
 poll wait for the GPU without holding the device's resource lock,
 reducing CPU work during pass encoding, memory use and stalls between

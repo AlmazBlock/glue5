@@ -22,8 +22,14 @@ struct w2c_wasi__snapshot__preview1 {
 };
 
 /* Lightweight setjmp for Emscripten's setjmp/longjmp emulation: no signal
- * mask save/restore. */
-#if defined(_WIN32)
+ * mask save/restore. On Windows, no unwinding either: the CRT's longjmp
+ * unwinds like an exception through the frames in between (the host's
+ * among them, and Rust aborts there) unless the jmp_buf has no frame
+ * (see patches/wabt/0006, the same for traps). */
+#if defined(_WIN32) && (defined(_M_X64) || defined(_M_ARM64))
+#define GLUE5_SETJMP(b) setjmp(b)
+#define GLUE5_LONGJMP(b, v) (((_JUMP_BUFFER*)(b))->Frame = 0, longjmp(b, v))
+#elif defined(_WIN32)
 #define GLUE5_SETJMP(b) setjmp(b)
 #define GLUE5_LONGJMP(b, v) longjmp(b, v)
 #else
