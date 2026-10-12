@@ -11,7 +11,6 @@ glue5-runtime.workspace = true
 anyhow.workspace = true
 log.workspace = true
 bcdec_rs = "0.2"
-ctt-etcpak = "0.6"
 bytemuck = "1"
 egui.workspace = true
 egui-wgpu.workspace = true
@@ -24,10 +23,6 @@ serde_json.workspace = true
 wgpu = { workspace = true, features = ["std", "parking_lot", "metal", "vulkan", "wgsl"] }
 
 # MetalFX upscaling and paced presenting, through the Metal objects wgpu uses.
-[target.'cfg(not(target_vendor = "apple"))'.dependencies]
-# wgpu-hal's Vulkan bindings, for VK_EXT_device_fault (fault.rs).
-ash = "0.38"
-
 [target.'cfg(target_vendor = "apple")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"

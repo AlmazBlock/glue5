@@ -35,8 +35,6 @@ android {
         release {
             // For development devices, as the iOS app: the debug key.
             signingConfig = signingConfigs.getByName("debug")
-            // For lldb (`mise run android:lldb`): glue5.debuggable=true.
-            isDebuggable = providers.gradleProperty("glue5.debuggable").orNull == "true"
         }
     }
 
@@ -46,10 +44,6 @@ android {
         res.srcDirs("res", generated.resolve("res"))
         jniLibs.srcDirs(generated.resolve("jniLibs"))
     }
-
-    // lldb finds the libraries as files: a debuggable build has them
-    // extracted on install (otherwise mapped from inside the APK).
-    packaging.jniLibs.useLegacyPackaging = providers.gradleProperty("glue5.debuggable").orNull == "true"
 
     lint {
         // Not on every release build (it is slow): `gradle lint` by hand.

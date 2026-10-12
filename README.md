@@ -100,7 +100,6 @@ debug and release builds; later builds only recompile what changed.
 | Android: only build the APK | `mise run android:build` |
 | Android: launch the installed app again, with its log | `mise run android:run [device]` |
 | Android: copy the game into the app's Android/data/local.glue5/files/game | `mise run android:game [device]` |
-| Android: attach lldb to the running app (installed with `GLUE5_ANDROID_DEBUGGABLE=1`) | `mise run android:lldb -- [lldb args]` |
 
 `mise tasks` lists them all. iOS signing uses the team in `GLUE5_TEAM`:
 put it in `.mise/config.local.toml` (ignored by git) under `[env]`. With several
@@ -139,10 +138,7 @@ activate it; the plist alone does not guarantee activation. See Apple's
 The app and headless runner accept these environment variables.
 `mise run ios` and `ios:run` forward `RUST_LOG` and `GLUE5_*` variables
 to the device; so do `mise run android` and `android:run` (as the launch
-intent's extras), with `WGPU_*` too: `WGPU_VALIDATION=1` turns on the Vulkan
-validation layer of a build made with `GLUE5_ANDROID_LAYERS=<dir>` (the
-`arm64-v8a` directory's parent from Khronos' Vulkan-ValidationLayers
-Android release).
+intent's extras).
 
 | Variable | Effect |
 |---|---|
@@ -152,8 +148,7 @@ Android release).
 | `GLUE5_ENGINE_ARGS` | More engine switches, e.g. `-FrameQueueLimit=2`. |
 | `GLUE5_GPU_PROFILE=1` | GPU time per pass in the statistics. |
 | `GLUE5_PLAY=1` | Start the game without the start page (as `--play`; on a phone too). |
-| `GLUE5_NO_BC=1`, `GLUE5_NO_FLOAT32_FILTER=1` | Mobile GPU fallbacks on a desktop GPU: BC textures decoded on the CPU (and re-encoded as ETC2 where the GPU has it), 32-bit float textures unfiltered. |
-| `GLUE5_NO_ETC2=1` | Decoded BC textures stay RGBA8 instead of ETC2. |
+| `GLUE5_NO_BC=1`, `GLUE5_NO_FLOAT32_FILTER=1` | Mobile GPU fallbacks on a desktop GPU: BC textures decoded on the CPU, 32-bit float textures unfiltered. |
 | `GAMERESOURCEMB`, `KEEPTHREADS` | The engine's module settings (`gameResourceMB`, `keepThreads`), read like the browser build reads them under Node. |
 | `GLUE5_ALLOW_UNKNOWN_BUILD=1` | Build against a `game.wasm` other than the supported one. |
 | `GLUE5_TEAM` | Apple development team id, to sign the iOS app. |

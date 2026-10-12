@@ -15,8 +15,6 @@ mod bc;
 mod done;
 mod draw;
 mod exec;
-#[cfg(not(target_vendor = "apple"))]
-mod fault;
 mod format;
 #[cfg(target_vendor = "apple")]
 mod metalfx;
@@ -135,7 +133,6 @@ fn drain(ring: GpuRing) {
 
 const WANTED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
     .union(wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D)
-    .union(wgpu::Features::TEXTURE_COMPRESSION_ETC2)
     .union(wgpu::Features::DEPTH32FLOAT_STENCIL8)
     .union(wgpu::Features::FLOAT32_FILTERABLE)
     .union(wgpu::Features::INDIRECT_FIRST_INSTANCE)
@@ -243,35 +240,22 @@ impl Device {
             // Test the CPU decoding path of devices without BC compression.
             features.remove(wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D);
         }
-        if std::env::var_os("GLUE5_NO_ETC2").is_some() {
-            // BC textures, where decoded, kept as RGBA8 (not re-encoded).
-            features.remove(wgpu::Features::TEXTURE_COMPRESSION_ETC2);
-        }
         let profile = std::env::var_os("GLUE5_GPU_PROFILE").is_some()
             && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         if profile {
             features |= wgpu::Features::TIMESTAMP_QUERY;
         }
-        let desc = wgpu::DeviceDescriptor {
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("glue5"),
             required_features: features,
             required_limits: adapter.limits(),
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
-        };
-        #[cfg(target_vendor = "apple")]
-        let (device, queue) = pollster::block_on(adapter.request_device(&desc)).context("creating the GPU device")?;
-        #[cfg(not(target_vendor = "apple"))]
-        let (device, queue, faults) = fault::request_device(&adapter, &desc)?;
+        }))
+        .context("creating the GPU device")?;
         log::info!("gpu: {} ({:?}, {}), features {:?}", info.name, info.backend, info.driver_info, features);
         device.on_uncaptured_error(error_handler(None));
-        device.set_device_lost_callback(move |reason, message| {
-            log::error!("gpu: device lost ({reason:?}): {message}");
-            #[cfg(not(target_vendor = "apple"))]
-            if let Some(faults) = &faults {
-                faults.report();
-            }
-        });
+        device.set_device_lost_callback(|reason, message| log::error!("gpu: device lost ({reason:?}): {message}"));
         Ok(Device { adapter, device, queue, features, profile })
     }
 }

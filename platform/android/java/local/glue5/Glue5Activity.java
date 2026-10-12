@@ -10,14 +10,14 @@ import org.libsdl.app.SDLActivity;
 public class Glue5Activity extends SDLActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        // The same switches as a desktop run, RUST_LOG, GLUE5_* and WGPU_*: string
+        // The same switches as a desktop run, RUST_LOG and GLUE5_*: string
         // extras of the launch intent (`mise run android:run` passes them),
         // set in the environment before SDL starts the library's main.
         Bundle extras = getIntent().getExtras();
         if (extras != null) {
             for (String key : extras.keySet()) {
                 String value = extras.getString(key);
-                if (value != null && (key.equals("RUST_LOG") || key.startsWith("GLUE5_") || key.startsWith("WGPU_"))) {
+                if (value != null && (key.equals("RUST_LOG") || key.startsWith("GLUE5_"))) {
                     try {
                         Os.setenv(key, value, true);
                     } catch (ErrnoException e) {
