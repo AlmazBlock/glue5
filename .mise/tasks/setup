@@ -9,6 +9,7 @@ set -euo pipefail
 # The crates.io releases the patches in patches/<name> apply to: name,
 # version and the sha256 of the crates.io archive.
 crates=(
+    "wgpu 30.0.1 527ccdf43dd5b2e8676eed9984ce00e2bbb0a1b85b70c1969dcb6cd2eb55ab9e"
     "wgpu-core 30.0.1 14c018fce9b6270aa203c2fdd56f3cce996713534bd757e4ea58c8560b121f14"
     "wgpu-hal 30.0.1 b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
 )

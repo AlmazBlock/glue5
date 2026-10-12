@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# third_party/wgpu-core and wgpu-hal are prepared by `mise run setup`; this
+# third_party/wgpu, wgpu-core and wgpu-hal are prepared by `mise run setup`; this
 # workspace needs them before it can load.
 exclude = ["third_party"]
 default-members = ["crates/glue5"]
@@ -40,8 +40,9 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 1
 
-# wgpu-core and wgpu-hal with our patches (patches/wgpu-core, patches/wgpu-hal)
-# on top of the releases, prepared by `mise run setup`.
+# wgpu, wgpu-core and wgpu-hal with our patches (patches/<name>) on top of
+# the releases, prepared by `mise run setup`.
 [patch.crates-io]
+wgpu = { path = "third_party/wgpu" }
 wgpu-core = { path = "third_party/wgpu-core" }
 wgpu-hal = { path = "third_party/wgpu-hal" }

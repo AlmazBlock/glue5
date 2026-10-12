@@ -1,5 +1,7 @@
 /target
 /game
+/third_party/wgpu
+/third_party/wgpu.tmp
 /third_party/wgpu-core
 /third_party/wgpu-core.tmp
 /third_party/wgpu-hal
