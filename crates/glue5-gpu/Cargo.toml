@@ -10,6 +10,7 @@ publish.workspace = true
 glue5-runtime.workspace = true
 anyhow.workspace = true
 log.workspace = true
+arrayvec = "0.7"
 bcdec_rs = "0.2"
 bytemuck = "1"
 egui.workspace = true

@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use arrayvec::ArrayVec;
 use glue5_runtime::gpu::Command;
 use glue5_runtime::qos::{self, Qos};
 use rustc_hash::FxHashMap;
@@ -953,7 +954,8 @@ impl Gpu {
 
         let epoch = self.epoch;
         let mut avail = [0u64; 16];
-        let mut vbs: Vec<(u32, Option<(wgpu::Buffer, u32)>, u64)> = Vec::new();
+        // On the stack: thousands of draws a frame.
+        let mut vbs: ArrayVec<(u32, Option<(wgpu::Buffer, u32)>, u64), 16> = ArrayVec::new();
         let layout = self.objs.layout(self.s.layout).unwrap_or(&NO_LAYOUT);
         for &(slot, class) in &layout.slots {
             let v = self.s.vb[slot as usize];
