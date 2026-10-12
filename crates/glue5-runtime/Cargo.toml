@@ -10,4 +10,8 @@ publish.workspace = true
 glue5-game.workspace = true
 anyhow.workspace = true
 log.workspace = true
+# The system's time zone, the same way on every platform.
+jiff = "0.2"
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"

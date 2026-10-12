@@ -1,6 +1,13 @@
 //! Clocks and time zones, as the browser provides them.
+//!
+//! The system's time zone comes from jiff, the same on every platform: C's
+//! `localtime_r`/`mktime` differ between them (Windows has no `tm_gmtoff`).
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use jiff::civil::{Date, DateTime};
+use jiff::tz::TimeZone;
+use jiff::{Span, Timestamp, Zoned};
 
 use crate::memory::Mem;
 
@@ -38,83 +45,91 @@ const TM_YDAY: u64 = 28;
 const TM_ISDST: u64 = 32;
 const TM_GMTOFF: u64 = 40;
 
-#[cfg(unix)]
-fn host_tm(t: i64, local: bool) -> Option<libc::tm> {
-    let t = t as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let ok = unsafe { if local { libc::localtime_r(&t, &mut tm) } else { libc::gmtime_r(&t, &mut tm) } };
-    (!ok.is_null()).then_some(tm)
-}
-
-#[cfg(unix)]
-#[allow(clippy::useless_conversion)] // tm_gmtoff is a C long: not i64 everywhere
-fn write_tm(mem: Mem, at: u64, tm: &libc::tm, local: bool) {
-    mem.set_i32(at + TM_SEC, tm.tm_sec);
-    mem.set_i32(at + TM_MIN, tm.tm_min);
-    mem.set_i32(at + TM_HOUR, tm.tm_hour);
-    mem.set_i32(at + TM_MDAY, tm.tm_mday);
-    mem.set_i32(at + TM_MON, tm.tm_mon);
-    mem.set_i32(at + TM_YEAR, tm.tm_year);
-    mem.set_i32(at + TM_WDAY, tm.tm_wday);
-    mem.set_i32(at + TM_YDAY, tm.tm_yday);
+fn write_tm(mem: Mem, at: u64, z: &Zoned, local: bool) {
+    mem.set_i32(at + TM_SEC, z.second().into());
+    mem.set_i32(at + TM_MIN, z.minute().into());
+    mem.set_i32(at + TM_HOUR, z.hour().into());
+    mem.set_i32(at + TM_MDAY, z.day().into());
+    mem.set_i32(at + TM_MON, i32::from(z.month()) - 1);
+    mem.set_i32(at + TM_YEAR, i32::from(z.year()) - 1900);
+    mem.set_i32(at + TM_WDAY, z.weekday().to_sunday_zero_offset().into());
+    mem.set_i32(at + TM_YDAY, i32::from(z.day_of_year()) - 1);
     if local {
-        mem.set_i32(at + TM_ISDST, tm.tm_isdst.max(0));
-        mem.set_i64(at + TM_GMTOFF, i64::from(tm.tm_gmtoff));
+        let dst = z.time_zone().to_offset_info(z.timestamp()).dst().is_dst();
+        mem.set_i32(at + TM_ISDST, dst as i32);
+        mem.set_i64(at + TM_GMTOFF, z.offset().seconds().into());
     }
 }
 
+fn zone(local: bool) -> TimeZone {
+    if local { TimeZone::system() } else { TimeZone::UTC }
+}
+
 /// `_localtime_js` / `_gmtime_js`.
-#[cfg(unix)]
 pub(crate) fn tm_from_time(mem: Mem, t: i64, at: u64, local: bool) -> u32 {
-    match host_tm(t, local) {
-        Some(tm) => {
-            write_tm(mem, at, &tm, local);
+    match Timestamp::from_second(t) {
+        Ok(ts) => {
+            write_tm(mem, at, &ts.to_zoned(zone(local)), local);
             0
         }
-        None => 1,
+        Err(_) => 1,
     }
 }
 
 /// `_mktime_js`: normalises the struct in place, returns the time (or -1).
-#[cfg(unix)]
 pub(crate) fn mktime(mem: Mem, at: u64) -> i64 {
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    tm.tm_sec = mem.i32(at + TM_SEC);
-    tm.tm_min = mem.i32(at + TM_MIN);
-    tm.tm_hour = mem.i32(at + TM_HOUR);
-    tm.tm_mday = mem.i32(at + TM_MDAY);
-    tm.tm_mon = mem.i32(at + TM_MON);
-    tm.tm_year = mem.i32(at + TM_YEAR);
-    tm.tm_isdst = mem.i32(at + TM_ISDST);
-    let t = unsafe { libc::mktime(&mut tm) };
-    if t == -1 {
-        return -1;
-    }
-    write_tm(mem, at, &tm, true);
-    t as i64
+    let tz = TimeZone::system();
+    let Some(ts) = local_time(mem, at, &tz) else { return -1 };
+    write_tm(mem, at, &ts.to_zoned(tz), true);
+    ts.as_second()
 }
 
-/// UTC offset in minutes, JS style (positive west of UTC), at time `t`.
-#[cfg(unix)]
-#[allow(clippy::useless_conversion)] // tm_gmtoff is a C long: not i64 everywhere
-fn js_offset(t: i64) -> i64 {
-    host_tm(t, true).map_or(0, |tm| -i64::from(tm.tm_gmtoff) / 60)
+/// The time the struct's local fields name, out-of-range fields carried
+/// over (31 January + 1 month is 3 March), as C's `mktime` does. A
+/// `tm_isdst` of 0 or 1 that contradicts the zone at that time reads the
+/// fields with the other offset, as glibc and the browser build do.
+fn local_time(mem: Mem, at: u64, tz: &TimeZone) -> Option<Timestamp> {
+    let year = i16::try_from(mem.i32(at + TM_YEAR).checked_add(1900)?).ok()?;
+    let span = Span::new()
+        .try_months(mem.i32(at + TM_MON))
+        .ok()?
+        .try_days(mem.i32(at + TM_MDAY) - 1)
+        .ok()?
+        .try_hours(mem.i32(at + TM_HOUR))
+        .ok()?
+        .try_minutes(mem.i32(at + TM_MIN))
+        .ok()?
+        .try_seconds(mem.i32(at + TM_SEC))
+        .ok()?;
+    let civil = Date::new(year, 1, 1).ok()?.at(0, 0, 0, 0).checked_add(span).ok()?;
+    let ts = tz.to_ambiguous_timestamp(civil).compatible().ok()?;
+    let isdst = mem.i32(at + TM_ISDST);
+    if isdst < 0 || tz.to_offset_info(ts).dst().is_dst() == (isdst > 0) {
+        return Some(ts);
+    }
+    let (winter, summer) = year_offsets(tz, civil.year())?;
+    let (standard, daylight) = (winter.min(summer), winter.max(summer));
+    let wanted = if isdst > 0 { daylight } else { standard };
+    let actual = i64::from(tz.to_offset(ts).seconds());
+    Timestamp::from_second(ts.as_second() + actual - wanted).ok()
+}
+
+/// The zone's UTC offsets in seconds on 1 January and 1 July of `year`.
+fn year_offsets(tz: &TimeZone, year: i16) -> Option<(i64, i64)> {
+    let at = |month: i8| -> Option<i64> {
+        let civil: DateTime = Date::new(year, month, 1).ok()?.at(0, 0, 0, 0);
+        let ts = tz.to_ambiguous_timestamp(civil).compatible().ok()?;
+        Some(tz.to_offset(ts).seconds().into())
+    };
+    Some((at(1)?, at(7)?))
 }
 
 /// `_tzset_js(timezone, daylight, std_name, dst_name)`.
-#[cfg(unix)]
 pub(crate) fn tzset(mem: Mem, timezone: u64, daylight: u64, std_name: u64, dst_name: u64) {
-    let now = (date_now() / 1000.0) as i64;
-    let year = host_tm(now, true).map_or(70, |tm| tm.tm_year);
-    let at = |mon: i32| {
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        tm.tm_year = year;
-        tm.tm_mon = mon;
-        tm.tm_mday = 1;
-        tm.tm_isdst = -1;
-        unsafe { libc::mktime(&mut tm) as i64 }
-    };
-    let (winter, summer) = (js_offset(at(0)), js_offset(at(6)));
+    let tz = TimeZone::system();
+    let year = Timestamp::now().to_zoned(tz.clone()).year();
+    // JS offsets: minutes, positive west of UTC.
+    let (winter, summer) = year_offsets(&tz, year).map_or((0, 0), |(w, s)| (-w / 60, -s / 60));
     mem.set_u64(timezone, (winter.max(summer) * 60) as u64);
     mem.set_i32(daylight, (winter != summer) as i32);
     let zone = |off: i64| format!("UTC{}{:02}{:02}", if off >= 0 { '-' } else { '+' }, off.abs() / 60, off.abs() % 60);

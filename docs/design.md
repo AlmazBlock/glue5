@@ -62,9 +62,9 @@ functions by name. The Rust crate exposes the FFI bindings.
 
 SDL3 handles windows, input, gamepads, audio and dialogs. Other dependencies
 include wgpu, naga, egui, parking_lot_core for wasm futexes, bcdec_rs for BC
-decoding, png and serde_json. Project code implements the Emscripten system
-interface, translates the engine's command ring to wgpu, adapts the shaders
-and supplies touch controls.
+decoding, jiff for the system's time zone, png and serde_json. Project code
+implements the Emscripten system interface, translates the engine's command
+ring to wgpu, adapts the shaders and supplies touch controls.
 
 We patch wasm2c, wgpu-core and wgpu-hal. The patch files live in
 `patches/` and `mise run setup` applies them to pinned sources. Cargo
