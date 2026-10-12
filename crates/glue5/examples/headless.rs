@@ -37,8 +37,9 @@ it stops working (an engine thread's trap).
   --sandbox             start in the sandbox (the map, no story) instead of
                         the story mode
   --tour <file> <s>     visit the map: s seconds at each stop of file (lines
-                        `x y z hour weather [# name]`), the camera turning;
-                        the run ends after the last (use with --sandbox)
+                        `x y z hour weather [# name]`, z `ground`: on the
+                        ground there), the camera turning; the run ends
+                        after the last (use with --sandbox)
   --user-dir <dir>      saves, settings and the pipeline cache (default:
                         glue5-headless in the temporary directory)
   --audio               play the sound into a pretend device, as the app does
@@ -136,8 +137,8 @@ fn main() -> Result<()> {
         }
         glue5_gpu::backend(settings, None)
     };
-    // The camera turns all along the tour: the stick held half way.
-    let spin = if tour.is_some() { [0.5, 0.0] } else { [0.0; 2] };
+    // The camera turns all along the tour, as fast as the stick turns it.
+    let spin = if tour.is_some() { [1.0, 0.0] } else { [0.0; 2] };
     if let Some((stops, stay)) = tour {
         log::info!("tour: {} stops, {} s each", stops.len(), stay.as_secs_f64());
         glue5_runtime::tour::start(stops, stay);

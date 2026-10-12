@@ -72,4 +72,7 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("clock_set_time", "CClock::SetTime(int, int, int)"),
     ("weather_index", "CWeather::GetTypeIndex(unsigned int)"),
     ("weather_force_now", "CWeather::ForceTypeNow(int, unsigned int)"),
+    // The highest point of the map at x, y (buildings included; the sea's
+    // is below its surface): stops given without a height start above it.
+    ("height_max", "CGameWorldHeightMap::GetMaxHeightFromWorldHeightMap(float, float)"),
 ];

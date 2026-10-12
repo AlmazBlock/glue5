@@ -236,6 +236,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         clock_set_time: None,
         weather_index: None,
         weather_force_now: None,
+        height_max: None,
     };
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;

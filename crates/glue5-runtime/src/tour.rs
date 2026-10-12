@@ -17,6 +17,7 @@ use crate::memory::Mem;
 /// A place to visit: where, at what hour, in what weather (a name of the
 /// game's weather types: EXTRASUNNY, CLEAR, CLOUDS, SMOG, FOGGY, OVERCAST,
 /// RAIN, THUNDER, CLEARING, NEUTRAL, SNOW, BLIZZARD, SNOWLIGHT, XMAS).
+/// Without a height (NaN), the stop is on the ground, or skipped at sea.
 #[derive(Clone, Debug)]
 pub struct Stop {
     pub pos: [f32; 3],
@@ -47,7 +48,7 @@ pub fn finished() -> bool {
 }
 
 /// Parses a tour: one stop a line, `x y z hour weather`, then an optional
-/// name; `#` starts a comment.
+/// name; `#` starts a comment. `ground` as z: on the ground there.
 pub fn parse(text: &str) -> anyhow::Result<Vec<Stop>> {
     let mut stops = Vec::new();
     for (n, line) in text.lines().enumerate() {
@@ -59,7 +60,7 @@ pub fn parse(text: &str) -> anyhow::Result<Vec<Stop>> {
         let stop = (|| {
             let [x, y, z, hour, weather, ..] = words[..] else { anyhow::bail!("expected x y z hour weather") };
             Ok(Stop {
-                pos: [x.parse()?, y.parse()?, z.parse()?],
+                pos: [x.parse()?, y.parse()?, if z == "ground" { f32::NAN } else { z.parse()? }],
                 hour: hour.parse()?,
                 weather: weather.to_uppercase(),
                 name: comment.trim().to_string(),
@@ -88,23 +89,39 @@ pub(crate) unsafe extern "C" fn warp_update(env: *mut Env) {
         return;
     }
     let Some(stop) = tour.stops.get(tour.next) else { return };
-    if !unsafe { visit(env, stop) } {
+    let (n, of) = (tour.next + 1, tour.stops.len());
+    let Some(pos) = (unsafe { place(env, stop.pos) }) else {
+        log::info!("tour: stop {n}/{of} at sea, skipped");
+        tour.next += 1;
+        return;
+    };
+    if !unsafe { visit(env, pos, stop) } {
         return; // the warp manager is busy: next frame
     }
-    let (n, of) = (tour.next + 1, tour.stops.len());
     log::info!("tour: stop {n}/{of}, {} ({} h, {})", stop.name, stop.hour, stop.weather);
     tour.next += 1;
     tour.until = Some(Instant::now() + tour.stay);
 }
 
-/// Asks the warp manager to take the player to the stop, then sets the hour
-/// and weather. False if it could not start.
-unsafe fn visit(env: *mut Env, stop: &Stop) -> bool {
+/// Where to take the player for a stop at `pos`: a stop without a height
+/// starts above the highest point there (the warp puts the player on the
+/// ground below); `None` at sea (the highest point under the surface).
+unsafe fn place(env: *mut Env, pos: [f32; 3]) -> Option<[f32; 3]> {
+    if !pos[2].is_nan() {
+        return Some(pos);
+    }
+    let top = unsafe { orig::height_max(env, pos[0], pos[1]) };
+    (top > 0.0).then_some([pos[0], pos[1], top + 2.0])
+}
+
+/// Asks the warp manager to take the player to `pos` for the stop, then
+/// sets its hour and weather. False if it could not start.
+unsafe fn visit(env: *mut Env, pos: [f32; 3], stop: &Stop) -> bool {
     let Ok(top) = (unsafe { exports::emscripten_stack_get_current(env) }) else { return false };
     // Position and velocity, two rage::Vector3 (16 bytes each).
     let Ok(at) = (unsafe { exports::_emscripten_stack_alloc(env, 32) }) else { return false };
     let mem = unsafe { Mem::of(env) };
-    for (i, v) in [stop.pos[0], stop.pos[1], stop.pos[2], 0.0, 0.0, 0.0, 0.0, 0.0].iter().enumerate() {
+    for (i, v) in [pos[0], pos[1], pos[2], 0.0, 0.0, 0.0, 0.0, 0.0].iter().enumerate() {
         mem.set_u32(at + 4 * i as u64, v.to_bits());
     }
     // Heading, without a vehicle, snapped to the ground, the scene's radius
@@ -153,8 +170,10 @@ mod tests {
 
     #[test]
     fn parses_stops() {
-        let stops = parse("# comment\n\n-813.6 179.5 72.2 22 rain # Michael's house\n1 2 3 4 CLEAR\n").unwrap();
-        assert_eq!(stops.len(), 2);
+        let text = "# comment\n\n-813.6 179.5 72.2 22 rain # Michael's house\n1 2 3 4 CLEAR\n5 6 ground 7 RAIN\n";
+        let stops = parse(text).unwrap();
+        assert_eq!(stops.len(), 3);
+        assert!(stops[2].pos[2].is_nan());
         assert_eq!((stops[0].pos, stops[0].hour, stops[0].weather.as_str()), ([-813.6, 179.5, 72.2], 22, "RAIN"));
         assert_eq!(stops[0].name, "Michael's house");
         assert!(parse("1 2 3").is_err());
