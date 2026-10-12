@@ -136,7 +136,8 @@ activate it; the plist alone does not guarantee activation. See Apple's
 
 The app and headless runner accept these environment variables.
 `mise run ios` and `ios:run` forward `RUST_LOG` and `GLUE5_*` variables
-to the device.
+to the device; so do `mise run android` and `android:run` (as the launch
+intent's extras).
 
 | Variable | Effect |
 |---|---|

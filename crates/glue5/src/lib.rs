@@ -29,7 +29,13 @@ pub fn main() -> i32 {
     #[cfg(not(target_os = "android"))]
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     #[cfg(target_os = "android")]
-    android_logger::init_once(android_logger::Config::default().with_tag("glue5").with_max_level(log::LevelFilter::Info));
+    {
+        // RUST_LOG as on desktop (the launch intent's extras, see Glue5Activity).
+        let spec = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+        let filter = android_logger::FilterBuilder::new().parse(&spec).build();
+        let level = filter.filter();
+        android_logger::init_once(android_logger::Config::default().with_tag("glue5").with_max_level(level).with_filter(filter));
+    }
     // A host thread serving the engine (the renderer's, ...) that panics
     // leaves it waiting forever, as an engine thread's trap does.
     let report = std::panic::take_hook();

@@ -64,11 +64,18 @@ android_apk() {
 }
 
 # Launches the installed app and follows its log until it ends; then shows
-# a crash's report, if any.
+# a crash's report, if any. It gets the same switches as a desktop run:
+# RUST_LOG and the GLUE5_* variables, as the launch intent's extras.
 launch() {
-    local since pid logcat
+    local since pid logcat key extras=()
+    for key in RUST_LOG $(compgen -e | grep '^GLUE5_'); do
+        case $key in GLUE5_TEAM | GLUE5_GAME_DIR) continue ;; esac
+        [ -n "${!key:-}" ] || continue
+        # adb shell joins its arguments into one command line: quoted for it.
+        extras+=(--es "$key" "'${!key//\'/\'\\\'\'}'")
+    done
     since=$(adb shell date +%s.000)
-    adb shell am start -W -S -n "$package/.Glue5Activity" >/dev/null
+    adb shell am start -W -S -n "$package/.Glue5Activity" ${extras[@]+"${extras[@]}"} >/dev/null
     pid=$(adb shell pidof -s "$package") || die "the app did not start"
     adb logcat -v brief --pid="$pid" &
     logcat=$!
