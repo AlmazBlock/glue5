@@ -48,12 +48,19 @@ android_libs() {
     mkdir -p "$out/jniLibs/$abi" "$out/res/drawable-nodpi"
     # sdl3-sys puts libSDL3.so next to the crate's library.
     ln -f "target/$target/release/libglue5.so" "target/$target/release/libSDL3.so" "$out/jniLibs/$abi/"
+    # Vulkan layers (e.g. Khronos' validation layer, its Android release's
+    # arm64-v8a/libVkLayer_khronos_validation.so) from GLUE5_ANDROID_LAYERS:
+    # Android loads an app's own layers only when it is debuggable.
+    if [ -n "${GLUE5_ANDROID_LAYERS:-}" ]; then
+        cp "$GLUE5_ANDROID_LAYERS/$abi/"libVkLayer_*.so "$out/jniLibs/$abi/"
+        export GLUE5_ANDROID_DEBUGGABLE=1
+    fi
     cp platform/shared/Glue5.icon/Assets/01-background.png "$out/res/drawable-nodpi/glue5_background.png"
     cp platform/shared/Glue5.icon/Assets/02-five.png "$out/res/drawable-nodpi/glue5_five.png"
 }
 
 # The APK, signed with the debug key; it ends up in $apk. Debuggable (for
-# android:lldb) with GLUE5_ANDROID_DEBUGGABLE=1.
+# android:lldb, Vulkan layers) with GLUE5_ANDROID_DEBUGGABLE=1.
 android_apk() {
     # SDL's Java side, from the sdl3-src crate the libraries were built with.
     local sdl
@@ -70,8 +77,8 @@ android_apk() {
 # RUST_LOG and the GLUE5_* variables, as the launch intent's extras.
 launch() {
     local since pid logcat key extras=()
-    for key in RUST_LOG $(compgen -e | grep '^GLUE5_'); do
-        case $key in GLUE5_TEAM | GLUE5_GAME_DIR) continue ;; esac
+    for key in RUST_LOG $(compgen -e | grep -E '^(GLUE5|WGPU)_'); do
+        case $key in GLUE5_TEAM | GLUE5_GAME_DIR | GLUE5_ANDROID_*) continue ;; esac
         [ -n "${!key:-}" ] || continue
         # adb shell joins its arguments into one command line: quoted for it.
         extras+=(--es "$key" "'${!key//\'/\'\\\'\'}'")

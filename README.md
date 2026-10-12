@@ -139,7 +139,10 @@ activate it; the plist alone does not guarantee activation. See Apple's
 The app and headless runner accept these environment variables.
 `mise run ios` and `ios:run` forward `RUST_LOG` and `GLUE5_*` variables
 to the device; so do `mise run android` and `android:run` (as the launch
-intent's extras).
+intent's extras), with `WGPU_*` too: `WGPU_VALIDATION=1` turns on the Vulkan
+validation layer of a build made with `GLUE5_ANDROID_LAYERS=<dir>` (the
+`arm64-v8a` directory's parent from Khronos' Vulkan-ValidationLayers
+Android release).
 
 | Variable | Effect |
 |---|---|
