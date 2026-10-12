@@ -1,4 +1,4 @@
-From 90566b90ebd4426c46c7e8112624f25dd61d7f27 Mon Sep 17 00:00:00 2001
+From 39931c08f9ff979ee4c86a508c75a8d6f77c74a7 Mon Sep 17 00:00:00 2001
 From: mempage4k <mempage4k@users.noreply.github.com>
 Date: Mon, 12 Oct 2026 22:54:30 +0200
 Subject: [PATCH] wgpu-core: reuse command buffers' trackers
@@ -9,23 +9,24 @@ tables then grew over every buffer and texture index of the device: with
 largest cost left in encoding command buffers. The device now keeps the
 trackers of finished command buffers (EncoderInFlight's drop) and
 compute passes in a pool, cleared by their members as usage scopes are,
-their tables kept. The pool holds as many trackers as were in flight at
-once.
+their tables kept. Pending writes take theirs from the pool too, so that
+every tracker the pool gives comes back once; it keeps at most 32, more
+than are in flight at once.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/command/compute.rs |  6 ++----
  src/command/mod.rs     |  5 +----
- src/device/queue.rs    | 13 +++++++++++++
- src/device/resource.rs | 22 +++++++++++++++++++++-
+ src/device/queue.rs    | 15 ++++++++++++++-
+ src/device/resource.rs | 26 +++++++++++++++++++++++++-
  src/lock/rank.rs       |  5 +++++
  src/track/blas.rs      |  5 +++++
  src/track/buffer.rs    | 11 +++++++++++
- src/track/mod.rs       | 21 +++++++++++++++++++++
+ src/track/mod.rs       | 25 +++++++++++++++++++++++++
  src/track/query_set.rs |  5 +++++
  src/track/stateless.rs |  4 ++++
  src/track/texture.rs   | 13 +++++++++++++
- 11 files changed, 101 insertions(+), 9 deletions(-)
+ 11 files changed, 110 insertions(+), 10 deletions(-)
 
 diff --git a/src/command/compute.rs b/src/command/compute.rs
 index c4bc341..2312e90 100644
@@ -68,7 +69,7 @@ index c21880d..97f4cb9 100644
                      texture_memory_actions: Default::default(),
                      as_actions: Default::default(),
 diff --git a/src/device/queue.rs b/src/device/queue.rs
-index 1c0ac26..afe5ab7 100644
+index 1c0ac26..9b02985 100644
 --- a/src/device/queue.rs
 +++ b/src/device/queue.rs
 @@ -355,6 +355,19 @@ pub(crate) struct EncoderInFlight {
@@ -91,8 +92,17 @@ index 1c0ac26..afe5ab7 100644
  /// A private command encoder for writes made directly on the device
  /// or queue.
  ///
+@@ -474,7 +487,7 @@ impl PendingWrites {
+                     api: crate::command::EncodingApi::InternalUse,
+                     label: "(wgpu internal) PendingWrites command encoder".into(),
+                 },
+-                trackers: Tracker::new(device.ordered_buffer_usages, device.ordered_texture_usages),
++                trackers: device.new_tracker(),
+                 temp_resources: mem::take(&mut self.temp_resources),
+                 _indirect_draw_validation_resources: crate::indirect_validation::DrawResources::new(
+                     device.clone(),
 diff --git a/src/device/resource.rs b/src/device/resource.rs
-index 872f460..8cd5ff7 100644
+index 872f460..a108222 100644
 --- a/src/device/resource.rs
 +++ b/src/device/resource.rs
 @@ -54,7 +54,10 @@ use crate::{
@@ -102,7 +112,7 @@ index 872f460..8cd5ff7 100644
 -    track::{BindGroupStates, DeviceTracker, TrackerIndexAllocators, UsageScope, UsageScopePool},
 +    track::{
 +        BindGroupStates, DeviceTracker, Tracker, TrackerIndexAllocators, TrackerPool, UsageScope,
-+        UsageScopePool,
++        UsageScopePool, TRACKER_POOL_MAX,
 +    },
      validation::{self, check_color_attachment_count, PassthroughInterface, ShaderMetaData},
      weak_vec::WeakVec,
@@ -123,7 +133,7 @@ index 872f460..8cd5ff7 100644
              timestamp_normalizer: OnceCellOrLock::new(),
              indirect_validation,
          })
-@@ -5479,6 +5484,21 @@ impl Device {
+@@ -5479,6 +5484,25 @@ impl Device {
          )
      }
  
@@ -136,10 +146,14 @@ index 872f460..8cd5ff7 100644
 +            .unwrap_or_else(|| Tracker::new(self.ordered_buffer_usages, self.ordered_texture_usages))
 +    }
 +
-+    /// Empties a tracker [`Self::new_tracker`] gave and keeps it for reuse.
++    /// Empties a tracker [`Self::new_tracker`] gave and keeps it for reuse;
++    /// at most [`TRACKER_POOL_MAX`] are kept.
 +    pub(crate) fn recycle_tracker(&self, mut tracker: Tracker) {
 +        tracker.clear();
-+        self.tracker_pool.lock().push(tracker);
++        let mut pool = self.tracker_pool.lock();
++        if pool.len() < TRACKER_POOL_MAX {
++            pool.push(tracker);
++        }
 +    }
 +
      pub fn get_hal_counters(&self) -> wgt::HalCounters {
@@ -228,10 +242,10 @@ index abd185c..1892ac4 100644
      pub fn contains(&self, buffer: &Buffer) -> bool {
          self.metadata.contains(buffer.tracker_index().as_usize())
 diff --git a/src/track/mod.rs b/src/track/mod.rs
-index bc88a30..df78e4d 100644
+index bc88a30..0bd8bf4 100644
 --- a/src/track/mod.rs
 +++ b/src/track/mod.rs
-@@ -618,6 +618,12 @@ impl DeviceTracker {
+@@ -618,6 +618,16 @@ impl DeviceTracker {
      }
  }
  
@@ -241,10 +255,14 @@ index bc88a30..df78e4d 100644
 +/// compute pass).
 +pub(crate) type TrackerPool = Mutex<Vec<Tracker>>;
 +
++/// The most trackers a [`TrackerPool`] keeps: more than are in flight at once
++/// (each command buffer until the GPU is done with it).
++pub(crate) const TRACKER_POOL_MAX: usize = 32;
++
  /// A full double sided tracker used by CommandBuffers.
  pub(crate) struct Tracker {
      /// Buffers used within this command buffer.
-@@ -671,6 +677,21 @@ impl Tracker {
+@@ -671,6 +681,21 @@ impl Tracker {
          }
      }
  
