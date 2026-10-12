@@ -28,8 +28,11 @@ cargo build -r --example headless
 exe=target/release/examples/headless
 
 # Every level of each setting: (name, lowest, highest); booleans apart.
+# Shader quality Normal (0) stops the engine at its first frames: the
+# game's shaders lack its variants ("Required grmShaderGroupVar
+# 'DistortionParams' not found").
 levels=(
-    "ShaderQuality 0 2" "ShadowQuality 1 3" "ReflectionQuality 0 3" "SSAO 0 2" "ParticleQuality 0 2"
+    "ShaderQuality 1 2" "ShadowQuality 1 3" "ReflectionQuality 0 3" "SSAO 0 2" "ParticleQuality 0 2"
     "WaterQuality 0 2" "GrassQuality 0 3" "PostFX 0 3" "Shadow_SoftShadows 0 5"
 )
 switches=(FXAA_Enabled Lighting_FogVolumes DoF Shadow_ParticleShadows Shadow_LongShadows UltraShadows_Enabled Reflection_MipBlur)
@@ -44,11 +47,9 @@ at_level() {
         s+=("$name=$([ "$i" -ge 2 ] && echo true || echo false)")
     done
     s+=("MotionBlurStrength=$([ "$i" -ge 2 ] && echo 1.000000 || echo 0.000000)")
-    # The most to draw at the top level: density, variety, distance.
-    if [ "$i" = 3 ]; then
-        s+=(CityDensity=1.000000 PedVarietyMultiplier=1.000000 VehicleVarietyMultiplier=1.000000)
-        s+=(LodScale=1.000000 MaxLodScale=1.000000)
-    fi
+    # Density, variety and distance stay: more of the same pipelines, and
+    # all at their maximum the engine runs out of resource memory (10 GB
+    # process, "Invalid fixup" in streaming).
     echo "${s[@]}"
 }
 RANDOM=${COLLECT_SEED:-1}
@@ -78,7 +79,9 @@ run() {
     rm -rf "$dir"
     mkdir -p "$dir"
     case $kind in
-        bench) args+=(--for 480) ;;
+        # It ends by itself, after ~200 s on an idle Mac (much longer
+        # when the machine is short of memory).
+        bench) args+=(--for 900) ;;
         tour)
             local stops
             stops=$(grep -cvE '^[[:space:]]*(#|$)' "$tour")
