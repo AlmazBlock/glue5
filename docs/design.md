@@ -81,9 +81,11 @@ patches clear usage scopes and drop command buffers' trackers by their
 members, reuse those trackers, stop pipelines from retaining shader modules and let a device
 poll wait for the GPU without holding the device's resource lock,
 reducing CPU work during pass encoding, memory use and stalls between
-threads. The wgpu-hal patch makes occlusion queries count samples on Metal
-and Vulkan, as D3D11's do: the game measures the sun's visibility with
-them. We would like to submit these changes upstream.
+threads. The wgpu-hal patches make occlusion queries count samples on Metal
+and Vulkan, as D3D11's do (the game measures the sun's visibility with
+them), make the depth bias a pass's state, and keep Vulkan command pools to
+the command buffers their last use needed (on Mali each holds ~0.4 MB of
+host memory). We would like to submit these changes upstream.
 
 ## Game files are never in the app
 

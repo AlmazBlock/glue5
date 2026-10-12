@@ -1,0 +1,67 @@
+From 9638a2987d22d84e74aaf5007be82291075e0ecc Mon Sep 17 00:00:00 2001
+From: mempage4k <mempage4k@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 23:31:11 +0200
+Subject: [PATCH] wgpu-hal: Vulkan command pools keep the command buffers their
+ last use needed
+
+A command encoder's pool allocated command buffers 16 at a time and kept
+every one it ever had for reuse. wgpu-core hands its pooled encoders to
+whichever command encoder comes next, and records each pass into command
+buffers of its own (two a pass), so over time every pool grew to the
+biggest use of any. On Mali a command buffer's builder takes ~0.4 MB of
+host memory as soon as it is allocated: in a game with ~70 passes a
+frame, 25 pools held 1,300 command buffers, 556 MiB, plus 190 MiB of
+their command memory, and the process ran out of memory.
+
+Now they are allocated one at a time, and a reset frees the ones the
+pool did not use since the last: it keeps as many as its last use
+needed.
+---
+ src/vulkan/command.rs | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/vulkan/command.rs b/src/vulkan/command.rs
+index 0ccb1cd..c085445 100644
+--- a/src/vulkan/command.rs
++++ b/src/vulkan/command.rs
+@@ -4,7 +4,6 @@ use ash::vk;
+ use core::{mem, ops::Range};
+ use hashbrown::hash_map::Entry;
+ 
+-const ALLOCATION_GRANULARITY: u32 = 16;
+ const DST_IMAGE_LAYOUT: vk::ImageLayout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+ 
+ impl super::Texture {
+@@ -120,10 +119,12 @@ impl crate::CommandEncoder for super::CommandEncoder {
+     type A = super::Api;
+ 
+     unsafe fn begin_encoding(&mut self, label: crate::Label) -> Result<(), crate::DeviceError> {
++        // One at a time: a command buffer can be expensive (on Mali its
++        // builder takes ~0.4 MB of host memory as soon as it is allocated).
+         if self.free.is_empty() {
+             let vk_info = vk::CommandBufferAllocateInfo::default()
+                 .command_pool(self.raw)
+-                .command_buffer_count(ALLOCATION_GRANULARITY);
++                .command_buffer_count(1);
+             let cmd_buf_vec = unsafe {
+                 self.device
+                     .raw
+@@ -178,6 +179,15 @@ impl crate::CommandEncoder for super::CommandEncoder {
+         I: Iterator<Item = super::CommandBuffer>,
+     {
+         self.temp.clear();
++        // The command buffers not used since the last reset are freed: the
++        // pool keeps as many as its last use needed, not the most it ever
++        // needed. wgpu-core hands its pooled encoders to any user, so
++        // otherwise every pool grows to the biggest use of any (on Mali,
++        // ~0.4 MB of host memory per command buffer: hundreds of MB).
++        if !self.free.is_empty() {
++            unsafe { self.device.raw.free_command_buffers(self.raw, &self.free) };
++            self.free.clear();
++        }
+         self.free
+             .extend(cmd_bufs.into_iter().map(|cmd_buf| cmd_buf.raw));
+         self.free.append(&mut self.discarded);
+-- 
+2.50.1 (Apple Git-155)
+
