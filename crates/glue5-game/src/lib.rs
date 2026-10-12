@@ -169,4 +169,14 @@ unsafe extern "C" {
     fn glue5_instance_free(env: *mut Env);
     fn wasm_rt_strerror(trap: u32) -> *const c_char;
     fn glue5_unwind() -> !;
+    /// wasm2c runtime (patches/wabt/0005).
+    static mut wasm_rt_trap_hook: Option<unsafe extern "C" fn(u32, u32)>;
+}
+
+/// Calls `hook` with the reason where a trap occurs, and for `unreachable`
+/// the line of the generated C (0 otherwise), before execution unwinds out
+/// of the module: the trapping call stack is still there.
+pub fn set_trap_hook(hook: unsafe extern "C" fn(u32, u32)) {
+    // SAFETY: set once, before the module runs.
+    unsafe { wasm_rt_trap_hook = Some(hook) };
 }
