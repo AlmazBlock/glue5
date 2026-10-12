@@ -334,6 +334,12 @@ impl Library {
             source
         };
         let (text, pack) = pack_uniforms(&source);
+        let clip_distances = text.contains("@builtin(clip_distances)");
+        let text = if clip_distances && !device.features().contains(wgpu::Features::CLIP_DISTANCES) {
+            without_clip_distances(&text).context("unexpected clip distances output")?
+        } else {
+            text
+        };
         if let Some(pack) = &pack
             && pack.size > device.limits().max_uniform_buffer_binding_size as u32
         {
@@ -386,7 +392,7 @@ impl Library {
             interpolation,
             vertex_index: RE_VERTEX_INDEX.is_match(&text),
             instance_index: RE_INSTANCE_INDEX.is_match(&text),
-            clip_distances: text.contains("@builtin(clip_distances)"),
+            clip_distances,
             textures,
             locations,
             pairs: sampling_pairs(&text),
@@ -637,6 +643,9 @@ re!(RE_VS_MAIN, r"@vertex\s*fn\s+main\s*\([\s\S]*?\)\s*->\s*(\w+)\s*\{");
 re!(RE_PS_MAIN, r"(@fragment\s*fn\s+main\s*\()([\s\S]*?)(\)\s*->)");
 re!(RE_VS_OUTPUT_MEMBER, r"@location\((\d+)u\)(\s*\n\s*\w+\s*:)");
 re!(RE_MAIN_INNER_CALL, r"(\n\s*main_inner\([^;]*\);)");
+re!(RE_PS_MAIN_BODY, r"(@fragment\s*fn\s+main\s*\()((?:[^()]|\([^)]*\))*)(\)[^{]*\{)");
+re!(RE_CLIP_ENABLE, r"enable\s+clip_distances\s*;\s*");
+re!(RE_CLIP_MEMBER, r"@builtin\(clip_distances\)\s*(\w+)\s*:\s*array<f32,\s*\d+u?>\s*,?\s*");
 re!(RE_VERTEX_INDEX, r"\bvertex_index\b");
 re!(RE_INSTANCE_INDEX, r"\binstance_index\b");
 
@@ -873,6 +882,51 @@ pub fn with_alpha_test(text: &str) -> Option<String> {
         return None;
     }
     Some(RE_MAIN_INNER_CALL.replace(text, "$1\n  if (o0.w < 0.5f) { discard; }").into_owned())
+}
+
+/// Where the translator's vertex shaders also write their four clip
+/// distances (D3D's SV_ClipDistance, which pixel shaders may read).
+pub const CLIP_LOCATION: u32 = 15;
+
+/// A vertex shader without its `clip_distances` output, for GPUs without
+/// clip distances (Mali): the pixel stage clips instead, from the copy at
+/// [`CLIP_LOCATION`] ([`with_clipping`]).
+pub fn without_clip_distances(text: &str) -> Option<String> {
+    let name = vs_output_struct(text)?;
+    let body = struct_body(text, &name)?;
+    let member = RE_CLIP_MEMBER.captures(body)?;
+    let field = member[1].to_owned();
+    let body = body.replace(&member[0], "");
+    let text = text.replacen(struct_body(text, &name)?, &body, 1);
+    let text = RE_CLIP_ENABLE.replace(&text, "").into_owned();
+    // The output's constructor, fields in order: the clip distances' goes.
+    let call = Regex::new(&format!(r"return {}\(([^;]*)\);", regex::escape(&name))).ok()?;
+    let args = call.captures(&text)?.get(1)?.as_str().to_owned();
+    let kept: Vec<&str> = args.split(',').map(str::trim).filter(|a| *a != field).collect();
+    if kept.len() + 1 != args.split(',').count() {
+        return None;
+    }
+    Some(call.replace(&text, format!("return {name}({});", kept.join(", ")).as_str()).into_owned())
+}
+
+/// A pixel shader that first discards the fragments outside the clip
+/// distances at location `at` (see [`without_clip_distances`]); `None` for
+/// a draw without one: a pixel stage that does only that.
+pub fn with_clipping(text: Option<&str>, at: u32) -> Option<String> {
+    let test = |v: &str| format!("\n  if (any({v} < vec4<f32>(0.0f))) {{\n    discard;\n  }}");
+    let Some(text) = text else {
+        return Some(format!("@fragment\nfn main(@location({at}u) clip : vec4<f32>) {{{}\n}}\n", test("clip")));
+    };
+    let main = RE_PS_MAIN_BODY.captures(text)?;
+    let params = &main[2];
+    let read = Regex::new(&format!(r"@location\({at}u\)\s*(\w+)\s*:")).ok()?;
+    let (params, var) = match read.captures(params) {
+        Some(c) => (params.to_owned(), c[1].to_owned()),
+        None if params.trim().is_empty() => (format!("@location({at}u) clip : vec4<f32>"), "clip".to_owned()),
+        None => (format!("{params}, @location({at}u) clip : vec4<f32>"), "clip".to_owned()),
+    };
+    let head = format!("{}{params}{}{}", &main[1], &main[3], test(&var));
+    Some(text.replacen(&main[0], &head, 1))
 }
 
 /// Moves inter-stage locations (`map`: from -> to) in a vertex shader's
@@ -1122,6 +1176,12 @@ fn main(@location(0u) v0 : vec2<f32>) -> tint_symbol_1 {
         let dir = glue5_runtime::layout::shader_dir(std::path::Path::new(&game));
         let mut validator =
             naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
+        let mut no_clip = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all() - naga::valid::Capabilities::CLIP_DISTANCES,
+        );
+        let clipping = naga::front::wgsl::parse_str(&with_clipping(None, CLIP_LOCATION).unwrap()).unwrap();
+        no_clip.validate(&clipping).unwrap();
         let (mut n, mut failed) = (0, Vec::new());
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
@@ -1141,6 +1201,28 @@ fn main(@location(0u) v0 : vec2<f32>) -> tint_symbol_1 {
                 .and_then(|m| validator.validate(&m).map(|_| ()).map_err(|e| format!("{e:?}")));
             if let Err(e) = ok {
                 failed.push(format!("{}: {}", path.display(), e.lines().next().unwrap_or("")));
+            }
+            // As adapted for GPUs without clip distances.
+            let unclipped = if text.contains("@builtin(clip_distances)") {
+                without_clip_distances(&text)
+            } else if text.contains("@fragment") {
+                with_clipping(Some(&text), CLIP_LOCATION)
+            } else {
+                None
+            };
+            if let Some(adapted) = unclipped {
+                // naga's front end takes any `enable`; wgpu's does not.
+                if text.contains("@builtin(clip_distances)") && adapted.contains("clip_distances") {
+                    failed.push(format!("{}: clip distances left", path.display()));
+                }
+                let ok = naga::front::wgsl::parse_str(&adapted)
+                    .map_err(|e| e.to_string())
+                    .and_then(|m| no_clip.validate(&m).map(|_| ()).map_err(|e| format!("{e:?}")));
+                if let Err(e) = ok {
+                    failed.push(format!("{} (no clip distances): {}", path.display(), e.lines().next().unwrap_or("")));
+                }
+            } else if text.contains("@builtin(clip_distances)") || text.contains("@fragment") {
+                failed.push(format!("{}: not adapted for GPUs without clip distances", path.display()));
             }
             let bindings = reflect_bindings(&text);
             assert!(bindings.iter().all(|(_, b)| b.binding != PACKED_CBUFFERS || b.kind == Kind::Uniform));

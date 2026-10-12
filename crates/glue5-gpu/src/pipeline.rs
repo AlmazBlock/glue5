@@ -91,6 +91,8 @@ pub struct Compiler {
     pub max_inter_stage: u32,
     pub cache: Option<wgpu::PipelineCache>,
     null_ps: OnceLock<Option<wgpu::ShaderModule>>,
+    /// See [`Compiler::clipping_ps`].
+    clipping_ps: OnceLock<Option<wgpu::ShaderModule>>,
     layouts: Mutex<FxHashMap<(u32, u32), wgpu::PipelineLayout>>,
     pub compiled: AtomicU32,
     pub failed: AtomicU32,
@@ -106,6 +108,7 @@ impl Compiler {
             max_inter_stage,
             cache,
             null_ps: OnceLock::new(),
+            clipping_ps: OnceLock::new(),
             layouts: Mutex::default(),
             compiled: AtomicU32::new(0),
             failed: AtomicU32::new(0),
@@ -135,6 +138,13 @@ impl Compiler {
         self.null_ps
             .get_or_init(|| shader::create_module(&self.device, "null ps", "@fragment fn main() {}\n").ok())
             .as_ref()
+    }
+
+    /// A pixel stage that only clips, for draws without a pixel shader on
+    /// GPUs without clip distances (`at`: where the distances arrive).
+    fn clipping_ps(&self, at: u32) -> Option<wgpu::ShaderModule> {
+        let make = || shader::create_module(&self.device, "clipping ps", &shader::with_clipping(None, at)?).ok();
+        if at == shader::CLIP_LOCATION { self.clipping_ps.get_or_init(make).clone() } else { make() }
     }
 
     /// Builds the pipeline (any thread). Failures are logged and give `None`.
@@ -340,17 +350,24 @@ impl Compiler {
             targets.push(Some(target));
         }
 
+        // Without the GPU's clip distances the pixel stage clips, from the
+        // copy the vertex stage writes (see shader::without_clip_distances).
+        let clip = vs.clip_distances && !features.contains(wgpu::Features::CLIP_DISTANCES);
         let ps_module = match ps {
             Some(p) => {
                 let alpha_test = alpha_to_coverage && r.samples <= 1 && p.outputs & 1 != 0;
-                let ps_remap = remap.as_ref().filter(|m| m.iter().any(|(from, _)| p.locations.contains(from)));
-                if !alpha_test && ps_remap.is_none() {
+                let reads = |l: &u32| p.locations.contains(l) || (clip && *l == shader::CLIP_LOCATION);
+                let ps_remap = remap.as_ref().filter(|m| m.iter().any(|(from, _)| reads(from)));
+                if !alpha_test && !clip && ps_remap.is_none() {
                     Some(p.module(&self.device).ok_or_else(|| anyhow::anyhow!("pixel module failed"))?)
                 } else {
-                    let key = format!("{alpha_test}|{ps_remap:?}");
+                    let key = format!("{alpha_test}|{clip}|{ps_remap:?}");
                     let module = p.variant(&self.device, &key, |text| {
                         let mut text = text.to_owned();
                         if alpha_test && let Some(t) = shader::with_alpha_test(&text) {
+                            text = t;
+                        }
+                        if clip && let Some(t) = shader::with_clipping(Some(&text), shader::CLIP_LOCATION) {
                             text = t;
                         }
                         if let Some(map) = ps_remap {
@@ -360,6 +377,11 @@ impl Compiler {
                     });
                     Some(module.ok_or_else(|| anyhow::anyhow!("pixel variant failed"))?)
                 }
+            }
+            None if clip => {
+                let moved = remap.iter().flatten().find(|(from, _)| *from == shader::CLIP_LOCATION);
+                let at = moved.map_or(shader::CLIP_LOCATION, |m| m.1);
+                Some(self.clipping_ps(at).ok_or_else(|| anyhow::anyhow!("clipping module failed"))?)
             }
             None if targets.iter().any(Option::is_some) => self.null_ps().cloned(),
             None => None,
