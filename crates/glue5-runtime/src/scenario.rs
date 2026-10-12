@@ -13,6 +13,12 @@
 //! the last slot stays null. The caller only uses the list to skip a few
 //! known entities and cares whether anything else overlaps, which a list of
 //! five tells it as well as one of six.
+//!
+//! This is a workaround, not a fix of the caller's loop. If peds misbehave
+//! (spawning overlapping something, scenario points refused or accepted
+//! oddly), look here first: with six overlaps the caller now sees five, and
+//! if those are all entities it ignores, the sixth goes unnoticed. The cap
+//! applies to every caller of `IsPositionClearForPed`, not just this one.
 
 use glue5_game::{Env, orig};
 
