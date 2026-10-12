@@ -2,7 +2,8 @@
 //! and whatever it prints to stdout/stderr.
 //!
 //! Engine threads only queue it; a background thread writes it to
-//! `<user dir>/game.log`, and to the terminal too with `GLUE5_ENGINE_LOG=stdout`.
+//! `<user dir>/game.log`, and to the terminal too with `GLUE5_ENGINE_LOG=stdout`
+//! (on Android, where stdout goes nowhere, to the log).
 //! Printing synchronously from engine threads stalled the engine behind a
 //! slow terminal: loading looked stuck.
 
@@ -67,7 +68,10 @@ fn fatal_error(bytes: &[u8]) -> Option<String> {
 fn run(rx: Receiver<Vec<u8>>, file: File, to_stdout: bool) {
     crate::qos::set(crate::qos::Qos::Utility);
     let mut file = BufWriter::with_capacity(1 << 20, file);
+    #[cfg(not(target_os = "android"))]
     let mut stdout = to_stdout.then(io::stdout);
+    #[cfg(target_os = "android")]
+    let mut stdout = to_stdout.then(Logcat::default);
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(bytes) => {
@@ -95,6 +99,27 @@ fn run(rx: Receiver<Vec<u8>>, file: File, to_stdout: bool) {
         }
     }
     let _ = file.flush();
+}
+
+/// Engine output to the log, line by line.
+#[cfg(target_os = "android")]
+#[derive(Default)]
+struct Logcat(Vec<u8>);
+
+#[cfg(target_os = "android")]
+impl Write for Logcat {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        while let Some(end) = self.0.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.0.drain(..=end).collect();
+            log::info!(target: "engine", "{}", String::from_utf8_lossy(&line).trim_end());
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

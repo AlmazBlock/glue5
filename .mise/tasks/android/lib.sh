@@ -79,7 +79,7 @@ launch() {
     pid=$(adb shell pidof -s "$package") || die "the app did not start"
     adb logcat -v brief --pid="$pid" &
     logcat=$!
-    trap 'kill $logcat 2>/dev/null' EXIT
+    trap 'kill ${logcat:-} 2>/dev/null' EXIT
     while [ "$(adb shell pidof -s "$package" || true)" = "$pid" ]; do sleep 1; done
     sleep 1
     adb logcat -d -b crash -v brief -T "$since"
