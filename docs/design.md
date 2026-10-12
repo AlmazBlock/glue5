@@ -40,6 +40,12 @@ trap handling around calls into the module, Emscripten's setjmp/longjmp
 wrappers (`invoke_*`) and an instance per thread. Trap handling uses setjmp
 and must stay in C.
 
+On Windows the C is compiled with clang-cl, Clang with MSVC's command line,
+headers and ABI, and linked by link.exe with the Rust side. cl.exe
+truncates identifiers past 2047 characters, which the engine's mangled
+names reach, and its C11 atomics, which wasm2c's threads need, are
+experimental.
+
 The `glue5-game` build script generates this glue by reading the module
 with wasmparser. Imports use a function-pointer table filled by Rust at
 startup, so the generated C does not depend on Rust symbols or static

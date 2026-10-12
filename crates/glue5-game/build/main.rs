@@ -79,7 +79,7 @@ fn run() -> Result<()> {
 
     // 2. wasm2c, once per (game.wasm, wasm2c) pair. Generated sources live outside
     // OUT_DIR so every profile and target shares them and their objects.
-    let wasm2c = tools.join("bin/wasm2c");
+    let wasm2c = tools.join("bin").join(format!("wasm2c{}", env::consts::EXE_SUFFIX));
     ensure!(wasm2c.exists(), "{} not found: run `mise run setup` first", wasm2c.display());
     let tool_stamp = fs::read_to_string(tools.join("wasm2c.stamp")).unwrap_or_default();
     println!("cargo:rerun-if-changed={}", wasm2c.display());
@@ -122,7 +122,11 @@ fn run() -> Result<()> {
         .debug(false)
         .warnings(false)
         .flag_if_supported("-w")
-        .flag_if_supported("-fno-strict-aliasing");
+        .flag_if_supported("-fno-strict-aliasing")
+        // wasm2c passes the shared memory to memory.copy/fill helpers typed
+        // for unshared ones (the same leading fields): Clang 16+ makes the
+        // warning an error, which -w does not silence.
+        .flag_if_supported("-Wno-error=incompatible-pointer-types");
     for (k, v) in DEFINES {
         build.define(k, *v);
     }
@@ -134,6 +138,20 @@ fn run() -> Result<()> {
     }
     if env::var("CARGO_CFG_TARGET_ARCH")? == "x86_64" {
         build.flag_if_supported("-msse4.1"); // SIMDe maps wasm SIMD much better with SSE4.1
+    }
+    // Windows: clang-cl, Clang with MSVC's command line, headers and ABI
+    // (link.exe links it with the Rust side). cl.exe truncates identifiers
+    // past 2047 characters, which the engine's mangled names reach; its C11
+    // atomics are experimental. C11 is what turns on wasm2c's threads, and
+    // wasm-rt.h includes windows.h in every file: its lean version, without
+    // the min/max macros.
+    let msvc = env::var("CARGO_CFG_TARGET_ENV")? == "msvc";
+    if msvc {
+        let target = env::var("TARGET")?;
+        if env::var_os("CC").is_none() && env::var_os(format!("CC_{}", target.replace('-', "_"))).is_none() {
+            build.compiler("clang-cl");
+        }
+        build.flag("/std:c17").define("WIN32_LEAN_AND_MEAN", None).define("NOMINMAX", None);
     }
     // Three groups, each keyed by the headers it includes (sources are not
     // scanned for includes): the game, the glue, the wasm2c runtime.
@@ -160,7 +178,8 @@ fn run() -> Result<()> {
     let mut objects = compile::compile(&build, &sources, &game_key, &cache, jobs)?;
     objects.extend(compile::compile(&build, &glue, &glue_key, &cache, jobs)?);
     objects.extend(compile::compile(&build, &runtime, &runtime_key, &cache, jobs)?);
-    compile::archive(&build, &objects, &out.join("libglue5_game.a"))?;
+    let lib = if msvc { "glue5_game.lib" } else { "libglue5_game.a" };
+    compile::archive(&build, &objects, &out.join(lib))?;
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=glue5_game");
     Ok(())

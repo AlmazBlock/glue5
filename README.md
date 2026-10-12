@@ -62,7 +62,8 @@ build.
 
 ## Building
 
-Requirements: [mise] and a C/C++ compiler; for iOS, Xcode. mise installs
+Requirements: [mise] and a C/C++ compiler; for iOS, Xcode; for Windows,
+[see below](#windows). mise installs
 Rust, CMake and [xcodegen] (`.mise/config.toml`) on first use, and for
 Android the JDK, Gradle, the SDK's command-line tools and cargo-ndk; the
 Android tasks install the SDK packages they need (platform, build tools,
@@ -78,6 +79,27 @@ through mise too: in a shell with `mise activate`, or `mise exec -- cargo ...`.
 
 Compiled C objects are cached in `target/glue5-tools/objcache`, shared by
 debug and release builds; later builds only recompile what changed.
+
+### Windows
+
+The MSVC toolchain (`x86_64-pc-windows-msvc`): no MinGW or MSYS compiler.
+Besides mise, install:
+
+- Visual Studio Build Tools 2022 or later, with *Desktop development with
+  C++* (MSVC and the Windows SDK): Rust's linker, SDL, wasm2c.
+- LLVM, for `clang-cl` on the `PATH` (e.g. `scoop install llvm`): the
+  game's generated C is compiled with it, against MSVC's headers and
+  runtime. `cl.exe` truncates the engine's longest names. `CC` overrides it.
+- Git for Windows (the full one, not MinGit), whose bash runs the tasks.
+  Point mise at it, ahead of WSL's `bash.exe`: set `MISE_BASH_PATH` to its
+  `bin\bash.exe` in your user environment.
+- Developer Mode (Settings › For developers), so mise can link tools.
+
+The repository checks out with LF line endings on every platform
+(`.gitattributes`): the tasks are bash scripts and the patches apply to LF
+sources. Link the game directory with a junction
+(`New-Item -ItemType Junction game -Target <dir>`) or set `GLUE5_GAME_DIR`.
+Rendering is wgpu on Vulkan: the GPU driver provides it.
 
 ## Tasks
 

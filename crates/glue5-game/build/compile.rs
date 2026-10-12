@@ -67,7 +67,12 @@ fn compile_one(tool: &cc::Tool, base_key: &str, src: &Path, cache: &Path) -> Res
     }
     let tmp = cache.join(format!("{name}.o.tmp{}", std::process::id()));
     let mut cmd: Command = tool.to_command();
-    cmd.arg("-c").arg(src).arg("-o").arg(&tmp);
+    cmd.arg("-c").arg(src);
+    if tool.is_like_msvc() {
+        cmd.arg(format!("-Fo{}", tmp.display()));
+    } else {
+        cmd.arg("-o").arg(&tmp);
+    }
     let output = cmd.output().with_context(|| format!("running {cmd:?}"))?;
     if !output.status.success() {
         bail!("compiling {} failed:\n{}", src.display(), String::from_utf8_lossy(&output.stderr));
@@ -79,7 +84,12 @@ fn compile_one(tool: &cc::Tool, base_key: &str, src: &Path, cache: &Path) -> Res
 pub fn archive(build: &cc::Build, objects: &[PathBuf], lib: &Path) -> Result<()> {
     let _ = fs::remove_file(lib);
     let mut ar = build.get_archiver();
-    ar.arg("crs").arg(lib).args(objects);
+    if build.get_compiler().is_like_msvc() {
+        // lib.exe or llvm-lib
+        ar.arg("-nologo").arg(format!("-out:{}", lib.display())).args(objects);
+    } else {
+        ar.arg("crs").arg(lib).args(objects);
+    }
     let status = ar.status().with_context(|| format!("running {ar:?}"))?;
     if !status.success() {
         bail!("{ar:?} failed");
