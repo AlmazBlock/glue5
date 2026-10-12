@@ -40,10 +40,21 @@ const DEFAULTS: &str = include_str!("settings.xml");
 /// Writes the low-memory preset over the current settings (or the engine's
 /// defaults, before its first start).
 pub fn apply_low_preset(user_dir: &Path) -> io::Result<()> {
+    apply(user_dir, LOW)
+}
+
+/// Writes `settings` (name, value) over the current settings (or the
+/// engine's defaults, before its first start). Names the file lacks are
+/// skipped, with a warning.
+pub fn apply<N: AsRef<str>, V: AsRef<str>>(user_dir: &Path, settings: &[(N, V)]) -> io::Result<()> {
     let path = path(user_dir);
     let mut xml = std::fs::read_to_string(&path).unwrap_or_else(|_| DEFAULTS.to_string());
-    for (name, value) in LOW {
-        xml = set(&xml, name, value);
+    for (name, value) in settings {
+        let name = name.as_ref();
+        if !xml.contains(&format!("<{name} value=\"")) {
+            log::warn!("game settings: no {name} in settings.xml");
+        }
+        xml = set(&xml, name, value.as_ref());
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

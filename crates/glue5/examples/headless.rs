@@ -32,6 +32,12 @@ it stops working (an engine thread's trap).
                         engine's limiter; 0, the default: as fast as it can)
   --low                 the low-memory profile (smaller pools, its graphics
                         preset written into the game's settings)
+  --setting <name>=<v>  a graphics setting written into the game's settings
+                        (settings.xml names, e.g. ShadowQuality=3), after --low
+  --sandbox             start in the sandbox (the map, no story) instead of
+                        the story mode
+  --user-dir <dir>      saves, settings and the pipeline cache (default:
+                        glue5-headless in the temporary directory)
   --audio               play the sound into a pretend device, as the app does
                         (without one the engine mixes on its own clock)
   --sync-pipelines      compile pipelines when first drawn, not skipping the
@@ -55,6 +61,9 @@ fn main() -> Result<()> {
     let (mut width, mut height) = (1280, 720);
     let mut max_fps = 0;
     let (mut presses, mut keys, mut run_for, mut shots) = (Vec::new(), Vec::new(), None, None);
+    let mut game_settings: Vec<(String, String)> = Vec::new();
+    let mut start_mode = 1;
+    let mut user_dir = std::env::temp_dir().join("glue5-headless");
     let mut args = std::env::args().skip(1);
     let mut next = || args.next().context(USAGE);
     while let Ok(arg) = next() {
@@ -80,6 +89,13 @@ fn main() -> Result<()> {
             }
             "--fps" => max_fps = next()?.parse()?,
             "--low" => low = true,
+            "--setting" => {
+                let setting = next()?;
+                let (name, value) = setting.split_once('=').context("--setting <name>=<value>")?;
+                game_settings.push((name.into(), value.into()));
+            }
+            "--sandbox" => start_mode = 2,
+            "--user-dir" => user_dir = PathBuf::from(next()?),
             "--audio" => audio = true,
             "--sync-pipelines" => sync_pipelines = true,
             "--no-gpu" => no_gpu = true,
@@ -92,9 +108,11 @@ fn main() -> Result<()> {
         }
     }
     let game_dir = game_dir.context("no game: set GLUE5_GAME_DIR or pass --game")?;
-    let user_dir = std::env::temp_dir().join("glue5-headless");
     if low {
         glue5_runtime::game_settings::apply_low_preset(&user_dir)?;
+    }
+    if !game_settings.is_empty() {
+        glue5_runtime::game_settings::apply(&user_dir, &game_settings)?;
     }
     let gpu = if no_gpu {
         glue5_runtime::gpu::null()
@@ -110,7 +128,7 @@ fn main() -> Result<()> {
         glue5_gpu::backend(settings, None)
     };
     let game = glue5_runtime::start(
-        glue5_runtime::Config { game_dir, user_dir, width, height, start_mode: 1, low_memory: low, max_fps },
+        glue5_runtime::Config { game_dir, user_dir, width, height, start_mode, low_memory: low, max_fps },
         gpu,
     )?;
     if audio {
