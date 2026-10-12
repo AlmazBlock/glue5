@@ -237,6 +237,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         device_lost: Some(device_reset::device_lost),
         gpu_fence: None,
         sprite_depth_texture: None,
+        effect_set_texture: None,
         wait_readback: None,
         buffer_dtor: Some(readback::buffer_dtor),
         buffer_delete: Some(readback::buffer_delete),
