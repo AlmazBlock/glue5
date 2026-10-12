@@ -12,6 +12,7 @@ anyhow.workspace = true
 log.workspace = true
 arrayvec = "0.7"
 bcdec_rs = "0.2"
+ctt-etcpak = "0.6"
 bytemuck = "1"
 egui.workspace = true
 egui-wgpu.workspace = true

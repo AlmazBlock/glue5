@@ -20,7 +20,8 @@ pub enum Upload {
     Direct,
     /// A8_UNORM: one byte per texel, sampled as (0, 0, 0, a); expanded to RGBA8.
     A8,
-    /// BCn blocks decoded on the CPU (the device has no BC compression).
+    /// BCn blocks decoded on the CPU (the device has no BC compression);
+    /// colour re-encoded as ETC2 where the texture's format is compressed.
     Bc(Bc),
 }
 
@@ -100,13 +101,14 @@ const fn twin(format: F, view: F) -> TexFormat {
 pub fn texture(dxgi: u32, depth: bool, caps: &Caps) -> TexFormat {
     let tf = native_texture(dxgi, depth, caps);
     if tf.format.is_compressed() && !caps.features.contains(Features::TEXTURE_COMPRESSION_BC) {
-        return decoded(tf);
+        return decoded(tf, caps.features.contains(Features::TEXTURE_COMPRESSION_ETC2));
     }
     tf
 }
 
-/// The uncompressed format BCn data is decoded to.
-fn decoded(tf: TexFormat) -> TexFormat {
+/// The format BCn data is decoded to: uncompressed, or for colour, ETC2
+/// where the GPU has it (re-encoded, a quarter of the memory; see bc.rs).
+fn decoded(tf: TexFormat, etc2: bool) -> TexFormat {
     let (bc, format) = match tf.format {
         F::Bc1RgbaUnorm => (Bc::Bc1, F::Rgba8Unorm),
         F::Bc1RgbaUnormSrgb => (Bc::Bc1, F::Rgba8UnormSrgb),
@@ -121,8 +123,26 @@ fn decoded(tf: TexFormat) -> TexFormat {
         F::Bc6hRgbUfloat => (Bc::Bc6h, F::Rgba16Float),
         _ => return tf,
     };
+    let format = match format {
+        F::Rgba8Unorm if etc2 => F::Etc2Rgba8Unorm,
+        F::Rgba8UnormSrgb if etc2 => F::Etc2Rgba8UnormSrgb,
+        f => f,
+    };
     let view = tf.view.map(|v| if v.is_srgb() { format.add_srgb_suffix() } else { format.remove_srgb_suffix() });
     TexFormat { format, view, upload: Upload::Bc(bc) }
+}
+
+impl TexFormat {
+    /// For BCn data re-encoded as ETC2: decoded only (for sizes ETC2 cannot
+    /// take, see `create_texture`).
+    pub fn uncompressed(self) -> TexFormat {
+        let swap = |f: F| match f {
+            F::Etc2Rgba8Unorm => F::Rgba8Unorm,
+            F::Etc2Rgba8UnormSrgb => F::Rgba8UnormSrgb,
+            f => f,
+        };
+        TexFormat { format: swap(self.format), view: self.view.map(swap), upload: self.upload }
+    }
 }
 
 fn native_texture(dxgi: u32, depth: bool, caps: &Caps) -> TexFormat {

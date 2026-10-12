@@ -2,6 +2,10 @@
 //! (iPhones before the A17 Pro, most Android GPUs).
 //!
 //! Decoded formats: BC1/2/3/7 -> RGBA8, BC4 -> R8, BC5 -> RG8, BC6H -> RGBA16F.
+//! Where the GPU has ETC2 (all of those), the RGBA8 texels are encoded again
+//! as ETC2 RGBA ([`etc2_rgba`], etcpak's fast encoder): a quarter of the
+//! memory, which is most of a phone's texture memory otherwise (BC1 decoded
+//! takes 8 times its size). ETC2 RGBA, not RGB: BC1 may hold 1-bit alpha.
 
 use crate::format::Bc;
 
@@ -65,6 +69,40 @@ pub fn decode(bc: Bc, src: &[u8], src_bpr: usize, src_rows: usize, cols: usize, 
     out
 }
 
+/// Bytes per ETC2 RGBA block (4x4 texels).
+pub const ETC2_RGBA_BLOCK_BYTES: u32 = 16;
+
+/// `width` x `height` RGBA8 texels (both multiples of 4, tightly packed)
+/// encoded as ETC2 RGBA blocks, row by row.
+pub fn etc2_rgba(mut texels: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
+    // etcpak takes BGRA.
+    for texel in texels.as_chunks_mut::<4>().0 {
+        texel.swap(0, 2);
+    }
+    let pitch = width as usize * 4 * 4; // one row of blocks
+    let band_bytes = (width / 4) as usize * ETC2_RGBA_BLOCK_BYTES as usize;
+    let mut out = vec![0u8; band_bytes * (height / 4) as usize];
+    // Big uploads in bands of block rows across threads, as decoding.
+    let threads = if width as u64 * height as u64 >= 4096 * 16 { glue5_runtime::cores().min(8) } else { 1 };
+    let per = (height as usize / 4).div_ceil(threads);
+    let encode = |(src, dst): (&[u8], &mut [u8])| {
+        let rows = (src.len() / pitch) as u32 * 4;
+        let surface = ctt_etcpak::Surface::new(src, width, rows);
+        ctt_etcpak::etc2_rgba::compress_blocks_into(&surface, true, dst);
+    };
+    let bands = texels.chunks(pitch * per).zip(out.chunks_mut(band_bytes * per));
+    if threads <= 1 {
+        bands.for_each(encode);
+    } else {
+        std::thread::scope(|s| {
+            for band in bands {
+                s.spawn(move || encode(band));
+            }
+        });
+    }
+    out
+}
+
 /// One block into `dst` (its top-left texel), `pitch` bytes per texel row.
 fn decode_block(bc: Bc, block: &[u8], dst: &mut [u8], pitch: usize) {
     match bc {
@@ -87,6 +125,29 @@ fn decode_block(bc: Bc, block: &[u8], dst: &mut [u8], pitch: usize) {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn etc2_rgba_keeps_colours_and_alpha() {
+        // 8x8: four flat 4x4 blocks (opaque red, green, blue; half-transparent white).
+        let colours = [[255u8, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 128]];
+        let mut texels = vec![0u8; 8 * 8 * 4];
+        for y in 0..8 {
+            for x in 0..8 {
+                let c = colours[(y / 4) * 2 + x / 4];
+                texels[(y * 8 + x) * 4..][..4].copy_from_slice(&c);
+            }
+        }
+        let blocks = super::etc2_rgba(texels.clone(), 8, 8);
+        assert_eq!(blocks.len(), 4 * super::ETC2_RGBA_BLOCK_BYTES as usize);
+        // etcpak decodes to RGBA (its encoder takes BGRA).
+        let decoded = ctt_etcpak::decode::decode_rgba(&blocks, 8, 8);
+        for (got, want) in decoded.chunks(4).zip(texels.chunks(4)) {
+            assert!(got.iter().zip(want).all(|(g, w)| g.abs_diff(*w) <= 8), "{got:?} for {want:?}");
         }
     }
 }
