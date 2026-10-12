@@ -67,7 +67,7 @@ android_apk() {
 # a crash's report, if any.
 launch() {
     local since pid logcat
-    since=$(adb shell date +%m-%d\ %H:%M:%S.000)
+    since=$(adb shell date +%s.000)
     adb shell am start -W -S -n "$package/.Glue5Activity" >/dev/null
     pid=$(adb shell pidof -s "$package") || die "the app did not start"
     adb logcat -v brief --pid="$pid" &
