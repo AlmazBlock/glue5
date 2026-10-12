@@ -36,6 +36,9 @@ pub struct Settings {
     pub touch_size: f32,
     /// The Taptic Engine taps under pressed touch controls and plays the game's rumble (iPhone).
     pub haptics: bool,
+    /// The game starts in the sandbox (the map, no story) rather than the
+    /// story: the start page's last choice.
+    pub sandbox: bool,
     /// Settings saved before the render scale: the back buffer's height.
     #[serde(skip_serializing)]
     render_height: Option<u32>,
@@ -74,6 +77,7 @@ impl Default for Settings {
             touch_opacity: 0.6,
             touch_size: 1.0,
             haptics: true,
+            sandbox: false,
             render_height: None,
         }
     }

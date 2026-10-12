@@ -10,13 +10,15 @@ fn open_hint() -> &'static str {
     if MOBILE { "Settings: ⚙ or Back + Start" } else { "Settings: F1 or Back + Start" }
 }
 
+/// The start page; returns the mode chosen (sandbox or not), if one was.
+/// `starting`: the mode chosen at the last frame.
 pub(super) fn start_page(
     ctx: &egui::Context,
     status: &Status,
-    starting: bool,
+    starting: Option<bool>,
     actions: &mut Vec<Action>,
     go: &mut Option<Option<Page>>,
-) -> bool {
+) -> Option<bool> {
     let safe = ctx.content_rect();
     let scale = theme::layout_scale(safe);
     let width = (safe.width() - 32.0 * scale).clamp(1.0, 1100.0).floor();
@@ -25,7 +27,7 @@ pub(super) fn start_page(
     let gap = 40.0 * scale;
     let menu_width = (360.0 * scale).min((width - gap) * 0.42);
     let status_width = (width - menu_width - gap).max(1.0);
-    let mut play = false;
+    let mut chosen = None;
     egui::Area::new(Id::new("start"))
         .default_size(vec2(width, height))
         .constrain(false)
@@ -51,14 +53,26 @@ pub(super) fn start_page(
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 6.0 * scale;
-                                let busy = starting || status.preparing.is_some();
-                                ui.add_enabled_ui(status.game_dir.is_some() && !busy, |ui| {
-                                    let label = match status.preparing {
-                                        Some(done) => format!("PREPARING {:.0}%", done * 100.0),
-                                        None if starting => "STARTING…".into(),
-                                        None => "PLAY".into(),
-                                    };
-                                    play = menu_button(ui, menu_width, &label, true).clicked();
+                                // The mode on its way: chosen at the last frame,
+                                // or waiting for its pipelines.
+                                let going = starting.or(status.preparing.map(|_| status.sandbox));
+                                ui.add_enabled_ui(status.game_dir.is_some() && going.is_none(), |ui| {
+                                    // The last mode played is the primary one.
+                                    for (sandbox, name) in [(false, "STORY MODE"), (true, "SANDBOX")] {
+                                        let label = match status.preparing {
+                                            _ if going != Some(sandbox) => name.into(),
+                                            Some(done) => format!("PREPARING {:.0}%", done * 100.0),
+                                            None => "STARTING…".into(),
+                                        };
+                                        if menu_button(ui, menu_width, &label, sandbox == status.sandbox).clicked() {
+                                            chosen = Some(sandbox);
+                                        }
+                                    }
+                                    ui.label(
+                                        RichText::new("Sandbox: the whole map, free roam, no missions.")
+                                            .small()
+                                            .color(theme::MUTED),
+                                    );
                                 });
                                 if status.preparing.is_some() {
                                     ui.label(
@@ -105,7 +119,7 @@ pub(super) fn start_page(
                 );
             });
         });
-    play
+    chosen
 }
 
 fn menu_button(ui: &mut egui::Ui, width: f32, label: &str, primary: bool) -> egui::Response {
@@ -444,6 +458,7 @@ mod tests {
             metal_hud: false,
             refresh_rate: 120.0,
             preparing: None,
+            sandbox: false,
         }
     }
 
@@ -556,7 +571,7 @@ mod tests {
             for _ in 0..4 {
                 let mut output =
                     ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |root| {
-                        start_page(root.ctx(), &status(), false, &mut Vec::new(), &mut None);
+                        start_page(root.ctx(), &status(), None, &mut Vec::new(), &mut None);
                     });
                 output.textures_delta.clear();
             }

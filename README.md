@@ -161,10 +161,11 @@ touch screens, an on-screen controller appears while touch is in use and
 hides when a controller or keyboard is used. The game's text boxes bring
 up the system keyboard on touch devices.
 
-The start page shows the game files, Play and Settings. App settings cover
-resolution, upscaling, VSync, frame rate, touch controls, low memory and the
-game folder. During play, open them with F1, the ⚙ button on touch screens,
-or by holding Back + Start on a controller. Use the D-pad or arrow keys to
+The start page shows the game files, Story mode, Sandbox (the whole map,
+free roam, no missions) and Settings; the last mode played comes first. App
+settings cover resolution, upscaling, VSync, frame rate, touch controls, low
+memory and the game folder. During play, open them with F1, the ⚙ button on
+touch screens, or by holding Back + Start on a controller. Use the D-pad or arrow keys to
 navigate, A or Enter to select, and B or Esc to go back.
 
 Esc / Start opens the game's own menu. Graphics quality is configured in

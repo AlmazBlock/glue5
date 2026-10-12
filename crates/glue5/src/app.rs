@@ -29,9 +29,6 @@ use crate::touch::Touch;
 use crate::ui::{self, Action, Page, Started, Status, Ui};
 use crate::{audio, keymap, pads};
 
-/// Story mode (the browser page's start choice 1).
-const START_MODE: u32 = 1;
-
 /// The settings button's opacity over the game while the touch controls
 /// are hidden (a controller in use, or touch off): there, but faint.
 const GEAR_ALONE: f32 = 0.35;
@@ -409,6 +406,7 @@ impl App {
                 metal_hud: self.metal_hud,
                 refresh_rate: self.refresh_rate,
                 preparing: self.play_requested.then(|| self.screen.as_ref().and_then(Screen::progress)).flatten(),
+                sandbox: self.settings.sandbox,
             };
             // The settings button: on touch screens always, so that it stays
             // with a controller in use or the touch controls off.
@@ -425,7 +423,10 @@ impl App {
         for action in actions {
             match action {
                 Action::Quit => return Ok(true),
-                Action::Play => self.play()?,
+                Action::Play { sandbox } => {
+                    self.settings.sandbox = sandbox;
+                    self.play()?;
+                }
                 Action::ChooseGame => self.folder = Some(FolderPick::start(&self.window)),
                 Action::FindGame => self.find_game(None),
                 Action::ResetGraphics => self.reset_graphics(),
@@ -528,7 +529,8 @@ impl App {
                 user_dir: self.user_dir.clone(),
                 width: back_buffer.0,
                 height: back_buffer.1,
-                start_mode: START_MODE,
+                // The browser page's start choices: 1 the story, 2 the sandbox.
+                start_mode: if s.sandbox { 2 } else { 1 },
                 low_memory: s.low_memory,
                 max_fps: s.max_fps,
             },

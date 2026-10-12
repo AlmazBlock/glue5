@@ -30,14 +30,17 @@ use crate::touch::Touch;
 /// A page of the application's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
-    /// Before the game: its files, Play, Settings.
+    /// Before the game: its files, the story or the sandbox, Settings.
     Start,
     Settings,
 }
 
 /// What the pages ask the application to do.
 pub enum Action {
-    Play,
+    /// Start the game: the story, or the sandbox (the map, no story).
+    Play {
+        sandbox: bool,
+    },
     Quit,
     /// The system's folder picker, for the game (desktop).
     ChooseGame,
@@ -88,6 +91,8 @@ pub struct Status<'a> {
     pub refresh_rate: f32,
     /// Play waits for the game's pipelines: how far they are (0 to 1).
     pub preparing: Option<f32>,
+    /// The game starts (or started last) in the sandbox.
+    pub sandbox: bool,
 }
 
 /// The settings button over the game: from the safe area's top right
@@ -122,8 +127,9 @@ pub struct Ui {
     note: Option<String>,
     /// The render scale while its slider is dragged (it applies when let go).
     scale_edit: Option<f32>,
-    /// Play was chosen: this frame shows that it starts, then it does.
-    starting: bool,
+    /// A mode was chosen (sandbox or not): this frame shows that it starts,
+    /// then it does.
+    starting: Option<bool>,
     /// The settings button as last drawn (centre, radius), in points.
     gear: Option<(Pos2, f32)>,
     /// When egui wants to draw again (before the game, frames are drawn
@@ -149,7 +155,7 @@ impl Ui {
             drawn: false,
             note: None,
             scale_edit: None,
-            starting: false,
+            starting: None,
             gear: None,
             repaint_at: Some(Instant::now()),
         }
@@ -166,7 +172,7 @@ impl Ui {
     /// The game runs: no start page any more.
     pub fn game_started(&mut self) {
         self.home = None;
-        self.starting = false;
+        self.starting = None;
         self.show(None);
     }
 
@@ -382,9 +388,7 @@ impl Ui {
         }
         match self.page {
             Some(Page::Start) => {
-                if start_page(&ctx, status, starting, &mut actions, &mut go) {
-                    self.starting = true;
-                }
+                self.starting = start_page(&ctx, status, starting, &mut actions, &mut go);
             }
             Some(Page::Settings) => {
                 let note = self.note.as_deref();
@@ -403,13 +407,13 @@ impl Ui {
         if let Some(page) = go {
             self.show(page);
         }
-        if self.starting {
+        if self.starting.is_some() {
             self.repaint();
         } else if status.preparing.is_some() {
             self.repaint_in(Duration::from_millis(200));
         }
-        if starting {
-            actions.push(Action::Play);
+        if let Some(sandbox) = starting {
+            actions.push(Action::Play { sandbox });
         }
         actions
     }
