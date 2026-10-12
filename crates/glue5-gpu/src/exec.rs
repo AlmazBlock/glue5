@@ -597,7 +597,7 @@ impl Gpu {
     fn create_texture(&mut self, c: &Command) {
         let (id, dim, w, h, d, mips, array, dxgi, bind, samples) =
             (c.w(0), c.w(1), c.w(2), c.w(3), c.w(4), c.w(5), c.w(6), c.w(7), c.w(8), c.w(9));
-        let tf = format::texture(dxgi, bind & format::BIND_DS != 0, &self.caps);
+        let mut tf = format::texture(dxgi, bind & format::BIND_DS != 0, &self.caps);
         if self.objs.tex(id).is_some() {
             return;
         }
@@ -619,7 +619,10 @@ impl Gpu {
         }
         if let format::Upload::Bc(_) = tf.upload {
             crate::log_once("nobc", || {
-                "the device has no BC texture compression: decoding BC textures on the CPU".into()
+                format!(
+                    "the device has no BC texture compression: decoding BC textures on the CPU{}",
+                    if tf.format.is_compressed() { " (colour re-encoded as ETC2)" } else { "" }
+                )
             });
         }
         let layers = if dimension == wgpu::TextureDimension::D3 { d } else { array.max(1) };
@@ -646,6 +649,11 @@ impl Gpu {
             height: (size.height >> dropped).max(1),
             depth_or_array_layers: size.depth_or_array_layers,
         };
+        // Compressed textures are whole blocks: a first level that is not
+        // (half an odd number of blocks) stays decoded.
+        if tf.format.is_compressed() && (gpu_size.width % 4 != 0 || gpu_size.height % 4 != 0) {
+            tf = tf.uncompressed();
+        }
         let key = crate::recycle::TexKey {
             format: tf.format,
             view: tf.view,
@@ -828,6 +836,35 @@ impl Gpu {
         let data = &c.bytes_from(12)[..size as usize];
         let origin = wgpu::Origin3d { x, y, z: if t.is_3d() { z } else { slice } };
         let d = d.max(1);
+        if let Upload::Bc(bc) = t.upload
+            && t.format.is_compressed()
+        {
+            // Decoded and re-encoded as ETC2 by a thread of its own, copied
+            // in at the flush as whole blocks, as BC data would be.
+            let (cols, block_rows) = (w.div_ceil(4), h.div_ceil(4));
+            let src_rows = rows.max(block_rows) as usize;
+            let (texture, src) = (t.tex.clone(), data.to_vec());
+            t.uploaded.set(self.epoch);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let bpr = bpr as usize;
+            self.decoder.get_or_insert_with(|| Pool::new("gpu decode", 2)).urgent(move || {
+                let texels = crate::bc::decode(bc, &src, bpr, src_rows, cols as usize, block_rows as usize, d as usize);
+                let _ = tx.send(crate::bc::etc2_rgba(texels, cols * 4, block_rows * 4 * d));
+            });
+            let row_bytes = cols * crate::bc::ETC2_RGBA_BLOCK_BYTES;
+            self.decodes.push(Decode {
+                data: rx,
+                texture,
+                level,
+                origin,
+                bpr: row_bytes,
+                src_rows: block_rows,
+                rows: block_rows,
+                extent: wgpu::Extent3d { width: cols * 4, height: block_rows * 4, depth_or_array_layers: d },
+                row_bytes,
+            });
+            return;
+        }
         if let Upload::Bc(bc) = t.upload {
             // Decoded by a thread of its own while recording goes on, copied
             // in at the flush; the decoded texels, cropped to the mip

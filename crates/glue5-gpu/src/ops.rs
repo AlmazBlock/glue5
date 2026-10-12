@@ -451,7 +451,7 @@ impl Gpu {
         let (w, h, dep) = if has_box { (bx[3] - bx[0], bx[4] - bx[1], bx[5] - bx[2]) } else { (mw, mh, md) };
         let (sf, df) = (s.format, d.format);
         // Decoded BC data is in texels: block-padded regions are cropped to the mip.
-        let (w, h) = if matches!(s.upload, format::Upload::Bc(_)) {
+        let (w, h) = if matches!(s.upload, format::Upload::Bc(_)) && !sf.is_compressed() {
             (w.min(mw.saturating_sub(x)), h.min(mh.saturating_sub(y)))
         } else {
             (w, h)

@@ -11,6 +11,7 @@ glue5-runtime.workspace = true
 anyhow.workspace = true
 log.workspace = true
 bcdec_rs = "0.2"
+ctt-etcpak = "0.6"
 bytemuck = "1"
 egui.workspace = true
 egui-wgpu.workspace = true

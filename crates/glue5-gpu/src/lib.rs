@@ -133,6 +133,7 @@ fn drain(ring: GpuRing) {
 
 const WANTED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
     .union(wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D)
+    .union(wgpu::Features::TEXTURE_COMPRESSION_ETC2)
     .union(wgpu::Features::DEPTH32FLOAT_STENCIL8)
     .union(wgpu::Features::FLOAT32_FILTERABLE)
     .union(wgpu::Features::INDIRECT_FIRST_INSTANCE)
