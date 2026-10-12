@@ -17,6 +17,7 @@ pub mod memory;
 mod msaa;
 pub mod qos;
 mod readback;
+mod scenario;
 mod skin;
 mod threads;
 mod time;
@@ -217,6 +218,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         texture2d_delete: Some(readback::texture2d_delete),
         texture3d_dtor: Some(readback::texture3d_dtor),
         texture3d_delete: Some(readback::texture3d_delete),
+        is_position_clear_for_ped: Some(scenario::is_position_clear_for_ped),
     };
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;
