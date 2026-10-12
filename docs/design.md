@@ -66,9 +66,9 @@ decoding, jiff for the system's time zone, png and serde_json. Project code
 implements the Emscripten system interface, translates the engine's command
 ring to wgpu, adapts the shaders and supplies touch controls.
 
-On Windows, mimalloc is the allocator: the system heap gives large blocks
-back to the system when they are freed, and the renderer allocates many
-every frame (with the system heap the game's benchmark ran 5-23 % slower).
+On Windows, mimalloc is the allocator: the renderer and wgpu allocate and
+free many blocks every frame, and the system heap is slower at it (with it
+the game's benchmark ran 4-7 % slower).
 
 We patch wasm2c, wgpu-core and wgpu-hal. The patch files live in
 `patches/` and `mise run setup` applies them to pinned sources. Cargo
@@ -78,7 +78,7 @@ The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes,
 a fixed memory base, a hook where traps occur and, on Windows, longjmp
 without unwinding and inline floating-point classification. The wgpu-core
 patches clear usage scopes and drop command buffers' trackers by their
-members, stop pipelines from retaining shader modules and let a device
+members, reuse those trackers, stop pipelines from retaining shader modules and let a device
 poll wait for the GPU without holding the device's resource lock,
 reducing CPU work during pass encoding, memory use and stalls between
 threads. The wgpu-hal patch makes occlusion queries count samples on Metal
