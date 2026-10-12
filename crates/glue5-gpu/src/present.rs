@@ -97,6 +97,8 @@ struct Shared {
     upscaler: AtomicU8,
     /// Frames per second at most, shown evenly (0: as they come).
     frame_rate: AtomicU32,
+    /// A new surface for the window, to present into from the next frame.
+    surface: Mutex<Option<wgpu::Surface<'static>>>,
 }
 
 impl Presentation {
@@ -107,6 +109,7 @@ impl Presentation {
             metal_hud: AtomicBool::new(false),
             upscaler: AtomicU8::new(upscaler as u8),
             frame_rate: AtomicU32::new(0),
+            surface: Mutex::new(None),
         }));
         p.set_size(width, height);
         p
@@ -115,6 +118,13 @@ impl Presentation {
     /// The window's size in pixels.
     pub fn set_size(&self, width: u32, height: u32) {
         self.0.size.store((width as u64) << 32 | height as u64, Ordering::Relaxed);
+    }
+
+    /// Presents into `surface` from the next frame: the window's native
+    /// surface was replaced (Android gives it a new one each time the app
+    /// comes back to the foreground).
+    pub fn replace_surface(&self, surface: wgpu::Surface<'static>) {
+        *self.0.surface.lock().unwrap() = Some(surface);
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -495,6 +505,11 @@ impl Output {
     /// The next frame to draw into (none while the window has no area or
     /// its surface is being replaced).
     pub fn acquire(&mut self, device: &wgpu::Device) -> Option<Frame> {
+        if let Some(surface) = self.presentation.0.surface.lock().unwrap().take() {
+            self.display.surface = surface;
+            self.display.configured = None;
+            log::debug!("gpu: presenting into the window's new surface");
+        }
         let (w, h) = self.presentation.size();
         self.display.acquire(
             &self.adapter,

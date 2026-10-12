@@ -9,6 +9,7 @@
 //! the game asks for) starts the game without the start page.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -78,6 +79,8 @@ pub fn run() -> Result<()> {
     presentation.set_metal_hud(settings.metal_hud);
     let overlay = glue5_gpu::Overlay::default();
     let instance = glue5_gpu::instance();
+    #[cfg(target_os = "android")]
+    let surfaces = instance.clone();
     // The window outlives the renderer: the process exits with it.
     let surface = unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_display_and_window(&window, &window)?)?
@@ -91,12 +94,22 @@ pub fn run() -> Result<()> {
     // While the system resizes the window in a loop of its own (macOS,
     // Windows), events wait for it to end, and so does this loop; SDL still
     // calls watches, and from there the renderer follows the window. The
-    // game's resolution changes once, when this loop runs again.
+    // game's resolution changes once, when this loop runs again. SDL sends
+    // the application's lifecycle only to watches too, from the call that
+    // learns of it (not through the queue): the loop follows it from there.
     let watched = presentation.clone();
-    let _watch = sdl.event().map_err(|e| anyhow!("SDL events: {e}"))?.add_event_watch(move |event: Event| {
-        if let Event::Window { win_event: WindowEvent::PixelSizeChanged(w, h), .. } = event {
-            watched.set_size(w.max(0) as u32, h.max(0) as u32);
+    let lifecycle = Arc::new(Lifecycle::default());
+    let life = lifecycle.clone();
+    let _watch = sdl.event().map_err(|e| anyhow!("SDL events: {e}"))?.add_event_watch(move |event: Event| match event {
+        Event::Window { win_event: WindowEvent::PixelSizeChanged(w, h), .. } => {
+            watched.set_size(w.max(0) as u32, h.max(0) as u32)
         }
+        Event::AppWillEnterBackground { .. } => life.background.store(true, Ordering::Relaxed),
+        Event::AppDidEnterForeground { .. } => {
+            life.background.store(false, Ordering::Relaxed);
+            life.came_back.store(true, Ordering::Relaxed);
+        }
+        _ => {}
     });
 
     // Text input runs only while the game's text box is open (see `update`).
@@ -111,13 +124,15 @@ pub fn run() -> Result<()> {
         text_input,
         typing: false,
         presentation,
+        #[cfg(target_os = "android")]
+        instance: surfaces,
         user_dir,
         settings,
         ui: Ui::new(overlay),
         touch: Touch::new(),
         touch_input: MOBILE,
         touch_shown: false,
-        foreground: true,
+        lifecycle,
         folder: None,
         game_dir: None,
         problem: None,
@@ -165,6 +180,15 @@ impl Args {
     }
 }
 
+/// The application's lifecycle, as SDL tells the event watch.
+#[derive(Default)]
+struct Lifecycle {
+    /// In the background (phones: no GPU work there).
+    background: AtomicBool,
+    /// Back in the foreground since the loop last looked.
+    came_back: AtomicBool,
+}
+
 struct App {
     sdl: sdl3::Sdl,
     window: sdl3::video::Window,
@@ -175,6 +199,9 @@ struct App {
     typing: bool,
     pads: pads::Pads,
     presentation: Presentation,
+    /// For the window's surfaces after the first.
+    #[cfg(target_os = "android")]
+    instance: wgpu::Instance,
     user_dir: PathBuf,
     settings: Settings,
     ui: Ui,
@@ -184,8 +211,7 @@ struct App {
     /// not enough, phones often have a paired controller lying around).
     touch_input: bool,
     touch_shown: bool,
-    /// Not in the background (phones: no GPU work there).
-    foreground: bool,
+    lifecycle: Arc<Lifecycle>,
     folder: Option<FolderPick>,
     /// The game's folder, once found.
     game_dir: Option<PathBuf>,
@@ -258,6 +284,9 @@ impl App {
                     return Ok(());
                 }
             }
+            if self.lifecycle.came_back.swap(false, Ordering::Relaxed) {
+                self.came_back();
+            }
             if self.update(page)? {
                 self.settings.save(&self.user_dir);
                 return Ok(());
@@ -281,16 +310,6 @@ impl App {
                 self.ui.repaint();
             }
             Event::Window { win_event: WindowEvent::Exposed, .. } => self.ui.repaint(),
-            Event::AppWillEnterBackground { .. } => self.foreground = false,
-            Event::AppDidEnterForeground { .. } => {
-                self.foreground = true;
-                self.ui.repaint();
-                // The game's files may have been copied in meanwhile (Finder,
-                // the Files app).
-                if self.game.is_none() && self.game_dir.is_none() {
-                    self.find_game(None);
-                }
-            }
             _ => {}
         }
         if let Event::FingerDown { x, y, .. } = event {
@@ -372,7 +391,7 @@ impl App {
 
         // The UI: over the game at every turn, before it when something changed.
         let mut actions = Vec::new();
-        if in_game || (self.foreground && self.ui.wants_frame()) {
+        if in_game || (!self.lifecycle.background.load(Ordering::Relaxed) && self.ui.wants_frame()) {
             let status = Status {
                 game_dir: self.game_dir.as_deref(),
                 problem: self.problem.as_deref(),
@@ -568,6 +587,36 @@ impl App {
             Err(e) => self.ui.note(format!("Cannot reset the game's graphics settings: {e}")),
         }
         self.ui.repaint();
+    }
+
+    /// Back in the foreground.
+    fn came_back(&mut self) {
+        // Android gave the window a new native surface (SDL has updated the
+        // window's handle to it already).
+        #[cfg(target_os = "android")]
+        self.replace_surface();
+        self.ui.repaint();
+        // The game's files may have been copied in meanwhile (Finder, the
+        // Files app, adb).
+        if self.game.is_none() && self.game_dir.is_none() {
+            self.find_game(None);
+        }
+    }
+
+    /// A surface for the window's current native surface, for the renderer
+    /// to present into from its next frame.
+    #[cfg(target_os = "android")]
+    fn replace_surface(&mut self) {
+        // The window outlives the renderer: the process exits with it.
+        let surface = unsafe {
+            wgpu::SurfaceTargetUnsafe::from_display_and_window(&self.window, &self.window)
+                .map_err(anyhow::Error::from)
+                .and_then(|target| Ok(self.instance.create_surface_unsafe(target)?))
+        };
+        match surface {
+            Ok(surface) => self.presentation.replace_surface(surface),
+            Err(e) => log::error!("no surface for the window: {e:#}"),
+        }
     }
 
     /// Looks for the game: the folder named on the command line or by
