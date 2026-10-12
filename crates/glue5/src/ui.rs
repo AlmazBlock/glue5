@@ -228,13 +228,14 @@ impl Ui {
     /// Whether a finger at `x`, `y` (0..1, as SDL gives them) is on the
     /// settings button.
     pub fn gear_hit(&self, x: f32, y: f32, window: &Window) -> bool {
-        let (w, h) = window.size();
-        self.gear.is_some_and(|(c, r)| c.distance(pos2(x * w as f32, y * h as f32)) <= r * 1.4)
+        let size = screen_size(window);
+        self.gear.is_some_and(|(c, r)| c.distance(pos2(x * size.x, y * size.y)) <= r * 1.4)
     }
 
     /// Input for a page while one is open.
     pub fn event(&mut self, event: &Event, window: &Window) {
-        let (w, h) = window.size();
+        let size = screen_size(window);
+        let scale = points_per_window_unit(window);
         let button = |b: &MouseButton| match b {
             MouseButton::Right => Some(egui::PointerButton::Secondary),
             MouseButton::Middle => Some(egui::PointerButton::Middle),
@@ -243,11 +244,11 @@ impl Ui {
         };
         let modifiers = egui::Modifiers::default();
         match event {
-            Event::MouseMotion { x, y, .. } => self.pointer_to(pos2(*x, *y)),
+            Event::MouseMotion { x, y, .. } => self.pointer_to(pos2(*x, *y) * scale),
             Event::MouseButtonDown { mouse_btn, x, y, .. } | Event::MouseButtonUp { mouse_btn, x, y, .. } => {
                 let pressed = matches!(event, Event::MouseButtonDown { .. });
                 if let Some(button) = button(mouse_btn) {
-                    self.pointer_to(pos2(*x, *y));
+                    self.pointer_to(pos2(*x, *y) * scale);
                     self.events.push(egui::Event::PointerButton { pos: self.pointer, button, pressed, modifiers });
                 }
             }
@@ -263,8 +264,8 @@ impl Ui {
             | Event::FingerUp { touch_id, finger_id, x, y, pressure, .. } => {
                 let pressed = matches!(event, Event::FingerDown { .. });
                 let phase = if pressed { egui::TouchPhase::Start } else { egui::TouchPhase::End };
-                self.touch(*touch_id, *finger_id, phase, pos2(x * w as f32, y * h as f32), *pressure);
-                self.pointer_to(pos2(x * w as f32, y * h as f32));
+                self.touch(*touch_id, *finger_id, phase, pos2(x * size.x, y * size.y), *pressure);
+                self.pointer_to(pos2(x * size.x, y * size.y));
                 self.events.push(egui::Event::PointerButton {
                     pos: self.pointer,
                     button: egui::PointerButton::Primary,
@@ -276,7 +277,7 @@ impl Ui {
                 }
             }
             Event::FingerMotion { touch_id, finger_id, x, y, pressure, .. } => {
-                let p = pos2(x * w as f32, y * h as f32);
+                let p = pos2(x * size.x, y * size.y);
                 self.touch(*touch_id, *finger_id, egui::TouchPhase::Move, p, *pressure);
                 self.pointer_to(p);
             }
@@ -351,9 +352,8 @@ impl Ui {
         // Play was chosen at the last frame: this one shows that the game
         // starts, then it does.
         let starting = std::mem::take(&mut self.starting);
-        let (w, h) = window.size();
-        let ppp = window.display_scale().max(0.5);
-        let screen = Rect::from_min_size(Pos2::ZERO, vec2(w as f32, h as f32));
+        let ppp = pixels_per_point(window);
+        let screen = Rect::from_min_size(Pos2::ZERO, screen_size(window));
         let safe = safe_rect(window);
         let mut raw = egui::RawInput {
             screen_rect: Some(screen),
@@ -415,14 +415,36 @@ impl Ui {
     }
 }
 
+// Points: the UI's unit, the same physical size everywhere. As SDL's
+// README-highdpi describes, a point is the window's display scale in pixels;
+// SDL's window coordinates are points on Apple platforms but pixels on
+// Android and Windows (where the display's content scale enlarges the UI).
+
+/// Pixels per point.
+fn pixels_per_point(window: &Window) -> f32 {
+    window.display_scale().max(0.5)
+}
+
+/// Points per unit of SDL's window coordinates (event and safe area
+/// positions).
+fn points_per_window_unit(window: &Window) -> f32 {
+    window.pixel_density() / pixels_per_point(window)
+}
+
+/// The window's size in points.
+pub fn screen_size(window: &Window) -> Vec2 {
+    let (w, h) = window.size_in_pixels();
+    vec2(w as f32, h as f32) / pixels_per_point(window)
+}
+
 /// The part of the window clear of notches and rounded corners, in points.
 pub fn safe_rect(window: &Window) -> Rect {
-    let (w, h) = window.size();
     match window.safe_area() {
         Ok(r) if r.width() > 0 && r.height() > 0 => {
-            Rect::from_min_size(pos2(r.x() as f32, r.y() as f32), vec2(r.width() as f32, r.height() as f32))
+            let scale = points_per_window_unit(window);
+            Rect::from_min_size(pos2(r.x() as f32, r.y() as f32) * scale, vec2(r.width() as f32, r.height() as f32) * scale)
         }
-        _ => Rect::from_min_size(Pos2::ZERO, vec2(w as f32, h as f32)),
+        _ => Rect::from_min_size(Pos2::ZERO, screen_size(window)),
     }
 }
 

@@ -346,9 +346,8 @@ impl App {
             glue5_runtime::input::set_gamepad(0, Gamepad::default());
         }
         if show {
-            let (w, h) = self.window.size();
             self.touch.haptics = self.settings.haptics;
-            self.touch.layout(egui::vec2(w as f32, h as f32), ui::safe_rect(&self.window), self.settings.touch_size);
+            self.touch.layout(ui::screen_size(&self.window), ui::safe_rect(&self.window), self.settings.touch_size);
             glue5_runtime::input::set_gamepad(0, self.touch.gamepad());
             if self.settings.haptics {
                 haptics::rumble(glue5_runtime::input::rumble(0));
