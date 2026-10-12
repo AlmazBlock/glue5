@@ -498,7 +498,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         ctx.begin_pass(Default::default());
-        let _ = ctx.end_pass();
+        ctx.end_pass().textures_delta.clear();
         assert!(ctx.fonts_mut(|f| f.has_glyphs(&egui::FontId::proportional(14.0), "⚙🗁🗙")));
     }
 
