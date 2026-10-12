@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -77,6 +77,10 @@ struct Open {
     path: String,
     flags: u32,
     dir: Mutex<DirStream>,
+    /// A file's offset, kept here rather than the host's: reads and writes
+    /// all go to an offset, so `pread` leaves it alone on every platform
+    /// (Windows moves a handle's own offset on positioned reads).
+    pos: Mutex<u64>,
 }
 
 /// getdents64 state of an open directory.
@@ -114,7 +118,9 @@ impl Vfs {
             game_index.len(),
             user.display()
         );
-        let std_fd = |node| Some(Arc::new(Open { node, path: String::new(), flags: 0, dir: Mutex::default() }));
+        let std_fd = |node| {
+            Some(Arc::new(Open { node, path: String::new(), flags: 0, dir: Mutex::default(), pos: Mutex::default() }))
+        };
         Ok(Vfs {
             game: game_data,
             game_index,
@@ -189,7 +195,7 @@ impl Vfs {
                 Node::File(file)
             }
         };
-        let open = Arc::new(Open { node, path: normalize(path), flags, dir: Mutex::default() });
+        let open = Arc::new(Open { node, path: normalize(path), flags, dir: Mutex::default(), pos: Mutex::default() });
         let mut fds = self.fds.lock().unwrap();
         let fd = match fds.iter().skip(3).position(Option::is_none) {
             Some(i) => i + 3,
@@ -226,7 +232,12 @@ impl Vfs {
         match &open.node {
             Node::File(f) => match offset {
                 Some(off) => read_at(f, buf, off).map_err(io_errno),
-                None => (&*f).read(buf).map_err(io_errno),
+                None => {
+                    let mut pos = open.pos.lock().unwrap();
+                    let n = read_at(f, buf, *pos).map_err(io_errno)?;
+                    *pos += n as u64;
+                    Ok(n)
+                }
             },
             Node::Stdin => Ok(0),
             Node::Dir(_) => Err(errno::ISDIR),
@@ -239,7 +250,19 @@ impl Vfs {
         match &open.node {
             Node::File(f) => match offset {
                 Some(off) => write_at(f, buf, off).map_err(io_errno),
-                None => (&*f).write(buf).map_err(io_errno),
+                None => {
+                    let mut pos = open.pos.lock().unwrap();
+                    if open.flags & oflag::APPEND != 0 {
+                        // The host appends (the handle is opened so).
+                        let n = (&*f).write(buf).map_err(io_errno)?;
+                        *pos = f.metadata().map_err(io_errno)?.len();
+                        Ok(n)
+                    } else {
+                        let n = write_at(f, buf, *pos).map_err(io_errno)?;
+                        *pos += n as u64;
+                        Ok(n)
+                    }
+                }
             },
             // The engine's printf output goes to its log (never blocks).
             Node::Stdout | Node::Stderr => {
@@ -255,13 +278,16 @@ impl Vfs {
         let open = self.get(fd)?;
         match &open.node {
             Node::File(f) => {
-                let pos = match whence {
-                    0 => SeekFrom::Start(offset.max(0) as u64),
-                    1 => SeekFrom::Current(offset),
-                    2 => SeekFrom::End(offset),
+                let mut pos = open.pos.lock().unwrap();
+                let from = match whence {
+                    0 => 0,
+                    1 => *pos as i64,
+                    2 => f.metadata().map_err(io_errno)?.len() as i64,
                     _ => return Err(errno::INVAL),
                 };
-                (&*f).seek(pos).map_err(io_errno)
+                let new = from.checked_add(offset).filter(|&p| p >= 0).ok_or(errno::INVAL)?;
+                *pos = new as u64;
+                Ok(*pos)
             }
             Node::Dir(_) => {
                 // Only rewinding is meaningful (offsets are getdents64 record offsets).
