@@ -16,6 +16,8 @@ crates=(
 
 # Where the tools live; glue5-game/build.rs looks in the same place.
 tools=${CARGO_TARGET_DIR:-$PWD/target}/glue5-tools
+exe=
+[ "${OS:-}" = Windows_NT ] && exe=.exe
 
 sha256() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | cut -d' ' -f1; }
 
@@ -29,11 +31,12 @@ patches_key() {
 
 # Applies the patches for $1 in directory $2. The copies sit inside this
 # repository: git must not discover it (above $3), or `git apply` resolves
-# paths against our root and silently skips everything.
+# paths against our root and silently skips everything. Patched files keep
+# their LF line endings whatever core.autocrlf says (Git for Windows sets it).
 apply_patches() {
     for patch in patches/"$1"/*.patch; do
         echo "applying ${patch##*/}"
-        GIT_CEILING_DIRECTORIES=$3 git -C "$2" apply "$PWD/$patch"
+        GIT_CEILING_DIRECTORIES=$3 git -c core.autocrlf=false -C "$2" apply "$PWD/$patch"
     done
 }
 
@@ -66,22 +69,28 @@ wabt=third_party/wabt
 git submodule update --init --depth 1 "$wabt"
 git -C "$wabt" submodule update --init --depth 1 third_party/picosha2 third_party/simde
 key="$(git -C "$wabt" rev-parse HEAD)$(patches_key wabt)"
-if [ "$(cat "$tools/wasm2c.stamp" 2>/dev/null)" = "$key" ] && [ -x "$tools/bin/wasm2c" ]; then
-    echo "wasm2c is up to date ($tools/bin/wasm2c)"
+if [ "$(cat "$tools/wasm2c.stamp" 2>/dev/null)" = "$key" ] && [ -x "$tools/bin/wasm2c$exe" ]; then
+    echo "wasm2c is up to date ($tools/bin/wasm2c$exe)"
     exit 0
 fi
-# A pristine copy of the pinned sources, then our patches on top.
+# A pristine copy of the pinned sources (LF, whatever core.autocrlf says),
+# then our patches on top.
 src=$tools/wabt-src
 rm -rf "$src" && mkdir -p "$src"
-git -C "$wabt" archive --format=tar HEAD | tar -x -C "$src"
-git -C "$wabt/third_party/picosha2" archive --format=tar --prefix=third_party/picosha2/ HEAD | tar -x -C "$src"
+git -c core.autocrlf=input -C "$wabt" archive --format=tar HEAD | tar -x -C "$src"
+git -c core.autocrlf=input -C "$wabt/third_party/picosha2" archive --format=tar --prefix=third_party/picosha2/ HEAD |
+    tar -x -C "$src"
 apply_patches wabt "$src" "$tools"
 # A host tool: keep an iOS build environment (e.g. from Xcode) out of it.
+# On Windows CMake picks Visual Studio, a multi-config generator: the build
+# type is --config there, and the tool lands in Release/.
 env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CC -u CXX -u CFLAGS -u CXXFLAGS \
     cmake -S "$src" -B "$tools/wabt-build" -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTS=OFF -DBUILD_LIBWASM=OFF -DWITH_WASI=OFF -DBUILD_TOOLS=ON
-cmake --build "$tools/wabt-build" --target wasm2c --parallel "$(getconf _NPROCESSORS_ONLN)"
+cmake --build "$tools/wabt-build" --config Release --target wasm2c --parallel "$(getconf _NPROCESSORS_ONLN)"
 mkdir -p "$tools/bin"
-cp "$tools/wabt-build/wasm2c" "$tools/bin/wasm2c"
+built=$tools/wabt-build/wasm2c$exe
+[ -f "$built" ] || built=$tools/wabt-build/Release/wasm2c$exe
+cp "$built" "$tools/bin/wasm2c$exe"
 printf '%s' "$key" >"$tools/wasm2c.stamp"
-echo "built $tools/bin/wasm2c"
+echo "built $tools/bin/wasm2c$exe"
