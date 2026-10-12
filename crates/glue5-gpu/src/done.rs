@@ -119,7 +119,12 @@ impl Staging {
         let m = mapped.clone();
         buffer
             .slice(..)
-            .map_async(wgpu::MapMode::Read, move |r| m.store(if r.is_ok() { 1 } else { 2 }, Ordering::Release));
+            .map_async(wgpu::MapMode::Read, move |r| {
+                if let Err(e) = &r {
+                    log::warn!("gpu: mapping a readback: {e}");
+                }
+                m.store(if r.is_ok() { 1 } else { 2 }, Ordering::Release)
+            });
         Staging { buffer, mapped }
     }
 }
