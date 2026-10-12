@@ -78,6 +78,10 @@ pub(crate) fn prepare(gpu: &Device, settings: &Settings, progress: &Progress) ->
         t0.elapsed().as_secs_f64(),
         known.len()
     );
+    // Saved now rather than while playing, where writing it takes long.
+    if let Some(dir) = &settings.cache_dir {
+        crate::save_pipeline_cache(&compiler, &gpu.adapter, dir);
+    }
     let known = known.into_iter().collect();
     Ok(Prepared { library, compiler, pipes: recipes.into_iter().zip(cells).collect(), known })
 }

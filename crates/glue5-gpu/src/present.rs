@@ -722,13 +722,10 @@ impl Gpu {
                 log::warn!("gpu: saving {}: {e}", path.display());
             }
         }
-        if let Some(cache) = &self.compiler.cache
-            && let Some(data) = cache.get_data()
-        {
-            let path = dir.join(crate::pipeline_cache_name(&self.adapter.get_info()));
-            if let Err(e) = std::fs::write(&path, data) {
-                log::warn!("gpu: saving {}: {e}", path.display());
-            }
+        let compiled = self.compiler.compiled.load(std::sync::atomic::Ordering::Relaxed);
+        if compiled != self.saved_compiled {
+            crate::save_pipeline_cache(&self.compiler, &self.adapter, &dir);
+            self.saved_compiled = compiled;
         }
     }
 }

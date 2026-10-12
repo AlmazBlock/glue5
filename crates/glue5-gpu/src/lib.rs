@@ -149,6 +149,19 @@ fn pipeline_cache_name(info: &wgpu::AdapterInfo) -> String {
     format!("pipelines.{:?}.{:x}.{:x}.bin", info.backend, info.vendor, info.device).to_lowercase()
 }
 
+/// Writes the driver's pipeline cache for the next run (Vulkan; Metal keeps
+/// its own): the whole cache, megabytes, so only when pipelines were added.
+fn save_pipeline_cache(compiler: &pipeline::Compiler, adapter: &wgpu::Adapter, dir: &std::path::Path) {
+    if let Some(cache) = &compiler.cache
+        && let Some(data) = cache.get_data()
+    {
+        let path = dir.join(pipeline_cache_name(&adapter.get_info()));
+        if let Err(e) = std::fs::write(&path, data) {
+            log::warn!("gpu: saving {}: {e}", path.display());
+        }
+    }
+}
+
 /// The GPU and the window it shows frames in. The application opens it
 /// before the game starts, to show its own UI ([`Screen::show_ui`]) and to
 /// prepare the game's pipelines ([`Screen::prepare`]); the renderer takes it
@@ -325,6 +338,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
     let Device { adapter, device, queue, features: _, profile } = gpu;
     device.on_uncaptured_error(error_handler(Some(ring)));
     let caps = compiler.caps;
+    let saved_compiled = compiler.compiled.load(Ordering::Relaxed);
     let threads = glue5_runtime::cores().saturating_sub(2).clamp(2, 6);
     let staging = Arc::new(done::StagingPool::default());
     let limits = device.limits();
@@ -402,6 +416,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         started: Instant::now(),
         last_stats: Instant::now(),
         last_save: Instant::now(),
+        saved_compiled,
     })
 }
 
