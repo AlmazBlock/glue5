@@ -99,6 +99,7 @@ debug and release builds; later builds only recompile what changed.
 | Android: only build the APK | `mise run android:build` |
 | Android: launch the installed app again, with its log | `mise run android:run [device]` |
 | Android: copy the game into the app's Android/data/local.glue5/files/game | `mise run android:game [device]` |
+| Android: attach lldb to the running app (installed with `GLUE5_ANDROID_DEBUGGABLE=1`) | `mise run android:lldb -- [lldb args]` |
 
 `mise tasks` lists them all. iOS signing uses the team in `GLUE5_TEAM`:
 put it in `.mise/config.local.toml` (ignored by git) under `[env]`. With several

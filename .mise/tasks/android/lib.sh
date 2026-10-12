@@ -52,7 +52,8 @@ android_libs() {
     cp platform/shared/Glue5.icon/Assets/02-five.png "$out/res/drawable-nodpi/glue5_five.png"
 }
 
-# The APK, signed with the debug key; it ends up in $apk.
+# The APK, signed with the debug key; it ends up in $apk. Debuggable (for
+# android:lldb) with GLUE5_ANDROID_DEBUGGABLE=1.
 android_apk() {
     # SDL's Java side, from the sdl3-src crate the libraries were built with.
     local sdl
@@ -60,7 +61,8 @@ android_apk() {
         grep -o '"manifest_path":"[^"]*/sdl3-src-[^"/]*/Cargo.toml"' | head -1 | cut -d'"' -f4)
     [ -n "$sdl" ] || die "sdl3-src is not among the dependencies"
     gradle -p "$project" --project-cache-dir "$out/gradle-cache" --quiet \
-        "-Pglue5.sdlJava=${sdl%/Cargo.toml}/SDL/android-project/app/src/main/java" assembleRelease
+        "-Pglue5.sdlJava=${sdl%/Cargo.toml}/SDL/android-project/app/src/main/java" \
+        "-Pglue5.debuggable=${GLUE5_ANDROID_DEBUGGABLE:+true}" assembleRelease
 }
 
 # Launches the installed app and follows its log until it ends; then shows
