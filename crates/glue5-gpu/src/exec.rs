@@ -2,6 +2,7 @@
 //! D3D11 device state onto wgpu.
 
 use std::sync::Arc;
+use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 use glue5_runtime::gpu::{Command, GpuRing, Reader, op};
@@ -225,7 +226,7 @@ pub struct Gpu {
     pub next_buffer_uid: u32,
     pub recycler: crate::recycle::Recycler,
     /// BC textures decoded on the CPU, by threads of their own (made when
-    /// the first one comes): copied in at the next flush.
+    /// the first one comes): copied in at a flush once decoded.
     pub decoder: Option<Pool>,
     pub decodes: Vec<Decode>,
 
@@ -243,12 +244,16 @@ pub struct Gpu {
     pub started: Instant,
     pub last_stats: Instant,
     pub last_save: Instant,
+    /// Pipelines compiled when the driver's cache was last saved.
+    pub saved_compiled: u32,
 }
 
 /// A texture upload being decoded: copied in when its batch is handed over
 /// (a batch's uploads go before its commands anyway).
 pub struct Decode {
     data: std::sync::mpsc::Receiver<Vec<u8>>,
+    /// The texture's object, and the texture it was when the data came.
+    id: u32,
     texture: wgpu::Texture,
     level: u32,
     origin: wgpu::Origin3d,
@@ -853,6 +858,7 @@ impl Gpu {
             });
             self.decodes.push(Decode {
                 data: rx,
+                id,
                 texture,
                 level,
                 origin,
@@ -902,11 +908,34 @@ impl Gpu {
         );
     }
 
-    /// Copies in the textures decoded since the last flush (waiting for
-    /// those not done yet).
+    /// Copies in the textures decoded so far. One still decoding waits for
+    /// a later flush, unless the commands being handed over use its texture:
+    /// the frame waits only for the textures it draws (streaming brings
+    /// hundreds of decodes at once, hundreds of milliseconds on a phone).
+    /// A texture's regions go in the order they came.
     fn finish_decodes(&mut self) {
+        let mut later: Vec<Decode> = Vec::new();
         for d in std::mem::take(&mut self.decodes) {
-            let Ok(texels) = d.data.recv() else { continue };
+            let Some(t) = self.objs.tex(d.id).filter(|t| t.tex == d.texture) else {
+                continue; // destroyed meanwhile
+            };
+            let used_now = t.used.get() == self.epoch;
+            let texels = if later.iter().any(|l| l.texture == d.texture) {
+                None
+            } else if used_now {
+                let Ok(texels) = d.data.recv() else { continue };
+                Some(texels)
+            } else {
+                match d.data.try_recv() {
+                    Ok(texels) => Some(texels),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => continue,
+                }
+            };
+            let Some(texels) = texels else {
+                later.push(d);
+                continue;
+            };
             let target = wgpu::TexelCopyTextureInfo {
                 texture: &d.texture,
                 mip_level: d.level,
@@ -915,6 +944,7 @@ impl Gpu {
             };
             self.uploads.texture(target, &texels, d.bpr, d.src_rows, d.rows, d.extent, d.row_bytes);
         }
+        self.decodes = later;
     }
 
     fn create_shader(&mut self, c: &Command) {
