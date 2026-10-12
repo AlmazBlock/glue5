@@ -9,6 +9,11 @@ use glue5_runtime::Game;
 use glue5_runtime::audio::{CHANNELS, SAMPLE_RATE};
 use glue5_runtime::input::{self, Gamepad, button};
 
+/// The app's allocator (see src/main.rs), so measurements match it.
+#[cfg(windows)]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const USAGE: &str = "\
 usage: cargo run -r --example headless -- [options]
 

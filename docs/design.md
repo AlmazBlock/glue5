@@ -66,6 +66,10 @@ decoding, jiff for the system's time zone, png and serde_json. Project code
 implements the Emscripten system interface, translates the engine's command
 ring to wgpu, adapts the shaders and supplies touch controls.
 
+On Windows, mimalloc is the allocator: the system heap gives large blocks
+back to the system when they are freed, and the renderer allocates many
+every frame (with the system heap the game's benchmark ran 5-23 % slower).
+
 We patch wasm2c, wgpu-core and wgpu-hal. The patch files live in
 `patches/` and `mise run setup` applies them to pinned sources. Cargo
 cannot apply patch files directly to a dependency.
