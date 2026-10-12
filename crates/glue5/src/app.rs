@@ -41,6 +41,12 @@ const GEAR_ALONE: f32 = 0.35;
 const FAILURE_FILE: &str = "last-failure.txt";
 
 pub fn run() -> Result<()> {
+    // SDL's event wait on Android pumps events, which queues the poll
+    // sentinel, which wakes the wait: it spins for its whole timeout (a big
+    // core at 100%). Without the sentinel it sleeps until an event; polling
+    // then drains the queue, which is what this loop does anyway.
+    #[cfg(target_os = "android")]
+    sdl3::hint::set("SDL_POLL_SENTINEL", "0");
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
     if MOBILE {
