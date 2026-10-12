@@ -84,6 +84,10 @@ pub struct Config {
     /// renderer presents (the display's refresh with vsync); 60 or 30 use
     /// the engine's own limiter.
     pub max_fps: u32,
+    /// The game's benchmark (its fly-through of the map) instead of the
+    /// game; the engine writes the results in the user directory
+    /// (`Documents/Rockstar Games/GTA V/Benchmarks`) and asks to quit.
+    pub benchmark: bool,
 }
 
 impl Config {
@@ -116,6 +120,9 @@ impl Config {
         };
         args.push(format!("-frameLimit={frame_limit}"));
         args.push(format!("-wasmstartchoice={}", self.start_mode));
+        if self.benchmark {
+            args.extend(["-benchmark", "-benchmarkIterations=1"].map(String::from));
+        }
         // No quality switches: they would override the game's own settings
         // (its menu) at every start.
         // More engine switches, for experiments.

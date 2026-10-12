@@ -1,6 +1,6 @@
 //! Home and the floating settings window share the same responsive controls.
 use super::widgets::{Control, action_button, choice, close_button, focus, setting, slider, toggle};
-use super::{Action, Page, SettingsTab, Status, WARN, theme};
+use super::{Action, Mode, Page, SettingsTab, Status, WARN, theme};
 use crate::paths::{self, MOBILE};
 use crate::settings::{self, RENDER_SCALES, Settings, TouchMode};
 use egui::{Align2, Color32, Id, RichText, pos2, vec2};
@@ -10,15 +10,23 @@ fn open_hint() -> &'static str {
     if MOBILE { "Settings: ⚙ or Back + Start" } else { "Settings: F1 or Back + Start" }
 }
 
-/// The start page; returns the mode chosen (sandbox or not), if one was.
+/// The ways into the game, on the start page's left: a name and what it is.
+const MODES: [(Mode, &str, Option<&str>); 3] = [
+    (Mode::Story, "STORY MODE", None),
+    (Mode::Sandbox, "SANDBOX", Some("The whole map, free roam, no missions.")),
+    (Mode::Benchmark, "BENCHMARK", Some("The game's fly-through of the map: how it runs here.")),
+];
+
+/// The start page: the modes on the left; on the right, quieter, the app's
+/// own buttons and what it knows. Returns the mode chosen, if one was.
 /// `starting`: the mode chosen at the last frame.
 pub(super) fn start_page(
     ctx: &egui::Context,
     status: &Status,
-    starting: Option<bool>,
+    starting: Option<Mode>,
     actions: &mut Vec<Action>,
     go: &mut Option<Option<Page>>,
-) -> Option<bool> {
+) -> Option<Mode> {
     let safe = ctx.content_rect();
     let scale = theme::layout_scale(safe);
     let width = (safe.width() - 32.0 * scale).clamp(1.0, 1100.0).floor();
@@ -41,85 +49,92 @@ pub(super) fn start_page(
             let remaining = (ui.max_rect().bottom() - ui.cursor().top()).max(1.0).floor();
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                ui.allocate_ui_with_layout(
-                    vec2(menu_width, remaining),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(menu_width);
-                        egui::ScrollArea::vertical()
-                            .content_margin(0)
-                            .id_salt("home-menu")
-                            .max_height(remaining)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 6.0 * scale;
-                                // The mode on its way: chosen at the last frame,
-                                // or waiting for its pipelines.
-                                let going = starting.or(status.preparing.map(|_| status.sandbox));
-                                ui.add_enabled_ui(status.game_dir.is_some() && going.is_none(), |ui| {
-                                    // The last mode played is the primary one.
-                                    for (sandbox, name) in [(false, "STORY MODE"), (true, "SANDBOX")] {
-                                        let label = match status.preparing {
-                                            _ if going != Some(sandbox) => name.into(),
-                                            Some(done) => format!("PREPARING {:.0}%", done * 100.0),
-                                            None => "STARTING…".into(),
-                                        };
-                                        if menu_button(ui, menu_width, &label, sandbox == status.sandbox).clicked() {
-                                            chosen = Some(sandbox);
-                                        }
-                                    }
-                                    ui.label(
-                                        RichText::new("Sandbox: the whole map, free roam, no missions.")
-                                            .small()
-                                            .color(theme::MUTED),
-                                    );
-                                });
-                                if status.preparing.is_some() {
-                                    ui.label(
-                                        RichText::new(
-                                            "Compiling the game's shaders for this device: minutes the first time, \
-                                             seconds after.",
-                                        )
-                                        .small()
-                                        .color(theme::MUTED),
-                                    );
-                                }
-                                if menu_button(ui, menu_width, "SETTINGS", false).clicked() {
-                                    *go = Some(Some(Page::Settings));
-                                }
-                                if menu_button(ui, menu_width, if MOBILE { "FIND FILES" } else { "GAME FOLDER" }, false)
-                                    .clicked()
-                                {
-                                    actions.push(if MOBILE { Action::FindGame } else { Action::ChooseGame });
-                                }
-                                if !MOBILE && menu_button(ui, menu_width, "QUIT", false).clicked() {
-                                    actions.push(Action::Quit);
-                                }
-                            });
-                    },
-                );
-                ui.allocate_ui_with_layout(
-                    vec2(status_width, remaining),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(status_width);
-                        egui::ScrollArea::vertical()
-                            .content_margin(0)
-                            .id_salt("home-status")
-                            .max_height(remaining)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                card(ui, |ui| game_files(ui, status));
-                                if let Some(why) = status.last_failure {
-                                    card(ui, |ui| last_failure(ui, why, status.graphics_reset, actions));
-                                }
-                                ui.label(RichText::new(open_hint()).small().color(theme::MUTED));
-                            });
-                    },
-                );
+                column(ui, "home-menu", menu_width, remaining, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0 * scale;
+                    // The mode on its way: chosen at the last frame, or
+                    // waiting for its pipelines.
+                    let going = starting.or(status.preparing.map(|_| status.mode));
+                    ui.add_enabled_ui(status.game_dir.is_some() && going.is_none(), |ui| {
+                        for (mode, name, about) in MODES {
+                            let label = match status.preparing {
+                                _ if going != Some(mode) => name.into(),
+                                Some(done) => format!("PREPARING {:.0}%", done * 100.0),
+                                None => "STARTING…".into(),
+                            };
+                            if menu_button(ui, menu_width, &label, mode == status.mode).clicked() {
+                                chosen = Some(mode);
+                            }
+                            if let Some(about) = about {
+                                ui.label(RichText::new(about).small().color(theme::MUTED));
+                            }
+                        }
+                    });
+                    if status.preparing.is_some() {
+                        ui.add_space(6.0 * scale);
+                        ui.label(
+                            RichText::new(
+                                "Compiling the game's shaders for this device: minutes the first time, seconds after.",
+                            )
+                            .small()
+                            .color(theme::MUTED),
+                        );
+                    }
+                });
+                column(ui, "home-status", status_width, remaining, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if icon_button(ui, "⚙", "Settings").clicked() {
+                            *go = Some(Some(Page::Settings));
+                        }
+                        let files = if MOBILE { "Find files" } else { "Game folder" };
+                        if icon_button(ui, "🗁", files).clicked() {
+                            actions.push(if MOBILE { Action::FindGame } else { Action::ChooseGame });
+                        }
+                        if !MOBILE && icon_button(ui, "🗙", "Quit").clicked() {
+                            actions.push(Action::Quit);
+                        }
+                    });
+                    ui.add_space(4.0 * scale);
+                    card(ui, |ui| game_files(ui, status));
+                    if let Some(results) = status.benchmark {
+                        card(ui, |ui| last_benchmark(ui, results));
+                    }
+                    if let Some(why) = status.last_failure {
+                        card(ui, |ui| last_failure(ui, why, status.graphics_reset, actions));
+                    }
+                    ui.label(RichText::new(open_hint()).small().color(theme::MUTED));
+                });
             });
         });
     chosen
+}
+
+/// A column of the start page, scrolling if it has to.
+fn column(ui: &mut egui::Ui, id: &str, width: f32, height: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(vec2(width, height), egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_width(width);
+        egui::ScrollArea::vertical()
+            .content_margin(0)
+            .id_salt(id)
+            .max_height(height)
+            .auto_shrink([false, false])
+            .show(ui, add);
+    });
+}
+
+/// A small, half-transparent button with an icon: the app's own, next to
+/// the game's modes.
+fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
+    let scale = theme::density(ui);
+    focus(
+        ui.add(
+            egui::Button::new(
+                RichText::new(format!("{icon}  {label}")).size(14.0 * scale).color(Color32::from_white_alpha(220)),
+            )
+            .fill(Color32::from_black_alpha(140))
+            .min_size(vec2(0.0, 36.0 * scale))
+            .corner_radius((12.0 * scale) as u8),
+        ),
+    )
 }
 
 fn menu_button(ui: &mut egui::Ui, width: f32, label: &str, primary: bool) -> egui::Response {
@@ -185,6 +200,21 @@ fn game_files(ui: &mut egui::Ui, status: &Status) {
 
 fn graphics_reset_note() -> RichText {
     RichText::new("Graphics reset. Backup: settings.xml.bak").small().color(theme::MUTED)
+}
+
+fn last_benchmark(ui: &mut egui::Ui, results: &crate::benchmark::Results) {
+    let scale = theme::density(ui);
+    ui.label("Last benchmark");
+    ui.label(theme::heading(&format!("{:.0} FPS", results.avg_fps), 30.0 * scale));
+    ui.label(
+        RichText::new(format!(
+            "On average; {:.0} at least, {:.0}% of the frames in under 33 ms.",
+            results.min_fps,
+            results.smooth * 100.0
+        ))
+        .small()
+        .color(theme::MUTED),
+    );
 }
 
 fn last_failure(ui: &mut egui::Ui, why: &str, reset: bool, actions: &mut Vec<Action>) {
@@ -441,7 +471,7 @@ fn next_start(differs: bool) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsTab, Status, settings_page, start_page, theme};
+    use super::{Mode, SettingsTab, Status, settings_page, start_page, theme};
     use crate::settings::Settings;
     use egui::{Id, Pos2, Rect, SafeAreaInsets, vec2};
     use std::path::Path;
@@ -458,8 +488,18 @@ mod tests {
             metal_hud: false,
             refresh_rate: 120.0,
             preparing: None,
-            sandbox: false,
+            mode: Mode::Story,
+            benchmark: None,
         }
+    }
+
+    #[test]
+    fn start_page_icons_are_in_the_font() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        ctx.begin_pass(Default::default());
+        let _ = ctx.end_pass();
+        assert!(ctx.fonts_mut(|f| f.has_glyphs(&egui::FontId::proportional(14.0), "⚙🗁🗙")));
     }
 
     #[test]

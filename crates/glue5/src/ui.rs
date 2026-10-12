@@ -35,12 +35,19 @@ pub enum Page {
     Settings,
 }
 
+/// How the game starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Story,
+    /// The whole map, free roam, no missions.
+    Sandbox,
+    /// The game's fly-through of the map, its results on the start page.
+    Benchmark,
+}
+
 /// What the pages ask the application to do.
 pub enum Action {
-    /// Start the game: the story, or the sandbox (the map, no story).
-    Play {
-        sandbox: bool,
-    },
+    Play(Mode),
     Quit,
     /// The system's folder picker, for the game (desktop).
     ChooseGame,
@@ -91,8 +98,10 @@ pub struct Status<'a> {
     pub refresh_rate: f32,
     /// Play waits for the game's pipelines: how far they are (0 to 1).
     pub preparing: Option<f32>,
-    /// The game starts (or started last) in the sandbox.
-    pub sandbox: bool,
+    /// The mode Play starts (or the last one played).
+    pub mode: Mode,
+    /// The last benchmark's results.
+    pub benchmark: Option<&'a crate::benchmark::Results>,
 }
 
 /// The settings button over the game: from the safe area's top right
@@ -127,9 +136,8 @@ pub struct Ui {
     note: Option<String>,
     /// The render scale while its slider is dragged (it applies when let go).
     scale_edit: Option<f32>,
-    /// A mode was chosen (sandbox or not): this frame shows that it starts,
-    /// then it does.
-    starting: Option<bool>,
+    /// A mode was chosen: this frame shows that it starts, then it does.
+    starting: Option<Mode>,
     /// The settings button as last drawn (centre, radius), in points.
     gear: Option<(Pos2, f32)>,
     /// When egui wants to draw again (before the game, frames are drawn
@@ -412,8 +420,8 @@ impl Ui {
         } else if status.preparing.is_some() {
             self.repaint_in(Duration::from_millis(200));
         }
-        if let Some(sandbox) = starting {
-            actions.push(Action::Play { sandbox });
+        if let Some(mode) = starting {
+            actions.push(Action::Play(mode));
         }
         actions
     }

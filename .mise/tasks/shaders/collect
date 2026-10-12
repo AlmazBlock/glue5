@@ -53,15 +53,14 @@ max=$(level true ShaderQuality=2 ShadowQuality=3 ReflectionQuality=3 SSAO=2 Part
 # One run: level, what (bench, tour or world: the tour and the grid), then
 # headless options. Prints a line when done.
 run() {
-    local name=$1 kind=$2 dir="$out/$1-$2" engine_args=""
+    local name=$1 kind=$2 dir="$out/$1-$2"
     shift 2
     local args=("$@")
     mkdir -p "$dir"
     case $kind in
         bench)
             # It ends by itself, after ~200 s on an idle Mac.
-            engine_args="-benchmark -benchmarkIterations=1"
-            args+=(--for 900)
+            args+=(--benchmark --for 900)
             ;;
         tour | world)
             cp "$tour" "$dir/tour.txt"
@@ -84,7 +83,7 @@ run() {
             ;;
     esac
     local t0=$SECONDS status=0 n=0
-    GLUE5_ENGINE_ARGS="$engine_args" "$exe" --sync-pipelines --user-dir "$dir" "${args[@]}" >"$dir/log.txt" 2>&1 ||
+    "$exe" --sync-pipelines --user-dir "$dir" "${args[@]}" >"$dir/log.txt" 2>&1 ||
         status=$?
     [ -f "$dir/cache/pipelines.jsonl" ] && n=$(wc -l <"$dir/cache/pipelines.jsonl" | tr -d ' ')
     printf '%-14s %5d s  %5d new recipes%s\n' "$name $kind" $((SECONDS - t0)) "$n" \

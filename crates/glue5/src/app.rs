@@ -26,8 +26,8 @@ use crate::haptics;
 use crate::paths::{self, MOBILE};
 use crate::settings::{self, Settings, TouchMode};
 use crate::touch::Touch;
-use crate::ui::{self, Action, Page, Started, Status, Ui};
-use crate::{audio, keymap, pads};
+use crate::ui::{self, Action, Mode, Page, Started, Status, Ui};
+use crate::{audio, benchmark, keymap, pads};
 
 /// The settings button's opacity over the game while the touch controls
 /// are hidden (a controller in use, or touch off): there, but faint.
@@ -118,6 +118,8 @@ pub fn run() -> Result<()> {
     // Text input runs only while the game's text box is open (see `update`).
     let text_input = video.text_input();
     let refresh_rate = window_refresh_rate(&window);
+    let mode = if settings.sandbox { Mode::Sandbox } else { Mode::Story };
+    let last_benchmark = benchmark::last(&user_dir);
     let mut app = App {
         pads: pads::Pads::new(sdl.gamepad().map_err(|e| anyhow!("SDL gamepad: {e}"))?),
         mouse: sdl.mouse(),
@@ -146,6 +148,8 @@ pub fn run() -> Result<()> {
         refresh_rate,
         screen: Some(screen),
         play_requested: false,
+        mode,
+        benchmark: last_benchmark,
         game: None,
     };
     app.last_failure = std::fs::read_to_string(app.user_dir.join(FAILURE_FILE)).ok();
@@ -233,6 +237,10 @@ struct App {
     screen: Option<Screen>,
     /// Play was chosen: the game starts once its pipelines are prepared.
     play_requested: bool,
+    /// What Play starts.
+    mode: Mode,
+    /// The last benchmark's results.
+    benchmark: Option<benchmark::Results>,
     game: Option<Running>,
 }
 
@@ -260,6 +268,8 @@ impl App {
                         let _ = sdl3::messagebox::show_simple_message_box(flag, "Glue 5", text, &self.window);
                     }
                     relaunch(true);
+                } else if self.mode == Mode::Benchmark {
+                    self.benchmark_done();
                 }
                 return Ok(());
             }
@@ -406,7 +416,8 @@ impl App {
                 metal_hud: self.metal_hud,
                 refresh_rate: self.refresh_rate,
                 preparing: self.play_requested.then(|| self.screen.as_ref().and_then(Screen::progress)).flatten(),
-                sandbox: self.settings.sandbox,
+                mode: self.mode,
+                benchmark: self.benchmark.as_ref(),
             };
             // The settings button: on touch screens always, so that it stays
             // with a controller in use or the touch controls off.
@@ -423,8 +434,11 @@ impl App {
         for action in actions {
             match action {
                 Action::Quit => return Ok(true),
-                Action::Play { sandbox } => {
-                    self.settings.sandbox = sandbox;
+                Action::Play(mode) => {
+                    self.mode = mode;
+                    if mode != Mode::Benchmark {
+                        self.settings.sandbox = mode == Mode::Sandbox;
+                    }
                     self.play()?;
                 }
                 Action::ChooseGame => self.folder = Some(FolderPick::start(&self.window)),
@@ -530,7 +544,8 @@ impl App {
                 width: back_buffer.0,
                 height: back_buffer.1,
                 // The browser page's start choices: 1 the story, 2 the sandbox.
-                start_mode: if s.sandbox { 2 } else { 1 },
+                start_mode: if self.mode == Mode::Sandbox { 2 } else { 1 },
+                benchmark: self.mode == Mode::Benchmark,
                 low_memory: s.low_memory,
                 max_fps: s.max_fps,
             },
@@ -548,6 +563,27 @@ impl App {
         self.game = Some(Running { game, input: None, started, back_buffer, _audio: audio });
         self.ui.game_started();
         Ok(())
+    }
+
+    /// The benchmark is over (the engine asked to quit): on desktop the app
+    /// opens again on its start page, which shows the results; a phone app
+    /// cannot, so it shows them before it ends.
+    fn benchmark_done(&mut self) {
+        if !MOBILE {
+            relaunch(false);
+            return;
+        }
+        let text = match benchmark::last(&self.user_dir) {
+            Some(r) => format!(
+                "Benchmark: {:.0} fps on average, {:.0} at least; {:.0}% of the frames in under 33 ms.",
+                r.avg_fps,
+                r.min_fps,
+                r.smooth * 100.0
+            ),
+            None => "The benchmark is over.".into(),
+        };
+        let flag = sdl3::messagebox::MessageBoxFlag::INFORMATION;
+        let _ = sdl3::messagebox::show_simple_message_box(flag, "Glue 5", &text, &self.window);
     }
 
     /// The game has stopped working (a thread of the engine's failed): the
