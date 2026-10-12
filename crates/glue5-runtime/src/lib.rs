@@ -126,9 +126,18 @@ impl Config {
         // No quality switches: they would override the game's own settings
         // (its menu) at every start.
         // More engine switches, for experiments.
-        if let Ok(extra) = std::env::var("GLUE5_ENGINE_ARGS") {
-            args.extend(extra.split_whitespace().map(String::from));
+        let extra: Vec<String> =
+            std::env::var("GLUE5_ENGINE_ARGS").map(|e| e.split_whitespace().map(String::from).collect()).unwrap_or_default();
+        // On desktop a second frame queued: with one, the engine's render
+        // thread waits for the GPU to finish the previous frame before it
+        // starts the next. The game's benchmark ran 11-32 % faster with two
+        // on Windows, for a frame more of latency. Phones keep one until
+        // measured there.
+        let mobile = cfg!(any(target_os = "ios", target_os = "android"));
+        if !mobile && !extra.iter().any(|a| a.to_ascii_lowercase().starts_with("-framequeuelimit")) {
+            args.push("-FrameQueueLimit=2".into());
         }
+        args.extend(extra);
         args
     }
 }

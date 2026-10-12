@@ -390,11 +390,12 @@ prompts, aim assist and menu behaviour:
   and TAA), and interpolated frames need the HUD composed after them. On
   platforms without MetalFX, FSR 1 (EASU + RCAS, plain shaders) would take
   the spatial slot.
-- **Frames queued by the engine**: `CSystem::RenderThreadInit` sets
-  `FrameQueueLimit` to 1, so the engine's render thread waits for the GPU
-  to finish the previous frame before it starts the next ("Wait on queued
-  frames"). Allowing a second queued frame may reduce this wait, at the
-  cost of extra latency. Measure the effect with
+- **Frames queued by the engine on phones**: `CSystem::RenderThreadInit`
+  sets `FrameQueueLimit` to 1, so the engine's render thread waits for the
+  GPU to finish the previous frame before it starts the next ("Wait on
+  queued frames"). Desktop builds queue two: the game's benchmark ran
+  11-32 % faster on Windows, for a frame more of latency. Phones still
+  queue one; measure the effect there with
   `GLUE5_ENGINE_ARGS=-FrameQueueLimit=2 mise run ios:run`; the result
   depends on the CPU and GPU bottlenecks.
 - **Shader adaptation on naga's IR**: the translated WGSL is adapted as
