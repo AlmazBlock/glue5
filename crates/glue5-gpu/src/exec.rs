@@ -650,8 +650,12 @@ impl Gpu {
             depth_or_array_layers: size.depth_or_array_layers,
         };
         // Compressed textures are whole blocks: a first level that is not
-        // (half an odd number of blocks) stays decoded.
-        if tf.format.is_compressed() && (gpu_size.width % 4 != 0 || gpu_size.height % 4 != 0) {
+        // (half an odd number of blocks) stays decoded; so do 3D textures,
+        // which WebGPU has in BC (TEXTURE_COMPRESSION_BC_SLICED_3D) but not ETC2.
+        if matches!(tf.upload, format::Upload::Bc(_))
+            && tf.format.is_compressed()
+            && (gpu_size.width % 4 != 0 || gpu_size.height % 4 != 0 || dimension == wgpu::TextureDimension::D3)
+        {
             tf = tf.uncompressed();
         }
         let key = crate::recycle::TexKey {

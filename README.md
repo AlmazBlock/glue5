@@ -148,7 +148,8 @@ intent's extras).
 | `GLUE5_ENGINE_ARGS` | More engine switches, e.g. `-FrameQueueLimit=2`. |
 | `GLUE5_GPU_PROFILE=1` | GPU time per pass in the statistics. |
 | `GLUE5_PLAY=1` | Start the game without the start page (as `--play`; on a phone too). |
-| `GLUE5_NO_BC=1`, `GLUE5_NO_FLOAT32_FILTER=1` | Mobile GPU fallbacks on a desktop GPU: BC textures decoded on the CPU, 32-bit float textures unfiltered. |
+| `GLUE5_NO_BC=1`, `GLUE5_NO_FLOAT32_FILTER=1` | Mobile GPU fallbacks on a desktop GPU: BC textures decoded on the CPU (and re-encoded as ETC2 where the GPU has it), 32-bit float textures unfiltered. |
+| `GLUE5_NO_ETC2=1` | Decoded BC textures stay RGBA8 instead of ETC2. |
 | `GAMERESOURCEMB`, `KEEPTHREADS` | The engine's module settings (`gameResourceMB`, `keepThreads`), read like the browser build reads them under Node. |
 | `GLUE5_ALLOW_UNKNOWN_BUILD=1` | Build against a `game.wasm` other than the supported one. |
 | `GLUE5_TEAM` | Apple development team id, to sign the iOS app. |

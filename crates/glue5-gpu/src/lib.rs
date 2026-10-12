@@ -241,6 +241,10 @@ impl Device {
             // Test the CPU decoding path of devices without BC compression.
             features.remove(wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D);
         }
+        if std::env::var_os("GLUE5_NO_ETC2").is_some() {
+            // BC textures, where decoded, kept as RGBA8 (not re-encoded).
+            features.remove(wgpu::Features::TEXTURE_COMPRESSION_ETC2);
+        }
         let profile = std::env::var_os("GLUE5_GPU_PROFILE").is_some()
             && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         if profile {
