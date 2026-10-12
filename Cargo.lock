@@ -667,6 +667,7 @@ name = "glue5-gpu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "bcdec_rs",
  "block2",
  "bytemuck",

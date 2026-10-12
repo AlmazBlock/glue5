@@ -15,6 +15,8 @@ mod bc;
 mod done;
 mod draw;
 mod exec;
+#[cfg(not(target_vendor = "apple"))]
+mod fault;
 mod format;
 #[cfg(target_vendor = "apple")]
 mod metalfx;
@@ -250,17 +252,26 @@ impl Device {
         if profile {
             features |= wgpu::Features::TIMESTAMP_QUERY;
         }
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        let desc = wgpu::DeviceDescriptor {
             label: Some("glue5"),
             required_features: features,
             required_limits: adapter.limits(),
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
-        }))
-        .context("creating the GPU device")?;
+        };
+        #[cfg(target_vendor = "apple")]
+        let (device, queue) = pollster::block_on(adapter.request_device(&desc)).context("creating the GPU device")?;
+        #[cfg(not(target_vendor = "apple"))]
+        let (device, queue, faults) = fault::request_device(&adapter, &desc)?;
         log::info!("gpu: {} ({:?}, {}), features {:?}", info.name, info.backend, info.driver_info, features);
         device.on_uncaptured_error(error_handler(None));
-        device.set_device_lost_callback(|reason, message| log::error!("gpu: device lost ({reason:?}): {message}"));
+        device.set_device_lost_callback(move |reason, message| {
+            log::error!("gpu: device lost ({reason:?}): {message}");
+            #[cfg(not(target_vendor = "apple"))]
+            if let Some(faults) = &faults {
+                faults.report();
+            }
+        });
         Ok(Device { adapter, device, queue, features, profile })
     }
 }
