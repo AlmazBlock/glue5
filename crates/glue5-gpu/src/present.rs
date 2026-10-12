@@ -494,6 +494,12 @@ impl Output {
         }
     }
 
+    /// How long a frame may take: at the frame rate set, or 60 a second.
+    pub fn frame_budget(&self) -> Duration {
+        let fps = self.presentation.0.frame_rate.load(Ordering::Relaxed);
+        Duration::from_secs_f64(1.0 / if fps > 0 { fps } else { 60 } as f64)
+    }
+
     /// Whether this GPU has MetalFX upscaling.
     pub fn has_metalfx(&self) -> bool {
         #[cfg(target_vendor = "apple")]

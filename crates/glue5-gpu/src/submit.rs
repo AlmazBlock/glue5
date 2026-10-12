@@ -171,6 +171,7 @@ fn run(
     // since they began waiting.
     let mut graves: Vec<Grave> = Vec::new();
     let mut graves_frames = 0;
+    let mut last_shown: Option<Instant> = None;
     while let Ok((batch, encoded)) = rx.recv() {
         let Ok(mut buffers) = encoded.recv() else { return };
         let mut frame = None;
@@ -203,6 +204,11 @@ fn run(
             let t = Instant::now();
             out.show(&queue, frame);
             stats.present_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            // The frame threads' clocks follow how frames keep up (Android).
+            let now = Instant::now();
+            if let Some(last) = last_shown.replace(now) {
+                glue5_runtime::qos::frame(now - last, out.frame_budget());
+            }
         }
         // Destroying takes wgpu's device-wide resource lock for writing: it
         // waits for the encoding threads, which hold it through a whole
