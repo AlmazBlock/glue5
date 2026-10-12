@@ -274,10 +274,6 @@ and a hook can call the original through `glue5_game::orig`.
   (`MADV_FREE_REUSABLE` on Apple platforms, `MADV_DONTNEED` elsewhere): at
   most ~250 MB there, less where free space was never written. No compiler
   or wasm flag changes how much the engine writes.
-- **Reserve, not commit, the wasm memory on Windows.** `map` allocates the
-  whole range committed, which counts against the page file's commit limit
-  (not RAM); `VirtualAlloc` with `MEM_RESERVE`, committing as the memory
-  grows, would not.
 
 ## Notes
 

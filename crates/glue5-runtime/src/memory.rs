@@ -18,13 +18,17 @@ unsafe impl Sync for WasmMemory {}
 
 impl WasmMemory {
     /// Reserves address space for the largest memory the module may grow to
-    /// (or the most the OS grants, but at least the initial size). Pages are
-    /// committed lazily by the OS on first touch.
+    /// (or the most the OS grants, but at least the initial size). Pages count
+    /// once written; on Windows, which does not overcommit, the memory's
+    /// current size is committed too ([`commit`]).
     pub fn reserve() -> Result<Self> {
         let mut max_pages = MEMORY_MAX_PAGES;
         loop {
             let bytes = (max_pages * PAGE_SIZE) as usize;
             if let Some(base) = map(bytes) {
+                if !commit(base, 0, MEMORY_INITIAL_PAGES * PAGE_SIZE) {
+                    bail!("cannot commit {} MiB for the wasm memory", (MEMORY_INITIAL_PAGES * PAGE_SIZE) >> 20);
+                }
                 log::info!("wasm memory: {} MiB reserved at {base:p}", bytes >> 20);
                 let desc = unsafe { Memory::new(base, MEMORY_INITIAL_PAGES, max_pages) };
                 return Ok(WasmMemory { desc, base, max_pages });
@@ -49,12 +53,17 @@ impl WasmMemory {
     }
 
     /// `emscripten_resize_heap`: memory is already reserved, growing only
-    /// publishes the new size.
+    /// publishes the new size (and commits it, on Windows).
     pub fn grow_to(&self, bytes: u64) -> bool {
         if bytes > self.max_bytes() {
             return false;
         }
         let pages = bytes.div_ceil(PAGE_SIZE);
+        // Committed before it is published: committing pages that are
+        // already is harmless, so racing growers need no lock.
+        if !commit(self.base, self.size(), pages * PAGE_SIZE) {
+            return false;
+        }
         unsafe {
             if pages > (*self.desc).pages {
                 (*self.desc).pages = pages;
@@ -80,13 +89,33 @@ fn map(bytes: usize) -> Option<*mut u8> {
     (ptr != libc::MAP_FAILED).then_some(ptr as *mut u8)
 }
 
+/// Makes `[from, to)` of the mapping usable. Unix systems overcommit: the
+/// whole mapping is, already.
+#[cfg(unix)]
+fn commit(_base: *mut u8, _from: u64, _to: u64) -> bool {
+    true
+}
+
+/// Address space only: committed memory counts against the system's commit
+/// limit (RAM and page file), however little of it is touched.
 #[cfg(windows)]
 fn map(bytes: usize) -> Option<*mut u8> {
-    // Reserve and commit lazily would need a fault handler; plain commit is fine
-    // with Windows' overcommit-free model only if the page file allows it.
-    let layout = std::alloc::Layout::from_size_align(bytes, 65536).ok()?;
-    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-    (!ptr.is_null()).then_some(ptr)
+    use windows_sys::Win32::System::Memory::{MEM_RESERVE, PAGE_NOACCESS, VirtualAlloc};
+    let ptr = unsafe { VirtualAlloc(std::ptr::null(), bytes, MEM_RESERVE, PAGE_NOACCESS) };
+    (!ptr.is_null()).then_some(ptr as *mut u8)
+}
+
+/// Commits `[from, to)` of the reservation, as the memory grows: its only
+/// growth is `emscripten_resize_heap` ([`WasmMemory::grow_to`]). Committed
+/// pages read as zeros, as wasm's do.
+#[cfg(windows)]
+fn commit(base: *mut u8, from: u64, to: u64) -> bool {
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, PAGE_READWRITE, VirtualAlloc};
+    if to <= from {
+        return true;
+    }
+    let ptr = unsafe { VirtualAlloc(base.add(from as usize).cast(), (to - from) as usize, MEM_COMMIT, PAGE_READWRITE) };
+    !ptr.is_null()
 }
 
 /// A view of wasm memory for host code. Addresses are wasm (linear memory)
