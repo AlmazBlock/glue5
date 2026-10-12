@@ -63,4 +63,13 @@ pub const HOOKS: &[(&str, &str)] = &[
     // array holds and walked to the first null: the host keeps the last
     // slot null (scenario.rs).
     ("is_position_clear_for_ped", "CPedPlacement::IsPositionClearForPed(rage::Vector3 const&, float, bool, int, CEntity**, bool, bool, bool)"),
+    // The map tour of automated runs (tour.rs): the warp manager's update,
+    // once a frame on the main thread, moves the player with the engine's
+    // teleport and sets the hour and the weather.
+    ("warp_update", "CWarpManager::Update()"),
+    ("find_player_ped", "FindPlayerPed()"),
+    ("warp", "CWarpManager::SetWarp(rage::Vector3 const&, rage::Vector3 const&, float, bool, bool, float, bool)"),
+    ("clock_set_time", "CClock::SetTime(int, int, int)"),
+    ("weather_index", "CWeather::GetTypeIndex(unsigned int)"),
+    ("weather_force_now", "CWeather::ForceTypeNow(int, unsigned int)"),
 ];

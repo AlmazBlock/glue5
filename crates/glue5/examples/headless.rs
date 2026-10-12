@@ -36,6 +36,9 @@ it stops working (an engine thread's trap).
                         (settings.xml names, e.g. ShadowQuality=3), after --low
   --sandbox             start in the sandbox (the map, no story) instead of
                         the story mode
+  --tour <file> <s>     visit the map: s seconds at each stop of file (lines
+                        `x y z hour weather [# name]`), the camera turning;
+                        the run ends after the last (use with --sandbox)
   --user-dir <dir>      saves, settings and the pipeline cache (default:
                         glue5-headless in the temporary directory)
   --audio               play the sound into a pretend device, as the app does
@@ -63,6 +66,7 @@ fn main() -> Result<()> {
     let (mut presses, mut keys, mut run_for, mut shots) = (Vec::new(), Vec::new(), None, None);
     let mut game_settings: Vec<(String, String)> = Vec::new();
     let mut start_mode = 1;
+    let mut tour = None;
     let mut user_dir = std::env::temp_dir().join("glue5-headless");
     let mut args = std::env::args().skip(1);
     let mut next = || args.next().context(USAGE);
@@ -95,6 +99,11 @@ fn main() -> Result<()> {
                 game_settings.push((name.into(), value.into()));
             }
             "--sandbox" => start_mode = 2,
+            "--tour" => {
+                let path = next()?;
+                let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
+                tour = Some((glue5_runtime::tour::parse(&text)?, Duration::from_secs_f64(next()?.parse()?)));
+            }
             "--user-dir" => user_dir = PathBuf::from(next()?),
             "--audio" => audio = true,
             "--sync-pipelines" => sync_pipelines = true,
@@ -127,6 +136,12 @@ fn main() -> Result<()> {
         }
         glue5_gpu::backend(settings, None)
     };
+    // The camera turns all along the tour: the stick held half way.
+    let spin = if tour.is_some() { [0.5, 0.0] } else { [0.0; 2] };
+    if let Some((stops, stay)) = tour {
+        log::info!("tour: {} stops, {} s each", stops.len(), stay.as_secs_f64());
+        glue5_runtime::tour::start(stops, stay);
+    }
     let game = glue5_runtime::start(
         glue5_runtime::Config { game_dir, user_dir, width, height, start_mode, low_memory: low, max_fps },
         gpu,
@@ -177,12 +192,16 @@ fn main() -> Result<()> {
             }
         }
         let buttons = presses.iter().filter(|(at, _)| (*at..at + HOLD).contains(&t)).fold(0, |b, (_, bits)| b | bits);
-        input::set_gamepad(0, Gamepad { connected: true, buttons, ..Default::default() });
+        input::set_gamepad(0, Gamepad { connected: true, buttons, right: spin, ..Default::default() });
         if run_for.is_some_and(|limit| t >= limit) {
             std::process::exit(0);
         }
         if let Some(exit) = glue5_runtime::exit::requested() {
             log::info!("the engine asked for {exit:?} at {t:.1} s");
+            std::process::exit(0);
+        }
+        if glue5_runtime::tour::finished() {
+            log::info!("tour: done at {t:.1} s");
             std::process::exit(0);
         }
         if glue5_runtime::exit::failed().is_some() {

@@ -21,6 +21,7 @@ mod scenario;
 mod skin;
 mod threads;
 mod time;
+pub mod tour;
 mod trap_site;
 pub mod vfs;
 
@@ -229,6 +230,12 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         texture3d_dtor: Some(readback::texture3d_dtor),
         texture3d_delete: Some(readback::texture3d_delete),
         is_position_clear_for_ped: Some(scenario::is_position_clear_for_ped),
+        warp_update: Some(tour::warp_update),
+        find_player_ped: None,
+        warp: None,
+        clock_set_time: None,
+        weather_index: None,
+        weather_force_now: None,
     };
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;
