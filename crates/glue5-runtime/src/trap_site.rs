@@ -44,7 +44,38 @@ fn frames() -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn frames() -> Vec<String> {
+    use std::ffi::c_void;
+
+    use windows_sys::Win32::Foundation::HMODULE;
+    use windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
+        GetModuleHandleExW,
+    };
+
+    const MAX: usize = 64;
+    let mut ips = [std::ptr::null_mut::<c_void>(); MAX];
+    let n = unsafe { RtlCaptureStackBackTrace(0, MAX as u32, ips.as_mut_ptr(), std::ptr::null_mut()) } as usize;
+    ips[..n]
+        .iter()
+        .map(|&ip| {
+            let mut module: HMODULE = std::ptr::null_mut();
+            let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+            if unsafe { GetModuleHandleExW(flags, ip as *const u16, &mut module) } == 0 {
+                return format!("{:#x}", ip as usize);
+            }
+            let mut path = [0u16; 260];
+            let len = unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) } as usize;
+            let path = String::from_utf16_lossy(&path[..len]);
+            let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_owned();
+            format!("{name}+{:#x}", ip as usize - module as usize)
+        })
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn frames() -> Vec<String> {
     vec!["(not recorded on this platform)".into()]
 }
