@@ -101,16 +101,78 @@ fn paint_label(ui: &Ui, rect: Rect, text: &str, size: f32, offset: f32, color: C
     ui.painter().galley(pos, galley, color);
 }
 
-pub(super) fn text_field(ui: &mut Ui, text: &mut String, max: usize) -> Response {
+/// A line of text in a field of its own, its name on the left: the choice
+/// control's look. Anywhere on the field gives the text the focus.
+pub(super) fn text_field(ui: &mut Ui, label: &str, text: &mut String, hint: &str, max: usize) -> Response {
     let scale = density(ui);
-    focus(
-        ui.add(
-            TextEdit::singleline(text)
-                .char_limit(max)
-                .desired_width(ui.available_width())
-                .margin(vec2(10.0 * scale, 12.0 * scale)),
-        ),
-    )
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0 * scale), Sense::hover());
+    let radius = 12.0 * scale;
+    ui.painter().rect_filled(rect, radius, Color32::from_gray(36));
+    let field = ui.interact(rect, ui.id().with(label), Sense::click());
+    let inner = rect.shrink2(vec2(14.0 * scale, 0.0));
+    let label_width = 52.0 * scale;
+    ui.painter().text(inner.left_center(), Align2::LEFT_CENTER, label, FontId::proportional(13.0 * scale), MUTED);
+    let edit_rect = Rect::from_min_max(pos2(inner.left() + label_width, inner.top()), inner.max);
+    let edit = ui
+        .scope_builder(UiBuilder::new().max_rect(edit_rect).layout(Layout::left_to_right(Align::Center)), |ui| {
+            ui.add(
+                TextEdit::singleline(text)
+                    .frame(Frame::NONE)
+                    .hint_text(RichText::new(hint).color(Color32::from_gray(100)))
+                    .char_limit(max)
+                    .font(FontId::proportional(15.0 * scale))
+                    .margin(Vec2::ZERO)
+                    .desired_width(edit_rect.width()),
+            )
+        })
+        .inner;
+    if field.clicked() {
+        edit.request_focus();
+    }
+    if edit.has_focus() {
+        ui.painter().rect_stroke(rect, radius, Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
+    }
+    focus(edit)
+}
+
+/// Options side by side, the chosen one white (Settings' tabs, ...).
+/// Returns whether the value changed.
+pub(super) fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], height: f32) -> bool {
+    let scale = density(ui);
+    let previous = *value;
+    Frame::new()
+        .fill(Color32::from_gray(24))
+        .corner_radius((16.0 * scale) as u8)
+        .inner_margin((4.0 * scale) as i8)
+        .show(ui, |ui| {
+            let gap = 4.0 * scale;
+            let w = (ui.available_width() - gap * (options.len() as f32 - 1.0)) / options.len() as f32;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for &(option, label) in options {
+                    let on = *value == option;
+                    let (rect, _) = ui.allocate_exact_size(vec2(w, height), Sense::hover());
+                    let response = ui.interact(rect, ui.id().with(label), Sense::click());
+                    response.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, label));
+                    let radius = 12.0 * scale;
+                    let fill = match (on, response.hovered() || response.has_focus()) {
+                        (true, _) => Color32::WHITE,
+                        (false, true) => Color32::from_gray(44),
+                        (false, false) => Color32::TRANSPARENT,
+                    };
+                    ui.painter().rect_filled(rect, radius, fill);
+                    let font = FontId::new(16.0 * scale, FontFamily::Name("condensed".into()));
+                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, if on { INK } else { MUTED });
+                    if response.has_focus() {
+                        ui.painter().rect_stroke(rect, radius, Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
+                    }
+                    if focus(response).clicked() {
+                        *value = option;
+                    }
+                }
+            });
+        });
+    *value != previous
 }
 
 pub(super) fn action_button(ui: &mut Ui, text: &str) -> Response {

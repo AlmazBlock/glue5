@@ -1,5 +1,7 @@
 //! Home and the floating settings window share the same responsive controls.
-use super::widgets::{Control, action_button, choice, close_button, focus, setting, slider, text_field, toggle};
+use super::widgets::{
+    Control, action_button, choice, close_button, focus, segmented, setting, slider, text_field, toggle,
+};
 use super::{Action, Mode, Page, SettingsTab, Status, WARN, theme};
 use crate::paths::{self, MOBILE};
 use crate::settings::{self, RENDER_SCALES, Settings, TouchMode};
@@ -31,11 +33,15 @@ const READY: Color32 = Color32::from_rgb(120, 205, 145);
 /// The start page: the title with the app's own buttons, the game's modes
 /// and, quieter, what the app knows. Two columns where there is room, one
 /// on an upright phone. Returns the mode chosen, if one was. `starting`:
-/// the mode chosen at the last frame.
+/// the mode chosen at the last frame; `online_open`: GTA Online's card is
+/// open (its lobby and the player's name).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_page(
     ctx: &egui::Context,
+    settings: &mut Settings,
     status: &Status,
     starting: Option<Mode>,
+    online_open: &mut bool,
     actions: &mut Vec<Action>,
     go: &mut Option<Option<Page>>,
 ) -> Option<Mode> {
@@ -79,7 +85,7 @@ pub(super) fn start_page(
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
                     column(ui, "home-modes", menu_width, remaining, |ui| {
-                        chosen = mode_list(ui, status, starting, menu_width);
+                        chosen = mode_list(ui, settings, status, starting, online_open, menu_width);
                     });
                     column(ui, "home-status", width - menu_width - gap, remaining, |ui| info(ui, status, actions));
                 });
@@ -90,7 +96,7 @@ pub(super) fn start_page(
                         info(ui, status, actions);
                         ui.add_space(8.0 * scale);
                     }
-                    chosen = mode_list(ui, status, starting, width);
+                    chosen = mode_list(ui, settings, status, starting, online_open, width);
                     if status.game_dir.is_some() {
                         ui.add_space(8.0 * scale);
                         info(ui, status, actions);
@@ -133,45 +139,100 @@ fn column(ui: &mut egui::Ui, id: &str, width: f32, height: f32, add: impl FnOnce
 }
 
 /// The modes, one card each. The one on its way (chosen at the last frame,
-/// or waiting for its pipelines) says so; the others wait.
-fn mode_list(ui: &mut egui::Ui, status: &Status, starting: Option<Mode>, width: f32) -> Option<Mode> {
+/// or waiting for its pipelines) says so; the others wait. GTA Online opens
+/// in place first (`open`): the lobby and the player's name, then Play.
+fn mode_list(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    status: &Status,
+    starting: Option<Mode>,
+    open: &mut bool,
+    width: f32,
+) -> Option<Mode> {
     let going = starting.or(status.preparing.map(|_| status.mode));
     let ready = status.game_dir.is_some() && going.is_none();
+    *open &= ready;
     let mut chosen = None;
     for (mode, name, about) in MODES {
-        let primary = mode == status.mode;
+        let id = Id::new(("mode", name));
+        let look = if mode == status.mode { Look::Primary } else { Look::Plain };
+        let online = mode == Mode::Online;
+        // Fades the open card's controls in.
+        let shown = if online { ui.ctx().animate_bool_responsive(id.with("open"), *open) } else { 0.0 };
         if going == Some(mode) {
             match status.preparing {
                 Some(done) => mode_card(
                     ui,
+                    id,
                     width,
                     &format!("PREPARING {:.0}%", done * 100.0),
                     "Compiling the game's shaders for this device: minutes the first time, seconds after.",
-                    primary,
+                    look,
+                    None,
                     Some(done),
                 ),
-                None => mode_card(ui, width, "STARTING…", about, primary, None),
+                None => mode_card(ui, id, width, "STARTING…", about, look, None, None),
             };
-        } else if ui.add_enabled_ui(ready, |ui| mode_card(ui, width, name, about, primary, None)).inner.clicked() {
-            chosen = Some(mode);
+        } else if online && *open {
+            if online_card(ui, id, width, about, shown, settings, open) {
+                chosen = Some(mode);
+            }
+        } else {
+            let chevron = if online { Chevron::Opens } else { Chevron::Starts };
+            let card = ui.add_enabled_ui(ready, |ui| mode_card(ui, id, width, name, about, look, Some(chevron), None));
+            if card.inner.clicked() {
+                if online {
+                    *open = true;
+                    ui.data_mut(|d| d.insert_temp(id.with("reveal"), true));
+                    if settings.online_name.trim().is_empty() {
+                        settings.online_name = settings::default_online_name();
+                    }
+                    ui.ctx().request_repaint();
+                } else {
+                    chosen = Some(mode);
+                }
+            }
         }
     }
     chosen
 }
 
-/// A mode: its name and what it is, a chevron, the whole card a button.
-/// The last one played is white. `progress`: a bar along the bottom.
+/// How a mode's card looks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Look {
+    Plain,
+    /// White: the last one played.
+    Primary,
+    /// The open GTA Online card's top (the card draws the background).
+    Open,
+}
+
+/// What the card's chevron says: it starts the game, it opens, it closes.
+#[derive(Clone, Copy)]
+enum Chevron {
+    Starts,
+    Opens,
+    Closes,
+}
+
+/// A mode: its name and what it is, a chevron, the whole card a button
+/// (without a chevron, it is on its way). `progress`: a bar along the
+/// bottom. `id` stays the same whatever the card says.
+#[allow(clippy::too_many_arguments)]
 fn mode_card(
     ui: &mut egui::Ui,
+    id: Id,
     width: f32,
     name: &str,
     about: &str,
-    primary: bool,
+    look: Look,
+    chevron: Option<Chevron>,
     progress: Option<f32>,
 ) -> egui::Response {
     let scale = theme::density(ui);
     let pad = vec2(20.0, 12.0) * scale;
-    let (ink, soft) = if primary { (theme::INK, Color32::from_gray(92)) } else { (Color32::WHITE, theme::MUTED) };
+    let (ink, soft) =
+        if look == Look::Primary { (theme::INK, Color32::from_gray(92)) } else { (Color32::WHITE, theme::MUTED) };
     let text_width = (width - 2.0 * pad.x - 24.0 * scale).max(1.0);
     let galley = |text: egui::RichText, wrap| {
         egui::WidgetText::from(text).into_galley(ui, Some(wrap), text_width, egui::TextStyle::Body)
@@ -180,16 +241,18 @@ fn mode_card(
     let about = galley(RichText::new(about).size(12.0 * scale).color(soft), egui::TextWrapMode::Wrap);
     let text_height = title.size().y + 2.0 * scale + about.size().y;
     let height = (text_height + 2.0 * pad.y).max(MODE_HEIGHT * scale);
-    let interactive = progress.is_none() && name != "STARTING…" && ui.is_enabled();
-    let sense = if interactive { Sense::click() } else { Sense::hover() };
-    let (rect, response) = ui.allocate_exact_size(vec2(width, height), sense);
+    let interactive = chevron.is_some() && ui.is_enabled();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let response = ui.interact(rect, id, if interactive { Sense::click() } else { Sense::hover() });
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
     let lit = interactive && (response.hovered() || response.has_focus());
-    let fill = match (primary, lit) {
-        (true, false) => Color32::WHITE,
-        (true, true) => Color32::from_gray(228),
-        (false, false) => Color32::from_black_alpha(215),
-        (false, true) => Color32::from_rgba_unmultiplied(40, 41, 45, 235),
+    let fill = match (look, lit) {
+        (Look::Primary, false) => Color32::WHITE,
+        (Look::Primary, true) => Color32::from_gray(228),
+        (Look::Plain, false) => Color32::from_black_alpha(215),
+        (Look::Plain, true) => Color32::from_rgba_unmultiplied(40, 41, 45, 235),
+        (Look::Open, false) => Color32::TRANSPARENT,
+        (Look::Open, true) => Color32::from_white_alpha(8),
     };
     let radius = 18.0 * scale;
     let painter = ui.painter();
@@ -197,9 +260,16 @@ fn mode_card(
     let top = rect.center().y - text_height * 0.5;
     painter.galley(pos2(rect.left() + pad.x, top), title.clone(), ink);
     painter.galley(pos2(rect.left() + pad.x, top + title.size().y + 2.0 * scale), about, soft);
-    if interactive {
-        let at = pos2(rect.right() - pad.x + 4.0 * scale, rect.center().y);
-        painter.text(at, Align2::RIGHT_CENTER, "›", egui::FontId::proportional(28.0 * scale), soft);
+    if let Some(chevron) = chevron.filter(|_| interactive) {
+        let at = pos2(rect.right() - pad.x - 4.0 * scale, rect.center().y);
+        let towards = match chevron {
+            Chevron::Starts => vec2(1.0, 0.0),
+            Chevron::Opens => vec2(0.0, 1.0),
+            Chevron::Closes => vec2(0.0, -1.0),
+        };
+        let (side, depth) = (towards.rot90() * 6.0 * scale, towards * 3.5 * scale);
+        let stroke = Stroke::new(2.0 * scale, soft);
+        painter.add(egui::Shape::line(vec![at - depth + side, at + depth, at - depth - side], stroke));
     }
     if let Some(done) = progress {
         let rail = Rect::from_min_max(
@@ -211,7 +281,119 @@ fn mode_card(
         painter.rect_filled(filled, 2.0 * scale, ink);
     }
     if response.has_focus() {
-        painter.rect_stroke(rect, radius, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
+        focus_ring(ui, rect, radius);
+    }
+    focus(response)
+}
+
+/// Around a focused card or button, a little apart (white on white shows).
+fn focus_ring(ui: &egui::Ui, rect: Rect, radius: f32) {
+    let gap = 3.0 * theme::density(ui);
+    let stroke = Stroke::new(2.0, Color32::WHITE);
+    ui.painter().rect_stroke(rect.expand(gap), radius + gap, stroke, StrokeKind::Outside);
+}
+
+/// GTA Online, open: everyone's lobby or a private one with its code, the
+/// player's name, and Play, faded in by `shown`. Its top closes it (`open`
+/// false). True when Play is pressed.
+fn online_card(
+    ui: &mut egui::Ui,
+    id: Id,
+    width: f32,
+    about: &str,
+    shown: f32,
+    settings: &mut Settings,
+    open: &mut bool,
+) -> bool {
+    let scale = theme::density(ui);
+    let mut play = false;
+    let card = egui::Frame::new()
+        .fill(Color32::from_black_alpha(230))
+        .stroke(Stroke::new(1.0, Color32::from_gray(70)))
+        .corner_radius((18.0 * scale) as u8)
+        .show(ui, |ui| {
+            let width = width - 2.0;
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            if mode_card(ui, id, width, "GTA ONLINE", about, Look::Open, Some(Chevron::Closes), None).clicked() {
+                *open = false;
+            }
+            ui.scope(|ui| {
+                ui.multiply_opacity(shown);
+                let margin = |v: f32| (v * scale) as i8;
+                egui::Frame::new()
+                    .inner_margin(egui::Margin {
+                        left: margin(20.0),
+                        right: margin(20.0),
+                        top: 0,
+                        bottom: margin(20.0),
+                    })
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 10.0 * scale;
+                        lobby_controls(ui, settings);
+                        ui.add_space(2.0 * scale);
+                        let private = settings.online_private;
+                        let ready = !private || !settings::lobby_key(&settings.online_lobby).is_empty();
+                        let label = if private { "PLAY PRIVATE" } else { "PLAY" };
+                        play = ui.add_enabled_ui(ready, |ui| play_button(ui, label)).inner.clicked();
+                    });
+            });
+        });
+    // Just opened: all of it in view (a phone on its side scrolls).
+    if ui.data_mut(|d| d.remove_temp::<bool>(id.with("reveal"))).is_some() {
+        ui.scroll_to_rect(card.response.rect, None);
+    }
+    play
+}
+
+/// Everyone's lobby or a private one; the private one's code, which a new
+/// one replaces; the player's name.
+fn lobby_controls(ui: &mut egui::Ui, settings: &mut Settings) {
+    let scale = theme::density(ui);
+    let lobbies = [(false, "PUBLIC"), (true, "PRIVATE")];
+    if segmented(ui, &mut settings.online_private, &lobbies, 38.0 * scale)
+        && settings.online_private
+        && settings::lobby_key(&settings.online_lobby).is_empty()
+    {
+        settings.online_lobby = settings::new_lobby_code();
+    }
+    let what = if settings.online_private {
+        "Only the players with the same code: share it with your friends."
+    } else {
+        "Anyone playing now, matched automatically."
+    };
+    ui.label(RichText::new(what).size(12.0 * scale).color(theme::MUTED));
+    if settings.online_private {
+        ui.horizontal(|ui| {
+            let button = 92.0 * scale;
+            let field = ui.available_width() - button - ui.spacing().item_spacing.x;
+            ui.allocate_ui(vec2(field, 44.0 * scale), |ui| {
+                text_field(ui, "Code", &mut settings.online_lobby, "K7Q-29F", 11)
+            });
+            let new = egui::Button::new(RichText::new("⟳  New").size(14.0 * scale)).corner_radius((12.0 * scale) as u8);
+            if focus(ui.add_sized([button, 44.0 * scale], new)).on_hover_text("A new code").clicked() {
+                settings.online_lobby = settings::new_lobby_code();
+            }
+        });
+        settings.online_lobby.make_ascii_uppercase();
+    }
+    text_field(ui, "Name", &mut settings.online_name, "Player", 16);
+}
+
+/// The white button that starts the game.
+fn play_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let scale = theme::density(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0 * scale), Sense::hover());
+    let response = ui.interact(rect, ui.id().with("play"), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
+    let lit = response.hovered() || response.has_focus();
+    let radius = 14.0 * scale;
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, if lit { Color32::from_gray(228) } else { Color32::WHITE });
+    let font = egui::FontId::new(20.0 * scale, egui::FontFamily::Name("condensed".into()));
+    painter.text(rect.center(), Align2::CENTER_CENTER, label, font, theme::INK);
+    if response.has_focus() {
+        focus_ring(ui, rect, radius);
     }
     focus(response)
 }
@@ -336,40 +518,8 @@ pub(super) fn settings_page(
 ) -> bool {
     sheet(ctx, "settings-window", "SETTINGS", |ui| {
         let scale = theme::density(ui);
-        egui::Frame::new()
-            .fill(Color32::from_gray(24))
-            .corner_radius((16.0 * scale) as u8)
-            .inner_margin((4.0 * scale) as i8)
-            .show(ui, |ui| {
-                let w = (ui.available_width() - 8.0 * scale) / 3.0;
-                ui.spacing_mut().interact_size.y = 40.0 * scale;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0 * scale;
-                    for (value, label) in [
-                        (SettingsTab::Video, "VIDEO"),
-                        (SettingsTab::Controls, "CONTROLS"),
-                        (SettingsTab::Game, "GAME"),
-                    ] {
-                        let active = *tab == value;
-                        if focus(
-                            ui.add_sized(
-                                [w, 40.0 * scale],
-                                egui::Button::new(theme::heading(label, 16.0 * scale).color(if active {
-                                    theme::INK
-                                } else {
-                                    theme::MUTED
-                                }))
-                                .fill(if active { Color32::WHITE } else { Color32::TRANSPARENT })
-                                .corner_radius((12.0 * scale) as u8),
-                            ),
-                        )
-                        .clicked()
-                        {
-                            *tab = value;
-                        }
-                    }
-                });
-            });
+        let tabs = [(SettingsTab::Video, "VIDEO"), (SettingsTab::Controls, "CONTROLS"), (SettingsTab::Game, "GAME")];
+        segmented(ui, tab, &tabs, 40.0 * scale);
         ui.add_space(10.0 * scale);
         if let Some(note) = note {
             ui.label(RichText::new(note).small().color(WARN));
@@ -541,13 +691,6 @@ fn settings_items(
                 if action_button(ui, if MOBILE { "Find files" } else { "Choose…" }).clicked() {
                     actions.push(if MOBILE { Action::FindGame } else { Action::ChooseGame });
                 }
-            });
-            let next = next_start(started.is_some());
-            setting(ui, "Online name", Control::Action, next.or(Some("As the other players see you")), |ui| {
-                text_field(ui, &mut settings.online_name, 16)
-            });
-            setting(ui, "Private lobby", Control::Action, next.or(Some("A code to play with friends only")), |ui| {
-                text_field(ui, &mut settings.online_lobby, 32)
             });
             if started.is_none() {
                 setting(
@@ -735,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn a_controller_lands_on_the_modes_first() {
+    fn a_controller_lands_on_the_modes_first_and_opens_gta_online() {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let key = |key| {
@@ -747,19 +890,49 @@ mod tests {
                 modifiers: Default::default(),
             })
         };
+        let mut settings = Settings::default();
+        let mut open = false;
         let mut chosen = None;
-        for events in
-            [vec![], key(egui::Key::Tab).to_vec(), key(egui::Key::ArrowDown).to_vec(), key(egui::Key::Enter).to_vec()]
-        {
+        let keys = [None, Some(egui::Key::Tab), Some(egui::Key::ArrowDown), Some(egui::Key::Enter), None];
+        for key in keys.map(|k| k.map_or(Vec::new(), |k| key(k).to_vec())) {
             let raw = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))),
-                events,
+                events: key,
                 ..Default::default()
             };
-            ctx.run_ui(raw, |root| chosen = start_page(root.ctx(), &status(), None, &mut Vec::new(), &mut None))
-                .textures_delta
-                .clear();
+            ctx.run_ui(raw, |root| {
+                chosen = start_page(root.ctx(), &mut settings, &status(), None, &mut open, &mut Vec::new(), &mut None)
+            })
+            .textures_delta
+            .clear();
         }
+        // GTA Online opens first, its card keeps the focus, a name is made up.
+        assert_eq!(chosen, None);
+        assert!(open);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(Id::new(("mode", "GTA ONLINE"))));
+        assert!(!settings.online_name.is_empty());
+
+        // Down to the lobbies, right to the private one: a code is made up.
+        // Then down to Play, which starts.
+        let mut keys = vec![egui::Key::ArrowDown, egui::Key::ArrowRight, egui::Key::Enter];
+        keys.extend([egui::Key::ArrowDown; 3]);
+        keys.push(egui::Key::Enter);
+        for k in keys.into_iter().map(Some).chain([None]) {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))),
+                events: k.map_or(Vec::new(), |k| key(k).to_vec()),
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |root| {
+                let page =
+                    start_page(root.ctx(), &mut settings, &status(), None, &mut open, &mut Vec::new(), &mut None);
+                chosen = chosen.or(page);
+            })
+            .textures_delta
+            .clear();
+        }
+        assert!(settings.online_private);
+        assert_eq!(crate::settings::lobby_key(&settings.online_lobby).len(), 6, "{}", settings.online_lobby);
         assert_eq!(chosen, Some(Mode::Online));
     }
 
@@ -793,7 +966,15 @@ mod tests {
             for _ in 0..4 {
                 let mut output =
                     ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |root| {
-                        start_page(root.ctx(), &status(), None, &mut Vec::new(), &mut None);
+                        start_page(
+                            root.ctx(),
+                            &mut Settings::default(),
+                            &status(),
+                            None,
+                            &mut false,
+                            &mut Vec::new(),
+                            &mut None,
+                        );
                     });
                 output.textures_delta.clear();
             }

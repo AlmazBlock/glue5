@@ -148,6 +148,8 @@ pub struct Ui {
     scale_edit: Option<f32>,
     /// A mode was chosen: this frame shows that it starts, then it does.
     starting: Option<Mode>,
+    /// GTA Online's card on the start page is open (its lobby and name).
+    online_open: bool,
     /// The settings button as last drawn (centre, radius), in points.
     gear: Option<(Pos2, f32)>,
     /// When egui wants to draw again (before the game, frames are drawn
@@ -175,6 +177,7 @@ impl Ui {
             note: None,
             scale_edit: None,
             starting: None,
+            online_open: false,
             gear: None,
             repaint_at: Some(Instant::now()),
         }
@@ -205,9 +208,14 @@ impl Ui {
     }
 
     /// From the settings back to the start page, or the game; from the
-    /// credits back to where they were opened.
+    /// credits back to where they were opened; on the start page, GTA
+    /// Online's card closes.
     pub fn back(&mut self) {
         match self.page {
+            Some(Page::Start) if self.online_open => {
+                self.online_open = false;
+                self.repaint();
+            }
             Some(Page::Settings) => self.show(self.home),
             Some(Page::Credits) => self.show(self.behind),
             _ => {}
@@ -319,6 +327,20 @@ impl Ui {
                 self.pointer_to(p);
             }
             Event::TextInput { text, .. } => self.events.push(egui::Event::Text(text.clone())),
+            // Pasting and copying into the app's text fields.
+            Event::KeyDown { scancode: Some(sc @ (Scancode::V | Scancode::C | Scancode::X)), keymod, .. }
+                if keymod.intersects(sdl3::keyboard::Mod::LCTRLMOD | sdl3::keyboard::Mod::RCTRLMOD)
+                    || keymod.intersects(sdl3::keyboard::Mod::LGUIMOD | sdl3::keyboard::Mod::RGUIMOD) =>
+            {
+                self.events.push(match sc {
+                    Scancode::V => match window.subsystem().clipboard().clipboard_text() {
+                        Ok(text) => egui::Event::Paste(text),
+                        Err(_) => return,
+                    },
+                    Scancode::C => egui::Event::Copy,
+                    _ => egui::Event::Cut,
+                });
+            }
             Event::KeyDown { scancode: Some(sc), keymod, .. } | Event::KeyUp { scancode: Some(sc), keymod, .. } => {
                 let pressed = matches!(event, Event::KeyDown { .. });
                 if let Some(key) = key(*sc) {
@@ -421,7 +443,8 @@ impl Ui {
         }
         match self.page {
             Some(Page::Start) => {
-                self.starting = start_page(&ctx, status, starting, &mut actions, &mut go);
+                let open = &mut self.online_open;
+                self.starting = start_page(&ctx, settings, status, starting, open, &mut actions, &mut go);
             }
             Some(Page::Settings) => {
                 let note = self.note.as_deref();
@@ -433,10 +456,16 @@ impl Ui {
         }
         let mut output = ctx.end_pass();
         for command in std::mem::take(&mut output.platform_output.commands) {
-            if let egui::OutputCommand::OpenUrl(open) = command
-                && let Err(e) = sdl3::url::open_url(&open.url)
-            {
-                log::warn!("cannot open {}: {e}", open.url);
+            match command {
+                egui::OutputCommand::OpenUrl(open) => {
+                    if let Err(e) = sdl3::url::open_url(&open.url) {
+                        log::warn!("cannot open {}: {e}", open.url);
+                    }
+                }
+                egui::OutputCommand::CopyText(text) => {
+                    let _ = window.subsystem().clipboard().set_clipboard_text(&text);
+                }
+                _ => {}
             }
         }
         let delay = output.viewport_output.get(&ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
@@ -514,6 +543,9 @@ fn key(sc: Scancode) -> Option<egui::Key> {
         Scancode::Return | Scancode::KpEnter => egui::Key::Enter,
         Scancode::Space => egui::Key::Space,
         Scancode::Backspace => egui::Key::Backspace,
+        Scancode::Delete => egui::Key::Delete,
+        Scancode::Home => egui::Key::Home,
+        Scancode::End => egui::Key::End,
         Scancode::Up => egui::Key::ArrowUp,
         Scancode::Down => egui::Key::ArrowDown,
         Scancode::Left => egui::Key::ArrowLeft,

@@ -556,10 +556,8 @@ impl App {
                 benchmark: self.mode == Mode::Benchmark,
                 low_memory: s.low_memory,
                 max_fps: s.max_fps,
-                online: (self.mode == Mode::Online).then(|| glue5_runtime::Online {
-                    name: s.online_name.trim().into(),
-                    lobby: s.online_lobby.trim().into(),
-                }),
+                online: (self.mode == Mode::Online)
+                    .then(|| glue5_runtime::Online { name: s.online_name.trim().into(), lobby: s.lobby() }),
             },
             glue5_gpu::backend(gpu_settings, Some(screen)),
         )?;
