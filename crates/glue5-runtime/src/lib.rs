@@ -23,6 +23,7 @@ mod p2p;
 pub mod qos;
 mod readback;
 mod scenario;
+mod script_banks;
 mod skin;
 mod stats;
 mod threads;
@@ -252,6 +253,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     device_reset::hooks(&mut hooks);
     readback::hooks(&mut hooks);
     audio_update::hooks(&mut hooks);
+    script_banks::hooks(&mut hooks);
     scenario::hooks(&mut hooks);
     tour::hooks(&mut hooks);
     if let Some(online) = &rt().config.online {
