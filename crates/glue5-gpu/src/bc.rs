@@ -9,6 +9,18 @@
 
 use crate::format::Bc;
 
+/// Blocks worth a thread of their own (a 512x512 texture). Streaming uploads
+/// many 256x256 textures: split across 8 threads of 512 blocks each, a
+/// quarter of the decoding threads' time on a Pixel 8a went to starting and
+/// ending threads (stacks mapped, named and unmapped).
+const BLOCKS_PER_THREAD: usize = 16384;
+
+/// Threads for `blocks` blocks of work: one per [`BLOCKS_PER_THREAD`], at
+/// most 8.
+fn threads_for(blocks: usize) -> usize {
+    (blocks / BLOCKS_PER_THREAD).clamp(1, glue5_runtime::cores().min(8))
+}
+
 impl Bc {
     /// Bytes per compressed 4x4 block.
     pub fn block_bytes(self) -> usize {
@@ -39,11 +51,7 @@ pub fn decode(bc: Bc, src: &[u8], src_bpr: usize, src_rows: usize, cols: usize, 
     let mut out = vec![0u8; band * rows * layers];
     // Block rows, all layers: split into bands across threads for big uploads.
     let jobs: Vec<(usize, &mut [u8])> = out.chunks_mut(band).enumerate().collect();
-    let threads = if cols * rows * layers >= 4096 {
-        glue5_runtime::cores().min(8)
-    } else {
-        1
-    };
+    let threads = threads_for(cols * rows * layers);
     let decode_band = |(i, dst): (usize, &mut [u8])| {
         let (layer, row) = (i / rows, i % rows);
         let src_row = (layer * src_rows + row) * src_bpr;
@@ -83,7 +91,7 @@ pub fn etc2_rgba(mut texels: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
     let band_bytes = (width / 4) as usize * ETC2_RGBA_BLOCK_BYTES as usize;
     let mut out = vec![0u8; band_bytes * (height / 4) as usize];
     // Big uploads in bands of block rows across threads, as decoding.
-    let threads = if width as u64 * height as u64 >= 4096 * 16 { glue5_runtime::cores().min(8) } else { 1 };
+    let threads = threads_for((width / 4) as usize * (height / 4) as usize);
     let per = (height as usize / 4).div_ceil(threads);
     let encode = |(src, dst): (&[u8], &mut [u8])| {
         let rows = (src.len() / pitch) as u32 * 4;
