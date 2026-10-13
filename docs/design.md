@@ -85,7 +85,11 @@ threads. The wgpu-hal patches make occlusion queries count samples on Metal
 and Vulkan, as D3D11's do (the game measures the sun's visibility with
 them), make the depth bias a pass's state, and keep Vulkan command pools to
 the command buffers their last use needed (on Mali each holds ~0.4 MB of
-host memory). We would like to submit these changes upstream.
+host memory), and make a Metal command buffer only when a command needs it
+(wgpu-core's barrier buffer before each pass is empty on Metal, and Metal
+charges per command buffer: 30 % of the process's CPU time went to Metal's
+own threads on an iPhone 16 Pro, 23 % after). We would like to submit these
+changes upstream.
 
 ## Game files are never in the app
 
