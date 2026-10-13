@@ -306,6 +306,18 @@ iOS lowers it to 60 Hz when the phone is hot, and 40 then becomes 33 ms.
 The engine's own limiter (`-frameLimit`, in 60 Hz intervals) stays: it
 saves the CPU time of frames that would wait anyway.
 
+The engine queues frames for the GPU (`FrameQueueLimit`, 1 in
+`CSystem::RenderThreadInit`). With one, its render thread waits for the
+previous frame to finish ("Wait on queued frames") before it starts the
+next. Glue 5 passes `-FrameQueueLimit=2` on desktop and Android, at the
+cost of one frame of latency. The game's benchmark ran 11-32 % faster on
+Windows. On a Pixel 8a it ran 8 % faster (two runs each way, the phones
+cooling in between). iOS keeps one: two brought no gain on an iPhone
+13 Pro or an iPhone 16 Pro (59.9 and 54.3 fps with one, 55.5 and 56.1
+with two, the phone warming over the four runs). There the renderer never
+waits for the GPU and the CPU sets the pace, so a second frame only adds
+latency. `GLUE5_ENGINE_ARGS=-FrameQueueLimit=N` overrides it.
+
 ## Input
 
 Input is routed through the game's PC interfaces to preserve controller
@@ -392,14 +404,6 @@ prompts, aim assist and menu behaviour:
   and TAA), and interpolated frames need the HUD composed after them. On
   platforms without MetalFX, FSR 1 (EASU + RCAS, plain shaders) would take
   the spatial slot.
-- **Frames queued by the engine on phones**: `CSystem::RenderThreadInit`
-  sets `FrameQueueLimit` to 1, so the engine's render thread waits for the
-  GPU to finish the previous frame before it starts the next ("Wait on
-  queued frames"). Desktop builds queue two: the game's benchmark ran
-  11-32 % faster on Windows, for a frame more of latency. Phones still
-  queue one; measure the effect there with
-  `GLUE5_ENGINE_ARGS=-FrameQueueLimit=2 mise run ios:run`; the result
-  depends on the CPU and GPU bottlenecks.
 - **Shader adaptation on naga's IR**: the translated WGSL is adapted as
   text (regular expressions: constant buffers packed, interpolation
   copied, depth reads, storage formats), checked against all 4919 shaders
