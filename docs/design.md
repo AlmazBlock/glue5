@@ -209,7 +209,7 @@ each game frame. The device is reused, with one owner of the surface at a
 time.
 
 The start page replaces the previous message boxes and allows changes to
-startup settings, such as frame rate, low memory and mobile resolution,
+startup settings, such as frame rate and low memory,
 before the engine loads. It also lets users adjust settings after a failed
 launch. Automatic restarts happen only when requested by the game itself
 on desktop, using `--play`. The engine cannot start twice in one process:
@@ -233,7 +233,7 @@ Graphics quality remains in the game's menu to avoid conflicting settings
 ## Resolution, resizing and upscaling
 
 The game's back buffer is the window's size in pixels multiplied by the
-render scale (50-100% per axis). Dimensions are rounded to even numbers,
+render scale (25-100% per axis). Dimensions are rounded to even numbers,
 with a minimum of 320x240 and a maximum of 4K, or 1440p in low-memory mode.
 The first start chooses a scale targeting roughly 1080 lines on desktop
 and 720 on phones to limit GPU load on high-resolution screens. Existing
@@ -422,8 +422,6 @@ prompts, aim assist and menu behaviour:
 
   `GLUE5_NO_BC=1` and `GLUE5_NO_FLOAT32_FILTER=1` force the first two on a
   desktop GPU, for testing.
-- A resolution change on mobile applies at the next start (see
-  Resolution, resizing and upscaling).
 - Graphics quality is set in the game's menu (Settings › Graphics). The
   app omits the WASM build's command-line quality switches because they
   would override the menu at each start. App settings control back buffer

@@ -104,7 +104,7 @@ pub enum TouchMode {
 const LOW_MEMORY_RAM_MB: i32 = 7000;
 
 /// The render scale's range, in steps of 5%.
-pub const RENDER_SCALES: std::ops::RangeInclusive<f32> = 0.5..=1.0;
+pub const RENDER_SCALES: std::ops::RangeInclusive<f32> = 0.25..=1.0;
 
 impl Default for Settings {
     fn default() -> Self {

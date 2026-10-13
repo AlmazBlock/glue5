@@ -510,17 +510,17 @@ impl App {
         Ok(false)
     }
 
-    /// The game's back buffer follows the window (desktop): asked of the
-    /// engine when it differs. The engine waits for a size to hold for 20
+    /// The game's back buffer follows the window and the render scale: asked
+    /// of the engine when it differs. The engine waits for a size to hold for 20
     /// of its frames before rebuilding its render targets, and a window
     /// being resized by the system does not reach this loop until the end:
-    /// one rebuild per resize. Phone windows never change size; their back
-    /// buffer is the one they started with.
+    /// one rebuild per resize. Phone windows never change size; only the
+    /// scale moves their back buffer.
     fn resize_game(&mut self) {
         let Some(game) = &mut self.game else { return };
         let Some(input) = &game.input else { return };
         let (w, h) = self.window.size_in_pixels();
-        if MOBILE || w == 0 || h == 0 {
+        if w == 0 || h == 0 {
             return;
         }
         let size = settings::render_size((w, h), self.settings.render_scale(), game.started.low_memory);

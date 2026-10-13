@@ -606,14 +606,7 @@ fn settings_items(
         SettingsTab::Video => {
             let mut scale = scale_edit.unwrap_or(settings.render_scale());
             let (rw, rh) = settings::render_size(status.window, scale, settings.low_memory);
-            let subtitle = format!(
-                "{rw} × {rh}{}",
-                if MOBILE && started.is_some_and(|s| s.render_scale != settings.render_scale()) {
-                    " · next start"
-                } else {
-                    ""
-                }
-            );
+            let subtitle = format!("{rw} × {rh}");
             let r = setting(ui, "Resolution", Control::Slider, Some(&subtitle), |ui| {
                 slider(ui, &mut scale, RENDER_SCALES, 0.05, "%", 0)
             });
