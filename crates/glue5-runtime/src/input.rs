@@ -138,7 +138,8 @@ pub(crate) unsafe extern "C" fn text_box_open_hook(env: *mut Env, this: u64, par
     TEXT_BOX.store(true, Ordering::Relaxed);
 }
 
-/// Hook for `CTextInputBox::Close`.
+/// Hook for `CTextInputBox::RemoveTextInputBoxMovie`: the text box closes
+/// (accepted, cancelled or closed by the game).
 pub(crate) unsafe extern "C" fn text_box_close_hook(env: *mut Env, this: u64) {
     unsafe { orig::text_box_close(env, this) };
     TEXT_BOX.store(false, Ordering::Relaxed);

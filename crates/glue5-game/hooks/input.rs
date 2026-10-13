@@ -6,5 +6,7 @@
     // The game's text box (save names, the phone's cheat entry, ...): touch
     // devices show the system keyboard while it is open.
     ("text_box_open", "CTextInputBox::Open(rage::ioVirtualKeyboard::Params const&)"),
-    ("text_box_close", "CTextInputBox::Close()"),
+    // Its movie goes away however it closes: Close(), or its own update
+    // when the text is accepted or cancelled (which does not call Close()).
+    ("text_box_close", "CTextInputBox::RemoveTextInputBoxMovie()"),
 ]
