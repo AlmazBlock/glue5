@@ -1,6 +1,7 @@
 //! The application's own UI, drawn with egui over the game (before the game
-//! runs, alone): the start page, the settings, and on touch screens the
-//! settings button and the touch controls. The game's menus stay the game's.
+//! runs, alone): the start page, the settings, the credits, and on touch
+//! screens the settings button and the touch controls. The game's menus
+//! stay the game's.
 //!
 //! One responsive layout, fitted to the safe area. The same widgets
 //! everywhere, all reachable from a controller or a keyboard: the D-pad,
@@ -20,9 +21,11 @@ use sdl3::video::Window;
 
 use crate::settings::Settings;
 
+mod credits;
 mod pages;
 mod theme;
 mod widgets;
+use credits::credits_page;
 use pages::{settings_page, start_page};
 
 use crate::touch::Touch;
@@ -30,9 +33,11 @@ use crate::touch::Touch;
 /// A page of the application's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
-    /// Before the game: its files, the story or the sandbox, Settings.
+    /// Before the game: its files, the ways into it, Settings, Credits.
     Start,
     Settings,
+    /// Who made what the application is built on, and their licenses.
+    Credits,
 }
 
 /// How the game starts.
@@ -134,6 +139,8 @@ pub struct Ui {
     page: Option<Page>,
     /// Where the settings go back to: the start page before the game.
     home: Option<Page>,
+    /// Where the credits go back to: the page they were opened from.
+    behind: Option<Page>,
     /// The last submission drew something (an empty one clears it).
     drawn: bool,
     note: Option<String>,
@@ -163,6 +170,7 @@ impl Ui {
             start: Instant::now(),
             page: Some(Page::Start),
             home: Some(Page::Start),
+            behind: Some(Page::Start),
             drawn: false,
             note: None,
             scale_edit: None,
@@ -196,14 +204,20 @@ impl Ui {
         }
     }
 
-    /// From the settings back to the start page, or the game.
+    /// From the settings back to the start page, or the game; from the
+    /// credits back to where they were opened.
     pub fn back(&mut self) {
-        if self.page == Some(Page::Settings) {
-            self.show(self.home);
+        match self.page {
+            Some(Page::Settings) => self.show(self.home),
+            Some(Page::Credits) => self.show(self.behind),
+            _ => {}
         }
     }
 
     fn show(&mut self, page: Option<Page>) {
+        if page == Some(Page::Credits) && self.page != page {
+            self.behind = self.page;
+        }
         self.page = page;
         self.note = None;
         self.scale_edit = None;
@@ -394,7 +408,9 @@ impl Ui {
         raw.viewports.entry(ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
 
         let ctx = self.ctx.clone();
+        // The page to show next, or back to the previous one.
         let mut go = None;
+        let mut back = false;
         ctx.begin_pass(raw);
         if let Some(touch) = touch {
             touch.draw(&ctx.layer_painter(LayerId::background()), settings.touch_opacity);
@@ -409,19 +425,28 @@ impl Ui {
             }
             Some(Page::Settings) => {
                 let note = self.note.as_deref();
-                if settings_page(&ctx, settings, status, note, &mut self.tab, &mut self.scale_edit, &mut actions) {
-                    go = Some(self.home);
-                }
+                let (tab, scale_edit) = (&mut self.tab, &mut self.scale_edit);
+                back = settings_page(&ctx, settings, status, note, tab, scale_edit, &mut actions, &mut go);
             }
+            Some(Page::Credits) => back = credits_page(&ctx),
             None => {}
         }
-        let output = ctx.end_pass();
+        let mut output = ctx.end_pass();
+        for command in std::mem::take(&mut output.platform_output.commands) {
+            if let egui::OutputCommand::OpenUrl(open) = command
+                && let Err(e) = sdl3::url::open_url(&open.url)
+            {
+                log::warn!("cannot open {}: {e}", open.url);
+            }
+        }
         let delay = output.viewport_output.get(&ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
         self.repaint_at = (delay < Duration::from_secs(10)).then(|| Instant::now() + delay);
         let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
         self.overlay.submit(primitives, output.textures_delta, output.pixels_per_point);
         self.drawn = true;
-        if let Some(page) = go {
+        if back {
+            self.back();
+        } else if let Some(page) = go {
             self.show(page);
         }
         if self.starting.is_some() {
@@ -463,7 +488,10 @@ pub fn safe_rect(window: &Window) -> Rect {
     match window.safe_area() {
         Ok(r) if r.width() > 0 && r.height() > 0 => {
             let scale = points_per_window_unit(window);
-            Rect::from_min_size(pos2(r.x() as f32, r.y() as f32) * scale, vec2(r.width() as f32, r.height() as f32) * scale)
+            Rect::from_min_size(
+                pos2(r.x() as f32, r.y() as f32) * scale,
+                vec2(r.width() as f32, r.height() as f32) * scale,
+            )
         }
         _ => Rect::from_min_size(Pos2::ZERO, screen_size(window)),
     }

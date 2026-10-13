@@ -12,7 +12,7 @@ pub(super) fn focus(r: Response) -> Response {
 pub(super) fn close_button(ui: &mut Ui) -> Response {
     let scale = density(ui);
     let (r, response) = ui.allocate_exact_size(vec2(44.0 * scale, 44.0 * scale), Sense::click());
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Close settings"));
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Close"));
     let c = r.center();
     ui.painter().circle_filled(c, 18.0 * scale, Color32::from_gray(if response.hovered() { 60 } else { 32 }));
     for sign in [-1.0, 1.0] {
