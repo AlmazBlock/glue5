@@ -39,14 +39,32 @@ use crate::submit::Present;
 /// Scales the back buffer into the window.
 const PRESENT_WGSL: &str = "@group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
-struct V { @builtin(position) p: vec4f, @location(0) uv: vec2f }
+@fragment fn fs(v: V) -> @location(0) vec4f { return vec4f(bicubic(src, v.uv), 1.0); }";
+
+/// Puts the HUD over the scene a temporal upscaler made: what the HUD
+/// changed in the back buffer (the back buffer minus the scene before it,
+/// both scaled the same way) added to the upscaled scene. Where there is no
+/// HUD that adds nothing, and a translucent one keeps the sharp scene
+/// beneath it.
+const COMPOSITE_WGSL: &str = "@group(0) @binding(0) var scene_up: texture_2d<f32>;
+@group(0) @binding(1) var frame: texture_2d<f32>;
+@group(0) @binding(2) var scene: texture_2d<f32>;
+@group(0) @binding(3) var smp: sampler;
+@fragment fn fs(v: V) -> @location(0) vec4f {
+  let hud = bicubic(frame, v.uv) - bicubic(scene, v.uv);
+  let up = textureSampleLevel(scene_up, smp, v.uv, 0.0).rgb;
+  return vec4f(clamp(up + hud, vec3f(0.0), vec3f(1.0)), 1.0);
+}";
+
+/// What both share: a full-screen triangle and the bicubic filter.
+const COMMON_WGSL: &str = "struct V { @builtin(position) p: vec4f, @location(0) uv: vec2f }
 @vertex fn vs(@builtin(vertex_index) i: u32) -> V {
   var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
   return V(vec4f(p[i], 0, 1), p[i] * vec2f(0.5, -0.5) + 0.5);
 }
 // Catmull-Rom bicubic in five bilinear taps (the corners dropped): sharp
 // where bilinear blurs, e.g. 720p scaled to a phone's or a Retina display.
-fn bicubic(uv: vec2f) -> vec3f {
+fn bicubic(src: texture_2d<f32>, uv: vec2f) -> vec3f {
   let size = vec2f(textureDimensions(src, 0));
   let pos = uv * size;
   let center = floor(pos - 0.5) + 0.5;
@@ -69,7 +87,7 @@ fn bicubic(uv: vec2f) -> vec3f {
   let total = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
   return max(c / total, vec3f(0.0));
 }
-@fragment fn fs(v: V) -> @location(0) vec4f { return vec4f(bicubic(v.uv), 1.0); }";
+";
 
 /// Behind the application's UI while no game frame is shown.
 const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.05, g: 0.055, b: 0.07, a: 1.0 };
@@ -82,6 +100,19 @@ pub enum Upscaler {
     /// MetalFX's spatial upscaler, on Apple GPUs that have it (bicubic
     /// elsewhere).
     MetalFx = 1,
+    /// MetalFX's temporal upscaler: the scene from several frames drawn at
+    /// sub-pixel offsets, the HUD put back over it (Apple GPUs that have
+    /// it; bicubic elsewhere).
+    MetalFxTemporal = 2,
+    /// AMD's FSR 3 upscaler (temporal, as MetalFX's), on any GPU.
+    Fsr = 3,
+}
+
+impl Upscaler {
+    /// It needs the scene without the HUD, jittered (see scene.rs).
+    pub fn is_temporal(self) -> bool {
+        matches!(self, Upscaler::MetalFxTemporal | Upscaler::Fsr)
+    }
 }
 
 /// How frames are shown: set by the application whenever it likes, read by
@@ -95,8 +126,18 @@ struct Shared {
     vsync: AtomicBool,
     metal_hud: AtomicBool,
     upscaler: AtomicU8,
+    /// Upscalers this GPU has (bit per [`Upscaler`]), once the window's
+    /// output knows.
+    upscalers: AtomicU8,
+    /// A frame made between each two of the game's (with a temporal upscaler
+    /// that can).
+    frame_generation: AtomicBool,
+    /// This GPU can (once the window's output knows).
+    has_frame_generation: AtomicBool,
     /// Frames per second at most, shown evenly (0: as they come).
     frame_rate: AtomicU32,
+    /// FSR's sharpening, 0 to 1 (f32 bits).
+    sharpness: AtomicU32,
     /// A new surface for the window, to present into from the next frame.
     surface: Mutex<Option<wgpu::Surface<'static>>>,
 }
@@ -108,7 +149,11 @@ impl Presentation {
             vsync: AtomicBool::new(vsync),
             metal_hud: AtomicBool::new(false),
             upscaler: AtomicU8::new(upscaler as u8),
+            upscalers: AtomicU8::new(1 << Upscaler::Bicubic as u8),
+            frame_generation: AtomicBool::new(false),
+            has_frame_generation: AtomicBool::new(false),
             frame_rate: AtomicU32::new(0),
+            sharpness: AtomicU32::new(0.5f32.to_bits()),
             surface: Mutex::new(None),
         }));
         p.set_size(width, height);
@@ -153,8 +198,47 @@ impl Presentation {
     fn upscaler(&self) -> Upscaler {
         match self.0.upscaler.load(Ordering::Relaxed) {
             1 => Upscaler::MetalFx,
+            2 => Upscaler::MetalFxTemporal,
+            3 => Upscaler::Fsr,
             _ => Upscaler::Bicubic,
         }
+    }
+
+    /// How much FSR sharpens its image, 0 (not at all) to 1.
+    pub fn set_sharpness(&self, sharpness: f32) {
+        self.0.sharpness.store(sharpness.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    fn sharpness(&self) -> f32 {
+        f32::from_bits(self.0.sharpness.load(Ordering::Relaxed))
+    }
+
+    /// Frame generation, from the next frame (with an upscaler that can:
+    /// MetalFX Temporal, on macOS and iOS 26).
+    pub fn set_frame_generation(&self, on: bool) {
+        self.0.frame_generation.store(on, Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+    fn frame_generation(&self) -> bool {
+        self.0.frame_generation.load(Ordering::Relaxed)
+    }
+
+    /// Whether this GPU can generate frames.
+    pub fn has_frame_generation(&self) -> bool {
+        self.0.has_frame_generation.load(Ordering::Relaxed)
+    }
+
+    /// Whether this GPU has `upscaler`.
+    pub fn has(&self, upscaler: Upscaler) -> bool {
+        self.0.upscalers.load(Ordering::Relaxed) & 1 << upscaler as u8 != 0
+    }
+
+    /// The renderer is to draw the scene for a temporal upscaler (jittered,
+    /// kept before the HUD).
+    pub fn wants_scene(&self) -> bool {
+        let upscaler = self.upscaler();
+        upscaler.is_temporal() && self.has(upscaler)
     }
 
     /// Frames per second at most, each shown for the same time (0: each
@@ -213,10 +297,17 @@ pub struct Frame {
     pub texture: wgpu::Texture,
     /// The format to view it with (the surface's, without sRGB).
     pub format: TextureFormat,
+    image: Image,
+}
+
+/// What a frame's texture is.
+enum Image {
     #[cfg(not(target_vendor = "apple"))]
-    surface: wgpu::SurfaceTexture,
+    Surface(wgpu::SurfaceTexture),
     #[cfg(target_vendor = "apple")]
-    drawable: Retained<ProtocolObject<dyn CAMetalDrawable>>,
+    Drawable(Retained<ProtocolObject<dyn CAMetalDrawable>>),
+    /// An offscreen output's (see [`Output::offscreen`]).
+    Offscreen,
 }
 
 /// A window to present into.
@@ -251,7 +342,6 @@ struct Display {
     /// The surface's format, and the one its images are viewed with (no sRGB).
     surface_format: Option<TextureFormat>,
     format: Option<TextureFormat>,
-    blit: Option<(wgpu::RenderPipeline, wgpu::Sampler)>,
     /// Whether the layer last asked for the HUD shown.
     #[cfg(target_vendor = "apple")]
     metal_hud: Option<bool>,
@@ -290,9 +380,6 @@ impl Display {
                 view_formats: if linear != format { vec![linear] } else { vec![] },
             },
         );
-        if self.format != Some(linear) {
-            self.blit = None;
-        }
         self.surface_format = Some(format);
         self.format = Some(linear);
         self.configured = Some((w, h, vsync));
@@ -334,7 +421,7 @@ impl Display {
             }
             _ => return None,
         };
-        Some(Frame { texture: surface.texture.clone(), format, surface })
+        Some(Frame { texture: surface.texture.clone(), format, image: Image::Surface(surface) })
     }
 
     /// The layer's next drawable (waiting for one, as wgpu does), as a
@@ -383,7 +470,24 @@ impl Display {
                 wgpu::wgt::TextureUses::UNINITIALIZED,
             )
         };
-        Some(Frame { texture, format, drawable })
+        Some(Frame { texture, format, image: Image::Drawable(drawable) })
+    }
+
+}
+
+/// The present pass's pipelines, for the format they draw into.
+#[derive(Default)]
+struct Passes {
+    format: Option<TextureFormat>,
+    blit: Option<(wgpu::RenderPipeline, wgpu::Sampler)>,
+    composite: Option<(wgpu::RenderPipeline, wgpu::Sampler)>,
+}
+
+impl Passes {
+    fn for_format(&mut self, format: TextureFormat) {
+        if self.format != Some(format) {
+            *self = Passes { format: Some(format), ..Default::default() };
+        }
     }
 
     /// `src` scaled into `rect` (x, y, width, height) of `target`, black around it.
@@ -394,40 +498,16 @@ impl Display {
         src: &wgpu::TextureView,
         target: &wgpu::TextureView,
         format: TextureFormat,
-        (x, y, w, h): (u32, u32, u32, u32),
+        rect: (u32, u32, u32, u32),
     ) {
-        if self.blit.is_none() {
-            let module = crate::shader::create_module(device, "present", PRESENT_WGSL).ok();
-            let Some(module) = module else { return };
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("present"),
-                layout: None,
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(format.into())],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
-            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                ..Default::default()
-            });
-            self.blit = Some((pipeline, sampler));
-        }
-        let (pipeline, sampler) = self.blit.clone().unwrap();
+        self.for_format(format);
+        let (pipeline, sampler) = match &self.blit {
+            Some(b) => b.clone(),
+            None => {
+                let Some(pipeline) = present_pipeline(device, "present", PRESENT_WGSL, format) else { return };
+                self.blit.insert((pipeline, linear_sampler(device))).clone()
+            }
+        };
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &pipeline.get_bind_group_layout(0),
@@ -436,12 +516,94 @@ impl Display {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
             ],
         });
-        let mut pass = begin_pass(encoder, target, wgpu::Color::BLACK);
-        pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.draw(0..3, 0..1);
+        draw_into(encoder, target, rect, &pipeline, &bg);
     }
+
+    /// The upscaled scene `scene_up` with the HUD of `frame` over it, into
+    /// `rect` of `target` (see `COMPOSITE_WGSL`).
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    fn composite(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        scene_up: &wgpu::TextureView,
+        frame: &Present,
+        scene: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        format: TextureFormat,
+        rect: (u32, u32, u32, u32),
+    ) {
+        self.for_format(format);
+        let (pipeline, sampler) = match &self.composite {
+            Some(c) => c.clone(),
+            None => {
+                let Some(pipeline) = present_pipeline(device, "composite", COMPOSITE_WGSL, format) else { return };
+                self.composite.insert((pipeline, linear_sampler(device))).clone()
+            }
+        };
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(scene_up) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&frame.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(scene) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+        draw_into(encoder, target, rect, &pipeline, &bg);
+    }
+}
+
+/// A pipeline drawing a full-screen triangle with `fs` (and the bicubic
+/// filter, see `COMMON_WGSL`) into `format`.
+fn present_pipeline(device: &wgpu::Device, label: &str, fs: &str, format: TextureFormat) -> Option<wgpu::RenderPipeline> {
+    let module = crate::shader::create_module(device, label, &format!("{COMMON_WGSL}{fs}")).ok()?;
+    Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(format.into())],
+        }),
+        multiview_mask: None,
+        cache: None,
+    }))
+}
+
+fn linear_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    })
+}
+
+/// One full-screen triangle into `rect` of `target`, black around it.
+fn draw_into(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    (x, y, w, h): (u32, u32, u32, u32),
+    pipeline: &wgpu::RenderPipeline,
+    bg: &wgpu::BindGroup,
+) {
+    let mut pass = begin_pass(encoder, target, wgpu::Color::BLACK);
+    pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bg, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 pub(crate) fn begin_pass<'e>(
@@ -466,32 +628,109 @@ pub(crate) fn begin_pass<'e>(
 pub struct Output {
     adapter: wgpu::Adapter,
     presentation: Presentation,
-    display: Display,
+    /// The window's surface; none: frames go to an offscreen texture.
+    display: Option<Display>,
+    offscreen: Option<Offscreen>,
+    passes: Passes,
     overlay: OverlayRenderer,
+    fsr: crate::fsr::Fsr,
+    /// When the last game frame came, and the time between them (smoothed).
+    last_frame: Option<Instant>,
+    frame_interval: Duration,
     #[cfg(target_vendor = "apple")]
     metalfx: crate::metalfx::MetalFx,
 }
 
+/// What an upscaler made of a frame.
+pub(crate) struct Upscaled {
+    pub commands: Vec<wgpu::CommandBuffer>,
+    pub image: Scaled,
+    /// A frame between the previous one and this (the scene, at the same
+    /// size), to show first (frame generation).
+    pub between: Option<wgpu::TextureView>,
+}
+
+/// What an upscaler made of a frame, at the window's size.
+pub(crate) enum Scaled {
+    /// The whole back buffer, HUD included.
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+    Frame(wgpu::TextureView),
+    /// The scene alone: the HUD goes over it.
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+    Scene(wgpu::TextureView),
+}
+
+/// Frames drawn into a texture instead of a window (the headless runner's
+/// `--output`): the same upscalers and passes, every n-th frame to a PNG.
+struct Offscreen {
+    texture: Option<wgpu::Texture>,
+    shots: Option<(u32, std::path::PathBuf)>,
+    shown: u64,
+}
+
 impl Output {
     pub fn new(adapter: wgpu::Adapter, device: &wgpu::Device, window: Window) -> Output {
+        let display = Display {
+            surface: window.surface,
+            configured: None,
+            surface_format: None,
+            format: None,
+            #[cfg(target_vendor = "apple")]
+            metal_hud: None,
+        };
+        Output::with(adapter, device, window.presentation, Some(display), None, window.overlay)
+    }
+
+    /// Frames into a texture of the presentation's size, every `shots.0`-th
+    /// to a PNG in `shots.1`.
+    pub fn offscreen(
+        adapter: wgpu::Adapter,
+        device: &wgpu::Device,
+        presentation: Presentation,
+        shots: Option<(u32, std::path::PathBuf)>,
+    ) -> Output {
+        let offscreen = Offscreen { texture: None, shots, shown: 0 };
+        Output::with(adapter, device, presentation, None, Some(offscreen), Default::default())
+    }
+
+    fn with(
+        adapter: wgpu::Adapter,
+        device: &wgpu::Device,
+        presentation: Presentation,
+        display: Option<Display>,
+        offscreen: Option<Offscreen>,
+        overlay: crate::Overlay,
+    ) -> Output {
         #[cfg(not(target_vendor = "apple"))]
         let _ = device;
+        #[cfg(target_vendor = "apple")]
+        let metalfx = crate::metalfx::MetalFx::new(device);
+        let mut upscalers = 1 << Upscaler::Bicubic as u8 | 1 << Upscaler::Fsr as u8;
+        #[cfg(target_vendor = "apple")]
+        {
+            use crate::metalfx::Kind;
+            upscalers |= (metalfx.supports(Kind::Spatial) as u8) << Upscaler::MetalFx as u8;
+            upscalers |= (metalfx.supports(Kind::Temporal) as u8) << Upscaler::MetalFxTemporal as u8;
+            presentation.0.has_frame_generation.store(metalfx.supports(Kind::Interpolator), Ordering::Relaxed);
+        }
+        presentation.0.upscalers.store(upscalers, Ordering::Relaxed);
         Output {
             adapter,
-            presentation: window.presentation,
-            display: Display {
-                surface: window.surface,
-                configured: None,
-                surface_format: None,
-                format: None,
-                blit: None,
-                #[cfg(target_vendor = "apple")]
-                metal_hud: None,
-            },
-            overlay: OverlayRenderer::new(window.overlay),
+            presentation,
+            display,
+            offscreen,
+            passes: Passes::default(),
+            overlay: OverlayRenderer::new(overlay),
+            fsr: Default::default(),
+            last_frame: None,
+            frame_interval: Duration::ZERO,
             #[cfg(target_vendor = "apple")]
-            metalfx: crate::metalfx::MetalFx::new(device),
+            metalfx,
         }
+    }
+
+    pub fn presentation(&self) -> &Presentation {
+        &self.presentation
     }
 
     /// How long a frame may take: at the frame rate set, or 60 a second.
@@ -500,24 +739,20 @@ impl Output {
         Duration::from_secs_f64(1.0 / if fps > 0 { fps } else { 60 } as f64)
     }
 
-    /// Whether this GPU has MetalFX upscaling.
-    pub fn has_metalfx(&self) -> bool {
-        #[cfg(target_vendor = "apple")]
-        return self.metalfx.supported();
-        #[cfg(not(target_vendor = "apple"))]
-        false
-    }
 
     /// The next frame to draw into (none while the window has no area or
     /// its surface is being replaced).
     pub fn acquire(&mut self, device: &wgpu::Device) -> Option<Frame> {
+        let (w, h) = self.presentation.size();
+        let Some(display) = &mut self.display else {
+            return self.offscreen.as_mut().and_then(|o| o.acquire(device, (w, h)));
+        };
         if let Some(surface) = self.presentation.0.surface.lock().unwrap().take() {
-            self.display.surface = surface;
-            self.display.configured = None;
+            display.surface = surface;
+            display.configured = None;
             log::debug!("gpu: presenting into the window's new surface");
         }
-        let (w, h) = self.presentation.size();
-        self.display.acquire(
+        display.acquire(
             &self.adapter,
             device,
             (w, h, self.presentation.vsync()),
@@ -527,19 +762,30 @@ impl Output {
 
     /// Shows `frame`, drawn by the commands submitted before.
     #[cfg(not(target_vendor = "apple"))]
-    pub fn show(&mut self, queue: &wgpu::Queue, frame: Frame) {
-        drop(frame.texture);
-        queue.present(frame.surface);
+    pub fn show(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: Frame, _generated: bool) {
+        match frame.image {
+            Image::Surface(surface) => {
+                drop(frame.texture);
+                queue.present(surface);
+            }
+            Image::Offscreen => self.show_offscreen(device, queue, &frame),
+        }
     }
 
     /// Shows `frame`, drawn by the commands submitted before: what wgpu's
     /// present does (a command buffer of its own that presents the
-    /// drawable, after those on the same queue), paced by the frame rate.
+    /// drawable, after those on the same queue), paced by the frame rate
+    /// (twice as fast with `generated`: frame generation shows two frames for
+    /// each of the game's).
     #[cfg(target_vendor = "apple")]
-    pub fn show(&mut self, queue: &wgpu::Queue, frame: Frame) {
+    pub fn show(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: Frame, generated: bool) {
         use block2::RcBlock;
         use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDrawable};
-        let drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*frame.drawable);
+        let drawable = match &frame.image {
+            Image::Drawable(d) => d,
+            Image::Offscreen => return self.show_offscreen(device, queue, &frame),
+        };
+        let drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&**drawable);
         let on_screen = RcBlock::new(|d: std::ptr::NonNull<ProtocolObject<dyn MTLDrawable>>| {
             // 0: skipped (a newer frame replaced it).
             let at = unsafe { d.as_ref() }.presentedTime();
@@ -549,7 +795,7 @@ impl Output {
         });
         unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&on_screen)) };
         let Some(queue) = (unsafe { queue.as_hal::<Metal>() }) else { return };
-        let frame_time = self.presentation.frame_time();
+        let frame_time = self.on_screen_for(generated);
         autoreleasepool(|_| {
             let Some(commands) = queue.as_raw().commandBuffer() else { return };
             match frame_time {
@@ -560,14 +806,31 @@ impl Output {
         });
     }
 
+    /// An offscreen frame: every n-th to a PNG (waits for the GPU).
+    fn show_offscreen(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame) {
+        let Some(o) = &mut self.offscreen else { return };
+        o.shown += 1;
+        let Some((every, dir)) = &o.shots else { return };
+        if !(o.shown - 1).is_multiple_of(*every as u64) {
+            return;
+        }
+        let path = dir.join(format!("out{:06}.png", o.shown - 1));
+        if let Err(e) = save_png(device, queue, &frame.texture, &path) {
+            log::warn!("gpu: saving {}: {e:#}", path.display());
+        }
+    }
+
     /// The commands that draw `frame`: the back buffer `src` scaled into it
-    /// (without one, the background colour), then the overlay.
+    /// (by the bicubic filter, or as `scaled` by an upscaler, see
+    /// [`Output::upscale`]; without one, the background colour), then the
+    /// overlay.
     pub fn compose(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         frame: &Frame,
         src: Option<&Present>,
+        scaled: Option<&Scaled>,
     ) -> Vec<wgpu::CommandBuffer> {
         let format = frame.format;
         let target =
@@ -578,14 +841,17 @@ impl Output {
         match src {
             Some(p) => {
                 let rect = fit((p.width, p.height), size);
-                let view = match self.upscale(device, p, (rect.2, rect.3)) {
-                    Some((commands, view)) => {
-                        buffers.extend(commands);
-                        view
+                match scaled {
+                    Some(Scaled::Frame(view)) => self.passes.blit(device, &mut encoder, view, &target, format, rect),
+                    Some(Scaled::Scene(view)) => {
+                        let scene = p.scene.as_ref().unwrap().color.create_view(&wgpu::TextureViewDescriptor {
+                            format: Some(p.view.texture().format().remove_srgb_suffix()),
+                            ..Default::default()
+                        });
+                        self.passes.composite(device, &mut encoder, view, p, &scene, &target, format, rect);
                     }
-                    None => p.view.clone(),
-                };
-                self.display.blit(device, &mut encoder, &view, &target, format, rect);
+                    None => self.passes.blit(device, &mut encoder, &p.view, &target, format, rect),
+                }
             }
             None => drop(begin_pass(&mut encoder, &target, BACKGROUND)),
         }
@@ -595,36 +861,121 @@ impl Output {
         buffers
     }
 
-    /// The back buffer scaled to `size` by MetalFX, when asked for and
-    /// possible now: its commands, and the image to show (1:1).
+    /// The frame scaled to the window by the upscaler set, when it is not
+    /// the bicubic filter and possible now: its commands, and the images to
+    /// show (1:1, see [`Output::compose`]).
+    pub(crate) fn upscale(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, src: &Present) -> Option<Upscaled> {
+        let now = Instant::now();
+        // The time between the engine's frames (frame generation shows one
+        // between each two).
+        if let Some(last) = self.last_frame.replace(now) {
+            let dt = (now - last).min(Duration::from_millis(250));
+            self.frame_interval = if self.frame_interval.is_zero() { dt } else { (self.frame_interval * 7 + dt) / 8 };
+        }
+        let rect = fit((src.width, src.height), self.presentation.size());
+        let size = (rect.2, rect.3);
+        if self.presentation.upscaler() != Upscaler::Fsr {
+            self.fsr.release();
+        }
+        match self.presentation.upscaler() {
+            Upscaler::Fsr if size.0 >= src.width => {
+                let (sharpness, dt) = (self.presentation.sharpness(), self.frame_interval.as_secs_f32());
+                let up = self.fsr.upscale(device, queue, src, size, sharpness, dt);
+                // (MetalFX's effects freed.)
+                drop(self.metal_upscale(device, src, size, true));
+                up
+            }
+            _ => self.metal_upscale(device, src, size, false),
+        }
+    }
+
     #[cfg(target_vendor = "apple")]
-    fn upscale(
-        &mut self,
-        device: &wgpu::Device,
-        src: &Present,
-        size: (u32, u32),
-    ) -> Option<(Vec<wgpu::CommandBuffer>, wgpu::TextureView)> {
-        let wanted = self.presentation.upscaler() == Upscaler::MetalFx && size.0 > src.width;
-        self.metalfx.upscale(device, src, size, wanted)
+    fn metal_upscale(&mut self, device: &wgpu::Device, src: &Present, size: (u32, u32), none: bool) -> Option<Upscaled> {
+        use crate::metalfx::Kind;
+        let kind = match self.presentation.upscaler() {
+            _ if none => None,
+            // (The spatial scaler only scales up.)
+            Upscaler::MetalFx if size.0 > src.width => Some(Kind::Spatial),
+            Upscaler::MetalFxTemporal if size.0 >= src.width => Some(Kind::Temporal),
+            _ => None,
+        };
+        let interpolate = self.presentation.frame_generation();
+        let dt = self.frame_interval.as_secs_f32();
+        self.metalfx.upscale(device, src, size, kind, interpolate, dt)
     }
 
     #[cfg(not(target_vendor = "apple"))]
-    fn upscale(
-        &mut self,
-        _: &wgpu::Device,
-        _: &Present,
-        _: (u32, u32),
-    ) -> Option<(Vec<wgpu::CommandBuffer>, wgpu::TextureView)> {
-        let _ = self.presentation.upscaler();
+    fn metal_upscale(&mut self, _: &wgpu::Device, _: &Present, _: (u32, u32), _: bool) -> Option<Upscaled> {
         None
     }
+
+    /// How long each frame stays on screen at least: the frame rate set's
+    /// share of a second, half of it with frame generation (of the measured
+    /// time between frames without a frame rate).
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+    fn on_screen_for(&self, generated: bool) -> Option<Duration> {
+        match (self.presentation.frame_time(), generated) {
+            (Some(t), false) => Some(t),
+            (Some(t), true) => Some(t / 2),
+            (None, false) => None,
+            (None, true) => (!self.frame_interval.is_zero()).then(|| self.frame_interval / 2),
+        }
+    }
+}
+
+impl Offscreen {
+    fn acquire(&mut self, device: &wgpu::Device, (w, h): (u32, u32)) -> Option<Frame> {
+        let format = TextureFormat::Bgra8Unorm;
+        if self.texture.as_ref().is_none_or(|t| (t.width(), t.height()) != (w, h)) {
+            self.texture = Some(device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("offscreen output"),
+                size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            }));
+        }
+        Some(Frame { texture: self.texture.clone()?, format, image: Image::Offscreen })
+    }
+}
+
+/// `texture` (8-bit RGBA or BGRA) to a PNG at `path`, once the GPU has drawn it.
+fn save_png(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture, path: &Path) -> Result<()> {
+    let (w, h) = (texture.width(), texture.height());
+    let bpr = (w * 4).next_multiple_of(256);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("png"),
+        size: (bpr * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(h) },
+        },
+        texture.size(),
+    );
+    queue.submit([encoder.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely())?;
+    let data = buffer.slice(..).get_mapped_range()?;
+    write_png(path, &data, w, h, bpr, texture.format())
 }
 
 impl Gpu {
     pub fn present(&mut self, id: u32) {
         self.flush_clears();
         self.end_pass();
-        let present = if self.window { self.present_view(id) } else { None };
+        let mut present = if self.window { self.present_view(id) } else { None };
+        if let Some(p) = &mut present {
+            p.scene = self.scene.done.take();
+        }
         if self.settings.shot_every > 0
             && (self.stats.presents + self.total_presents).is_multiple_of(self.settings.shot_every as u64)
         {
@@ -637,6 +988,11 @@ impl Gpu {
             self.stats.frame_ms.push((now - last).as_secs_f32() * 1000.0);
         }
         self.uniforms.next_frame();
+        // The next frame: drawn jittered, its scene kept, while a temporal
+        // upscaler wants them.
+        let wanted = self.presentation.as_ref().is_some_and(Presentation::wants_scene);
+        let size = self.objs.tex(id).map(|t| (t.width, t.height));
+        self.scene.next_frame(wanted, id, size);
         self.stats.presents += 1;
         if self.last_stats.elapsed() >= Duration::from_secs(10) {
             self.total_presents += self.stats.presents;
@@ -663,7 +1019,7 @@ impl Gpu {
         });
         let view = view.clone();
         t.used.set(epoch);
-        Some(crate::submit::Present { view, texture: t.tex.clone(), width: t.width, height: t.height })
+        Some(crate::submit::Present { view, texture: t.tex.clone(), width: t.width, height: t.height, scene: None })
     }
 
     /// Writes texture `id` to a PNG in the screenshot directory (once the GPU is done).
@@ -756,10 +1112,12 @@ pub fn write_png(path: &Path, data: &[u8], width: u32, height: u32, bpr: u32, fo
 #[cfg(test)]
 mod tests {
     #[test]
-    fn present_shader_validates() {
-        let module = naga::front::wgsl::parse_str(super::PRESENT_WGSL).unwrap();
-        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-            .validate(&module)
-            .unwrap();
+    fn present_shaders_validate() {
+        for fs in [super::PRESENT_WGSL, super::COMPOSITE_WGSL] {
+            let module = naga::front::wgsl::parse_str(&format!("{}{fs}", super::COMMON_WGSL)).unwrap();
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap();
+        }
     }
 }

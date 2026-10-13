@@ -98,7 +98,10 @@ pub struct Status<'a> {
     pub graphics_reset: bool,
     /// The window, in pixels.
     pub window: (u32, u32),
-    pub metalfx: bool,
+    /// The upscalers this GPU has.
+    pub upscalers: &'a [crate::settings::Upscaling],
+    /// This GPU can generate frames (with MetalFX Temporal).
+    pub frame_generation: bool,
     /// Apple's Metal HUD can show (it was on at launch).
     #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
     pub metal_hud: bool,

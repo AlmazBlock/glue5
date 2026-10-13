@@ -63,7 +63,8 @@ type PackIds = [(u32, u32, u32); 16];
 /// frame reuse their copy.
 #[derive(Default)]
 pub struct PackCache {
-    entries: Vec<(u64, PackIds, Alloc)>,
+    /// (frame, constants, jitter added to them, copy).
+    entries: Vec<(u64, PackIds, Option<[u32; 2]>, Alloc)>,
 }
 
 /// Bound in place of what the engine left unbound.
@@ -411,6 +412,11 @@ impl Gpu {
         stage: Stage,
         layout: &wgpu::BindGroupLayout,
     ) -> Option<(wgpu::BindGroup, u64, Option<u32>)> {
+        // The scene's draws move by its jitter (temporal upscaling, see scene.rs).
+        let jitter = match (stage, &self.pass_info) {
+            (Stage::Vertex, Some(p)) => self.scene.clip_jitter((p.width, p.height)),
+            _ => None,
+        };
         let pack = match &prog.pack {
             Some(pack) => Some(pack_constants(
                 &self.objs,
@@ -421,6 +427,7 @@ impl Gpu {
                 prog,
                 stage,
                 pack,
+                jitter,
             )),
             None => None,
         };
@@ -929,6 +936,7 @@ impl Gpu {
             p.rename(i, &ps.as_ref().unwrap_or(&vs).label);
         }
 
+        self.observe_camera();
         let g0 = match &vs.layout {
             Some(l) => match self.bind_group(&vs, Stage::Vertex, l) {
                 Some(g) => Some(g),
@@ -1146,6 +1154,28 @@ impl Gpu {
         self.stats.draws += 1;
     }
 
+    /// A draw into the scene's targets may show this frame's camera (see
+    /// scene.rs): the vertex program's `rage_matrices`.
+    fn observe_camera(&mut self) {
+        let sc = &self.scene;
+        if !sc.wants_camera() {
+            return;
+        }
+        let scene_pass = self.pass_info.as_ref().is_some_and(|p| p.depth.is_some() && sc.size == Some((p.width, p.height)));
+        if !scene_pass {
+            return;
+        }
+        let cb = self.s.cb[0][1];
+        let from = cb.first as usize * 16;
+        let Some(bytes) = self.objs.buf(cb.buf).and_then(|b| b.shadow.as_deref()).and_then(|s| s.get(from..from + 256))
+        else {
+            return;
+        };
+        let m: [f32; 64] = std::array::from_fn(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()));
+        let depth = self.s.ds.tex;
+        self.scene.observe(&m, depth);
+    }
+
     // ---- compute ---------------------------------------------------------------------------
 
     pub fn dispatch(&mut self, x: u32, y: u32, z: u32) {
@@ -1201,6 +1231,7 @@ fn pack_constants(
     prog: &Program,
     stage: Stage,
     pack: &shader::Pack,
+    jitter: Option<[f32; 2]>,
 ) -> Alloc {
     let st = stage as usize;
     let mut current: PackIds = [(0, 0, 0); 16];
@@ -1209,9 +1240,12 @@ fn pack_constants(
         let version = objs.buf(cb.buf).map_or(u32::MAX, |b| b.version);
         current[i] = (cb.buf, version, cb.first);
     }
+    let jitter_key = jitter.map(|j| j.map(f32::to_bits));
     let cache = packs.entry((prog.id, st as u8)).or_default();
-    if let Some((_, _, alloc)) =
-        cache.entries.iter().find(|(frame, ids, _)| *frame == uniforms.frame && *ids == current)
+    if let Some((_, _, _, alloc)) = cache
+        .entries
+        .iter()
+        .find(|(frame, ids, j, _)| *frame == uniforms.frame && *ids == current && *j == jitter_key)
     {
         return *alloc;
     }
@@ -1230,10 +1264,17 @@ fn pack_constants(
             None => 0,
         };
         out[copied..].fill(0); // D3D reads zeros past a buffer's end
+        // `rage_matrices`, with gWorldViewProj.
+        if let Some(clip) = jitter
+            && m.slot == 1
+            && m.size >= 192
+        {
+            crate::scene::jitter_constants(out, clip);
+        }
     }
     if cache.entries.len() >= 6 {
         cache.entries.remove(0);
     }
-    cache.entries.push((uniforms.frame, current, alloc));
+    cache.entries.push((uniforms.frame, current, jitter_key, alloc));
     alloc
 }

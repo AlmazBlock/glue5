@@ -45,6 +45,13 @@ struct Args {
     /// The back buffer's size.
     #[arg(long, value_name = "WxH", default_value = "1280x720", value_parser = parse_size)]
     size: (u32, u32),
+    /// Present the frames as into a window of this size, scaled by
+    /// --upscaler (with --shots, the presented frames too: outNNNNNN.png).
+    #[arg(long, value_name = "WxH", value_parser = parse_size)]
+    output: Option<(u32, u32)>,
+    /// With --output: bicubic, metalfx, metalfx-temporal or fsr.
+    #[arg(long, value_name = "NAME", default_value = "bicubic", value_parser = parse_upscaler)]
+    upscaler: glue5_gpu::Upscaler,
     /// Frames per second at most, as the app's setting (the engine's
     /// limiter; 0: as fast as it can).
     #[arg(long, default_value_t = 0)]
@@ -100,6 +107,16 @@ fn parse_size(size: &str) -> Result<(u32, u32)> {
     Ok((w.parse()?, h.parse()?))
 }
 
+fn parse_upscaler(name: &str) -> Result<glue5_gpu::Upscaler> {
+    Ok(match name {
+        "bicubic" => glue5_gpu::Upscaler::Bicubic,
+        "metalfx" => glue5_gpu::Upscaler::MetalFx,
+        "metalfx-temporal" => glue5_gpu::Upscaler::MetalFxTemporal,
+        "fsr" => glue5_gpu::Upscaler::Fsr,
+        _ => bail!("unknown upscaler {name}"),
+    })
+}
+
 fn parse_setting(setting: &str) -> Result<(String, String)> {
     let (name, value) = setting.split_once('=').context("<name>=<value>")?;
     Ok((name.into(), value.into()))
@@ -147,12 +164,19 @@ fn main() -> Result<()> {
         let mut settings = glue5_gpu::Settings::for_game(&game_dir);
         settings.cache_dir = Some(user_dir.join("cache"));
         settings.sync_pipelines = args.sync_pipelines;
-        if let Some((every, dir)) = shots {
-            std::fs::create_dir_all(&dir)?;
-            settings.shot_every = every;
-            settings.shot_dir = Some(dir);
+        if let Some((every, dir)) = &shots {
+            std::fs::create_dir_all(dir)?;
+            settings.shot_every = *every;
+            settings.shot_dir = Some(dir.clone());
         }
-        glue5_gpu::backend(settings, None)
+        let screen = match args.output {
+            Some(size) => {
+                let presentation = glue5_gpu::Presentation::new(size, false, args.upscaler);
+                Some(glue5_gpu::Screen::offscreen(presentation, shots.clone())?)
+            }
+            None => None,
+        };
+        glue5_gpu::backend(settings, screen)
     };
     // The camera turns all along the tour, as fast as the stick turns it.
     let spin = if tour.is_some() { [1.0, 0.0] } else { [0.0; 2] };

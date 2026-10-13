@@ -4,7 +4,7 @@ use super::widgets::{
 };
 use super::{Action, Mode, Page, SettingsTab, Status, WARN, theme};
 use crate::paths::{self, MOBILE};
-use crate::settings::{self, RENDER_SCALES, Settings, TouchMode};
+use crate::settings::{self, RENDER_SCALES, Settings, TouchMode, Upscaling};
 use egui::{Align, Align2, Color32, Id, Layout, Rect, RichText, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
 
 /// The only platform differences are capabilities, not layout.
@@ -623,10 +623,29 @@ fn settings_items(
                 settings.render_scale = Some(settings::round_scale(scale));
                 *scale_edit = None;
             }
-            if status.metalfx {
-                setting(ui, "Upscaling", Control::Choice, None, |ui| {
-                    choice(ui, &mut settings.metalfx, &[(false, "Bicubic"), (true, "MetalFX")])
+            if status.upscalers.len() > 1 {
+                let options: Vec<_> = status
+                    .upscalers
+                    .iter()
+                    .map(|&u| {
+                        let name = match u {
+                            Upscaling::Bicubic => "Bicubic",
+                            Upscaling::MetalFx => "MetalFX",
+                            Upscaling::MetalFxTemporal => "MetalFX Temporal",
+                            Upscaling::Fsr => "FSR 3",
+                        };
+                        (u, name)
+                    })
+                    .collect();
+                setting(ui, "Upscaling", Control::Choice, None, |ui| choice(ui, &mut settings.upscaler, &options));
+            }
+            if settings.upscaler == Upscaling::Fsr {
+                setting(ui, "Sharpening", Control::Slider, None, |ui| {
+                    slider(ui, &mut settings.sharpness, 0.0..=1.0, 0.05, "%", 0)
                 });
+            }
+            if status.frame_generation && settings.upscaler == Upscaling::MetalFxTemporal {
+                setting(ui, "Frame generation", Control::Toggle, None, |ui| toggle(ui, &mut settings.frame_generation));
             }
             let unlimited = if settings.vsync { "Display" } else { "Unlimited" };
             let mut rates = vec![(0, unlimited), (60, "60")];
@@ -731,7 +750,7 @@ fn next_start(differs: bool) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{Mode, SettingsTab, Status, settings_page, start_page, theme};
-    use crate::settings::Settings;
+    use crate::settings::{Settings, Upscaling};
     use egui::{Id, Pos2, Rect, SafeAreaInsets, vec2};
     use std::path::Path;
 
@@ -743,7 +762,8 @@ mod tests {
             last_failure: None,
             graphics_reset: false,
             window: (1440, 900),
-            metalfx: true,
+            upscalers: &[Upscaling::Bicubic, Upscaling::MetalFx, Upscaling::MetalFxTemporal, Upscaling::Fsr],
+            frame_generation: true,
             metal_hud: false,
             refresh_rate: 120.0,
             preparing: None,

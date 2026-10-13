@@ -74,6 +74,9 @@ pub mod op {
     pub const BEGIN_QUERY: u32 = 45;
     pub const END_QUERY: u32 = 46;
     pub const UPLOAD_BUFFER_NO_OVERWRITE: u32 = 47;
+    /// Host commands, put in the ring by the host's hooks (not the engine's
+    /// backend): the scene is finished in the back buffer, the HUD follows.
+    pub const SCENE_DONE: u32 = 64;
 }
 
 /// Starts a backend on the ring; called once, from the engine thread that

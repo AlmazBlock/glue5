@@ -51,6 +51,8 @@ pub struct Present {
     pub texture: wgpu::Texture,
     pub width: u32,
     pub height: u32,
+    /// The scene without the HUD, for a temporal upscaler (see scene.rs).
+    pub scene: Option<crate::scene::SceneInputs>,
 }
 
 pub enum Grave {
@@ -176,14 +178,25 @@ fn run(
     let mut last_shown: Option<Instant> = None;
     while let Ok((batch, encoded)) = rx.recv() {
         let Ok(mut buffers) = encoded.recv() else { return };
-        let mut frame = None;
+        // The window's frames: with frame generation, one made between the
+        // previous and this one first.
+        let mut frames = Vec::new();
         if let (Some(p), Some(out)) = (&batch.present, output.as_mut()) {
-            let t = Instant::now();
-            let acquired = out.acquire(&device);
-            stats.drawable_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            if let Some(acquired) = acquired {
-                buffers.extend(out.compose(&device, &queue, &acquired, Some(p)));
-                frame = Some(acquired);
+            let (scaled, between) = match out.upscale(&device, &queue, p) {
+                Some(up) => {
+                    buffers.extend(up.commands);
+                    (Some(up.image), up.between.map(crate::present::Scaled::Scene))
+                }
+                None => (None, None),
+            };
+            for image in between.iter().map(Some).chain([scaled.as_ref()]) {
+                let t = Instant::now();
+                let acquired = out.acquire(&device);
+                stats.drawable_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                if let Some(acquired) = acquired {
+                    buffers.extend(out.compose(&device, &queue, &acquired, Some(p), image));
+                    frames.push(acquired);
+                }
             }
         }
         let t = Instant::now();
@@ -202,9 +215,12 @@ fn run(
         works.extend(batch.works);
         done.after(submission.clone(), works);
         stats.submit_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        if let (Some(frame), Some(out)) = (frame, output.as_mut()) {
+        let generated = frames.len() > 1;
+        if let (false, Some(out)) = (frames.is_empty(), output.as_mut()) {
             let t = Instant::now();
-            out.show(&queue, frame);
+            for frame in frames {
+                out.show(&device, &queue, frame, generated);
+            }
             stats.present_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
             // The frame threads' clocks follow how frames keep up (Android).
             let now = Instant::now();

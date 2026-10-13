@@ -24,7 +24,7 @@ use sdl3::mouse::MouseButton;
 
 use crate::haptics;
 use crate::paths::{self, MOBILE};
-use crate::settings::{self, Settings, TouchMode};
+use crate::settings::{self, Settings, TouchMode, Upscaling};
 use crate::touch::Touch;
 use crate::ui::{self, Action, Mode, Page, Started, Status, Ui};
 use crate::{audio, benchmark, keymap, pads};
@@ -148,7 +148,8 @@ pub fn run() -> Result<()> {
         problem: None,
         last_failure: None,
         graphics_reset: false,
-        metalfx: screen.has_metalfx(),
+        upscalers: UPSCALERS.iter().copied().filter(|u| screen.has_upscaler(u.upscaler())).collect(),
+        frame_generation: screen.has_frame_generation(),
         metal_hud,
         refresh_rate,
         screen: Some(screen),
@@ -236,7 +237,10 @@ struct App {
     last_failure: Option<String>,
     /// The game's graphics settings went back to their defaults.
     graphics_reset: bool,
-    metalfx: bool,
+    /// The upscalers this GPU has.
+    upscalers: Vec<Upscaling>,
+    /// It can generate frames.
+    frame_generation: bool,
     /// Apple's Metal HUD can show: it was on at launch.
     metal_hud: bool,
     /// The display's refresh rate at most, in Hz.
@@ -414,6 +418,8 @@ impl App {
         self.presentation.set_metal_hud(self.settings.metal_hud);
         self.presentation.set_frame_rate(self.settings.max_fps);
         self.presentation.set_upscaler(upscaler(&self.settings));
+        self.presentation.set_sharpness(self.settings.sharpness);
+        self.presentation.set_frame_generation(self.settings.frame_generation);
         self.resize_game();
 
         // The UI: over the game at every turn, before it when something changed.
@@ -426,7 +432,8 @@ impl App {
                 last_failure: self.last_failure.as_deref(),
                 graphics_reset: self.graphics_reset,
                 window: self.window.size_in_pixels(),
-                metalfx: self.metalfx,
+                upscalers: &self.upscalers,
+                frame_generation: self.frame_generation,
                 metal_hud: self.metal_hud,
                 refresh_rate: self.refresh_rate,
                 preparing: self.play_requested.then(|| self.screen.as_ref().and_then(Screen::progress)).flatten(),
@@ -759,8 +766,11 @@ fn window_refresh_rate(window: &sdl3::video::Window) -> f32 {
 }
 
 fn upscaler(settings: &Settings) -> Upscaler {
-    if settings.metalfx { Upscaler::MetalFx } else { Upscaler::Bicubic }
+    settings.upscaler.upscaler()
 }
+
+/// The upscalers, as the settings offer them.
+const UPSCALERS: &[Upscaling] = &[Upscaling::Bicubic, Upscaling::MetalFx, Upscaling::MetalFxTemporal, Upscaling::Fsr];
 
 /// Keyboard and mouse into the game's input block.
 fn game_input(

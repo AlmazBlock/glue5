@@ -30,6 +30,7 @@ mod threads;
 mod time;
 pub mod tour;
 mod trap_site;
+mod upscale;
 pub mod vfs;
 mod vnet;
 
@@ -256,6 +257,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     script_banks::hooks(&mut hooks);
     scenario::hooks(&mut hooks);
     tour::hooks(&mut hooks);
+    upscale::hooks(&mut hooks);
     if let Some(online) = &rt().config.online {
         online::start(online, &mut hooks);
     }

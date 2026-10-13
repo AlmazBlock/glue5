@@ -238,6 +238,10 @@ pub struct Gpu {
     // presenting
     /// Frames go to a window (the submit thread presents them).
     pub window: bool,
+    /// The window's presentation settings (which upscaler).
+    pub presentation: Option<crate::Presentation>,
+    /// The temporal upscalers' inputs (see scene.rs).
+    pub scene: crate::scene::Scene,
     pub last_present: Option<Instant>,
     pub stats: Stats,
     pub total_presents: u64,
@@ -355,6 +359,7 @@ impl Gpu {
                 });
             }
             op::PRESENT => self.present(c.w(0)),
+            op::SCENE_DONE => self.scene_done(),
             op::FENCE => {
                 self.works.push(Work::Store { at: c.addr(0), value: c.w(2) });
                 self.flush("fence");

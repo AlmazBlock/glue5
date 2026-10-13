@@ -263,25 +263,88 @@ app uses a fixed window and sets its back buffer at startup. Although
 `InputBlock::resize` is available there, the memory peak from a device reset
 has not been measured on a phone.
 
-The present step scales the back buffer with Catmull-Rom bicubic filtering
-or MetalFX Spatial on supported Apple GPUs (`glue5-gpu/src/metalfx.rs`).
-MetalFX runs on the submit thread and uses the same queue. It has a separate
-command buffer because wgpu does not let raw Metal commands share its
-encoder. The MetalFX commands run after the game's commands and before the
-present pass, which copies the result 1:1.
+The present step scales the back buffer with one of four upscalers (Settings
+› Upscaling):
 
-The scaler uses perceptual mode to match the gamma-encoded back buffer.
-It scales the game's HUD along with the scene; the app overlay is drawn
-afterwards. During resizing, frames use the bicubic path. VSync and upscaler
-changes apply on the next frame. Linking the MetalFX framework requires
-macOS 13; the iOS requirement remains iOS 16.
+| Upscaler | Where | Input |
+|---|---|---|
+| Bicubic (Catmull-Rom) | everywhere | the finished frame |
+| MetalFX (spatial) | Apple GPUs | the finished frame |
+| MetalFX Temporal | Apple GPUs | the scene from several frames, jittered |
+| FSR 3 (AMD, through wgpu-ffx) | any GPU | the same as MetalFX Temporal |
 
-Spatial scaling needs only the finished frame. Temporal scaling also needs
-colour before post-processing, depth, motion vectors and a jittered
-projection. Those inputs are unavailable at the present step. Supporting
-it requires identifying the targets in the engine's command stream and
-hooking its camera and TAA. MetalFX frame interpolation uses the same depth
-and motion inputs (see Future work).
+Upscalers run on the submit thread, on the same queue, after the game's
+commands and before the present pass, which draws their result 1:1. MetalFX
+has command buffers of its own because wgpu does not let raw Metal commands
+share its encoder; FSR is wgpu compute passes. Upscalers are made for one
+input and one output size; while the sizes change (a window being resized)
+frames use the bicubic path, and they are made once the sizes have held for
+250 ms. Upscaler changes apply on the next frame. Linking the MetalFX
+framework requires macOS 13; the iOS requirement remains iOS 16.
+
+The spatial scaler uses perceptual mode to match the gamma-encoded back
+buffer, and scales the game's HUD along with the scene; the app overlay is
+drawn afterwards.
+
+### Temporal upscaling
+
+A temporal upscaler builds each output frame from several input frames drawn
+at different sub-pixel offsets: sharper than one frame scaled up, and
+antialiased. It needs four things the engine's DirectX 10 path does not have
+(it has no TAA): the scene without the HUD, its depth, motion vectors and a
+jittered projection (`glue5-gpu/src/scene.rs`).
+
+- **Where the scene ends.** A hook on `PostFX::ProcessNonDepthFX` (render
+  thread) puts a host command in the GPU ring once post-processing has drawn
+  the finished scene into the back buffer (`op::SCENE_DONE`,
+  `glue5-runtime/src/upscale.rs`). Everything after it is HUD. There the
+  renderer copies the scene, converts the scene's depth to `Depth32Float` and
+  draws the motion. Frames without the command (menus over everything) use
+  the bicubic path, and the upscaler's history restarts after them.
+- **The camera.** Every vertex program reads RAGE's `rage_matrices` in slot 1
+  (gWorld, gWorldView, gWorldViewProj, gViewInverse; row vectors). The first
+  perspective draw of a frame into a scene-sized target with depth gives the
+  view-projection (gWorld⁻¹ · gWorldViewProj), the projection (near 0.15 m,
+  far 7.5 km, reversed Z) and the camera's position.
+- **Motion.** The camera's alone: each pixel's depth reprojected with this
+  frame's inverse view-projection and the previous one's (one matrix, made in
+  f64). Right for everything that does not move by itself. Vehicles and
+  people moving on their own get the camera's motion; the upscalers' own
+  checks catch most of it. A camera jump of more than 8 m or 45° resets the
+  history.
+- **Jitter.** A Halton (2, 3) sequence of 32 offsets within a pixel. It is
+  added to gWorldViewProj in the copy of each draw's constants for draws
+  into scene-sized targets whose matrix is a perspective one. Full-screen
+  passes (orthographic) stay where they are: lighting and post-processing
+  read the scene pixel for pixel, and moving them too would undo the jitter.
+  The upscalers are told the offset the scene was moved by. Its sign was
+  measured: `upscale_tests.rs` draws a known pattern jittered, upscales 48
+  frames through the real paths and compares them with the pattern
+  supersampled. Jittered, MetalFX's error drops from 0.0095 to 0.0022 and
+  FSR's from 0.0078 to 0.0024; with the opposite sign MetalFX's doubles.
+
+The HUD goes back over the upscaled scene as what it changed in the back
+buffer: the final back buffer minus the scene copy, both through the bicubic
+filter, added to the upscaled scene. Where there is no HUD that adds
+nothing; under a translucent panel the scene stays sharp. The HUD itself
+does not enter the upscalers' history, so it leaves no trails.
+
+FSR comes from the wgpu-ffx crate (FSR 3's upscaler as wgpu compute passes,
+SPIR-V), prepared by `mise run setup` with two patches: wgpu 30, and shaders
+naga and Metal accept (no `Coherent` on storage images; four-channel instead
+of two-channel half-float storage images, which Metal cannot read and write).
+wgpu-ffx has no frame generation.
+
+### Frame generation
+
+With MetalFX Temporal on macOS and iOS 26, the frame interpolator makes a
+frame between the temporal scaler's last two from this frame's depth and
+motion (the scaler writes its frames into two textures in turn). The submit
+thread shows it first, then the new frame, each for half the frame time
+(the frame rate set, or the measured time between the game's frames): twice
+the frames on screen for the game's work of one, for half a frame more of
+latency. The HUD goes over the generated frame as over the others (the
+newer frame's).
 
 ## Frame pacing
 
@@ -397,13 +460,11 @@ prompts, aim assist and menu behaviour:
 
 ## Future work
 
-- **Temporal upscaling** (MetalFX's temporal scaler on Apple platforms,
-  FSR 2 elsewhere), then frame interpolation: sharper than the spatial
-  scaler, but it needs the engine's colour before post-processing, depth,
-  motion vectors and a jittered projection (hooking the renderer's camera
-  and TAA), and interpolated frames need the HUD composed after them. On
-  platforms without MetalFX, FSR 1 (EASU + RCAS, plain shaders) would take
-  the spatial slot.
+- **Motion of moving objects**: the motion vectors are the camera's
+  (see Temporal upscaling). Per-object motion needs each draw's previous
+  world matrix (and skinned peds' previous bones), matched across frames.
+- **FSR 1** (EASU + RCAS, plain shaders) in the spatial slot on GPUs
+  without MetalFX.
 - **Shader adaptation on naga's IR**: the translated WGSL is adapted as
   text (regular expressions: constant buffers packed, interpolation
   copied, depth reads, storage formats), checked against all 4919 shaders

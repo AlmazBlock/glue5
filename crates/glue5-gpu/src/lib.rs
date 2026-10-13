@@ -16,6 +16,7 @@ mod done;
 mod draw;
 mod exec;
 mod format;
+mod fsr;
 #[cfg(target_vendor = "apple")]
 mod metalfx;
 mod objects;
@@ -27,9 +28,12 @@ mod prepare;
 mod present;
 mod profile;
 mod recycle;
+mod scene;
 mod shader;
 mod submit;
 mod uniforms;
+#[cfg(test)]
+mod upscale_tests;
 mod uploads;
 
 use std::path::PathBuf;
@@ -131,7 +135,7 @@ fn drain(ring: GpuRing) {
     }
 }
 
-const WANTED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
+pub(crate) const WANTED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
     .union(wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D)
     .union(wgpu::Features::TEXTURE_COMPRESSION_ETC2)
     .union(wgpu::Features::DEPTH32FLOAT_STENCIL8)
@@ -144,7 +148,9 @@ const WANTED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
     .union(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
     .union(wgpu::Features::ADDRESS_MODE_CLAMP_TO_BORDER)
     .union(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
-    .union(wgpu::Features::PIPELINE_CACHE);
+    .union(wgpu::Features::PIPELINE_CACHE)
+    // FSR (wgpu-ffx) clears its textures.
+    .union(wgpu::Features::CLEAR_TEXTURE);
 
 fn pipeline_cache_name(info: &wgpu::AdapterInfo) -> String {
     format!("pipelines.{:?}.{:x}.{:x}.bin", info.backend, info.vendor, info.device).to_lowercase()
@@ -187,6 +193,15 @@ impl Screen {
         Ok(Screen { gpu, output, preparing: None })
     }
 
+    /// The GPU without a window: frames are drawn, upscaled as
+    /// `presentation` says, into a texture of its size, every `shots.0`-th
+    /// to a PNG in `shots.1` (`outNNNNNN.png`).
+    pub fn offscreen(presentation: Presentation, shots: Option<(u32, PathBuf)>) -> Result<Screen> {
+        let gpu = Device::open(&instance(), None)?;
+        let output = present::Output::offscreen(gpu.adapter.clone(), &gpu.device, presentation, shots);
+        Ok(Screen { gpu, output, preparing: None })
+    }
+
     /// Compiles the pipelines known for the game of `settings` before it
     /// starts (see `prepare.rs`), in the background: true once done, then
     /// start the game with this screen.
@@ -217,14 +232,19 @@ impl Screen {
     pub fn show_ui(&mut self) -> bool {
         let Screen { gpu, output, .. } = self;
         let Some(frame) = output.acquire(&gpu.device) else { return false };
-        gpu.queue.submit(output.compose(&gpu.device, &gpu.queue, &frame, None));
-        output.show(&gpu.queue, frame);
+        gpu.queue.submit(output.compose(&gpu.device, &gpu.queue, &frame, None, None));
+        output.show(&gpu.device, &gpu.queue, frame, false);
         true
     }
 
-    /// Whether [`Upscaler::MetalFx`] is available.
-    pub fn has_metalfx(&self) -> bool {
-        self.output.has_metalfx()
+    /// Whether this GPU has `upscaler`.
+    pub fn has_upscaler(&self, upscaler: Upscaler) -> bool {
+        self.output.presentation().has(upscaler)
+    }
+
+    /// Whether this GPU can generate frames (see [`Presentation::set_frame_generation`]).
+    pub fn has_frame_generation(&self) -> bool {
+        self.output.presentation().has_frame_generation()
     }
 }
 
@@ -348,6 +368,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
     let staging = Arc::new(done::StagingPool::default());
     let limits = device.limits();
     let window = output.is_some();
+    let presentation = output.as_ref().map(|o| o.presentation().clone());
     log::info!("gpu: ready in {:.0} ms ({threads} compile threads)", t0.elapsed().as_secs_f64() * 1000.0);
 
     let profiler = profile.then(|| profile::Profiler::new(&device, &queue));
@@ -415,6 +436,8 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         counter_src: None,
         counter_slot: 0,
         window,
+        presentation,
+        scene: Default::default(),
         last_present: None,
         stats: Default::default(),
         total_presents: 0,

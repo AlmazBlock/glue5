@@ -27,8 +27,15 @@ pub struct Settings {
     /// At most this many frames per second; 0: no limit of the engine's
     /// (the display's refresh rate with VSync).
     pub max_fps: u32,
-    /// MetalFX upscaling, where the GPU has it (Apple).
-    pub metalfx: bool,
+    /// How the game's frames are scaled up to the window (what the GPU has
+    /// of it; the bicubic filter otherwise).
+    pub upscaler: Upscaling,
+    /// How much FSR sharpens its image, 0 to 1.
+    pub sharpness: f32,
+    /// A frame made between each two of the game's (MetalFX Temporal, on
+    /// macOS and iOS 26): twice the frames shown, half a frame more of
+    /// latency.
+    pub frame_generation: bool,
     /// Apple's driver-level performance overlay.
     pub metal_hud: bool,
     pub touch: TouchMode,
@@ -50,6 +57,36 @@ pub struct Settings {
     /// Settings saved before the render scale: the back buffer's height.
     #[serde(skip_serializing)]
     render_height: Option<u32>,
+    /// Settings saved before the choice of upscalers: MetalFX's spatial one
+    /// on or off.
+    #[serde(skip_serializing)]
+    metalfx: Option<bool>,
+}
+
+/// How the game's frames are scaled up to the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Upscaling {
+    Bicubic,
+    /// MetalFX's spatial upscaler (Apple).
+    #[serde(rename = "metalfx")]
+    MetalFx,
+    /// MetalFX's temporal upscaler (Apple).
+    #[serde(rename = "metalfx-temporal")]
+    MetalFxTemporal,
+    /// AMD's FSR 3 upscaler (temporal, any GPU).
+    Fsr,
+}
+
+impl Upscaling {
+    pub fn upscaler(self) -> glue5_gpu::Upscaler {
+        match self {
+            Upscaling::Bicubic => glue5_gpu::Upscaler::Bicubic,
+            Upscaling::MetalFx => glue5_gpu::Upscaler::MetalFx,
+            Upscaling::MetalFxTemporal => glue5_gpu::Upscaler::MetalFxTemporal,
+            Upscaling::Fsr => glue5_gpu::Upscaler::Fsr,
+        }
+    }
 }
 
 /// When the on-screen controls show.
@@ -79,7 +116,9 @@ impl Default for Settings {
             vsync: true,
             // Phones hold a steady 60 for longer than they hold 120 (heat).
             max_fps: if MOBILE { 60 } else { 0 },
-            metalfx: true,
+            upscaler: Upscaling::MetalFx,
+            sharpness: 0.5,
+            frame_generation: false,
             metal_hud: false,
             touch: TouchMode::Auto,
             touch_opacity: 0.6,
@@ -91,6 +130,7 @@ impl Default for Settings {
             online_private: false,
             online_lobby: String::new(),
             render_height: None,
+            metalfx: None,
         }
     }
 }
@@ -139,13 +179,17 @@ impl Settings {
     }
 
     pub fn load(user_dir: &Path) -> Settings {
-        match std::fs::read(Self::file(user_dir)) {
+        let mut settings = match std::fs::read(Self::file(user_dir)) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 log::warn!("ignoring unreadable settings: {e}");
                 Settings::default()
             }),
             Err(_) => Settings::default(),
+        };
+        if settings.metalfx.take() == Some(false) {
+            settings.upscaler = Upscaling::Bicubic;
         }
+        settings
     }
 
     pub fn save(&self, user_dir: &Path) {
@@ -212,6 +256,19 @@ mod tests {
         assert_eq!(render_size((300, 100), 0.5, false), (320, 240));
         assert_eq!(render_size((6016, 3384), 1.0, false), (3840, 2160));
         assert_eq!(render_size((6016, 3384), 1.0, true), (2560, 1440));
+    }
+
+    #[test]
+    fn upscaler_from_older_settings() {
+        let dir = std::env::temp_dir().join(format!("glue5-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("glue5.json"), r#"{"metalfx": false}"#).unwrap();
+        assert_eq!(Settings::load(&dir).upscaler, Upscaling::Bicubic);
+        std::fs::write(dir.join("glue5.json"), r#"{"metalfx": true}"#).unwrap();
+        assert_eq!(Settings::load(&dir).upscaler, Upscaling::MetalFx);
+        std::fs::write(dir.join("glue5.json"), r#"{"upscaler": "metalfx-temporal"}"#).unwrap();
+        assert_eq!(Settings::load(&dir).upscaler, Upscaling::MetalFxTemporal);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
