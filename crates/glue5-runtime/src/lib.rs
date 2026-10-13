@@ -6,6 +6,7 @@
 //! threads, each with its own instance over the shared memory.
 
 pub mod audio;
+mod audio_update;
 mod device_reset;
 pub mod exit;
 pub mod game_settings;
@@ -247,6 +248,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
         texture2d_delete: Some(readback::texture2d_delete),
         texture3d_dtor: Some(readback::texture3d_dtor),
         texture3d_delete: Some(readback::texture3d_delete),
+        audio_start_update: Some(audio_update::start_update),
         is_position_clear_for_ped: Some(scenario::is_position_clear_for_ped),
         warp_update: Some(tour::warp_update),
         find_player_ped: None,

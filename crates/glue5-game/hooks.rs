@@ -60,6 +60,10 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("texture2d_delete", "wasm_null_d3d::NullResource<wasm_null_d3d::Stub_ID3D11Texture2D, D3D11_TEXTURE2D_DESC>::~NullResource()_472"),
     ("texture3d_dtor", "wasm_null_d3d::NullResource<wasm_null_d3d::Stub_ID3D11Texture3D, D3D11_TEXTURE3D_DESC>::~NullResource()"),
     ("texture3d_delete", "wasm_null_d3d::NullResource<wasm_null_d3d::Stub_ID3D11Texture3D, D3D11_TEXTURE3D_DESC>::~NullResource()_605"),
+    // The game's audio update for a frame, started on the main thread: the
+    // host holds it back while the audio thread is two frames behind
+    // (audio_update.rs).
+    ("audio_start_update", "audNorthAudioEngine::StartUpdate()"),
     // A scenario point's overlap list is asked for as many entities as its
     // array holds and walked to the first null: the host keeps the last
     // slot null (scenario.rs).
