@@ -101,6 +101,18 @@ fn paint_label(ui: &Ui, rect: Rect, text: &str, size: f32, offset: f32, color: C
     ui.painter().galley(pos, galley, color);
 }
 
+pub(super) fn text_field(ui: &mut Ui, text: &mut String, max: usize) -> Response {
+    let scale = density(ui);
+    focus(
+        ui.add(
+            TextEdit::singleline(text)
+                .char_limit(max)
+                .desired_width(ui.available_width())
+                .margin(vec2(10.0 * scale, 12.0 * scale)),
+        ),
+    )
+}
+
 pub(super) fn action_button(ui: &mut Ui, text: &str) -> Response {
     let scale = density(ui);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

@@ -39,6 +39,12 @@ pub struct Settings {
     /// The game starts in the sandbox (the map, no story) rather than the
     /// story: the start page's last choice.
     pub sandbox: bool,
+    /// GTA Online was the start page's last choice.
+    pub online: bool,
+    /// The player's name online (made up at the first start online), and a
+    /// private lobby's code (empty: matched with everyone).
+    pub online_name: String,
+    pub online_lobby: String,
     /// Settings saved before the render scale: the back buffer's height.
     #[serde(skip_serializing)]
     render_height: Option<u32>,
@@ -78,9 +84,19 @@ impl Default for Settings {
             touch_size: 1.0,
             haptics: true,
             sandbox: false,
+            online: false,
+            online_name: String::new(),
+            online_lobby: String::new(),
             render_height: None,
         }
     }
+}
+
+/// A name for a new online player: "Player" and four digits.
+pub fn default_online_name() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let n = std::collections::hash_map::RandomState::new().build_hasher().finish() % 10000;
+    format!("Player{n:04}")
 }
 
 impl Settings {

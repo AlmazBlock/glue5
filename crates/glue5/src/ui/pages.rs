@@ -1,5 +1,5 @@
 //! Home and the floating settings window share the same responsive controls.
-use super::widgets::{Control, action_button, choice, close_button, focus, setting, slider, toggle};
+use super::widgets::{Control, action_button, choice, close_button, focus, setting, slider, text_field, toggle};
 use super::{Action, Mode, Page, SettingsTab, Status, WARN, theme};
 use crate::paths::{self, MOBILE};
 use crate::settings::{self, RENDER_SCALES, Settings, TouchMode};
@@ -11,8 +11,9 @@ fn open_hint() -> &'static str {
 }
 
 /// The ways into the game, on the start page's left: a name and what it is.
-const MODES: [(Mode, &str, Option<&str>); 3] = [
+const MODES: [(Mode, &str, Option<&str>); 4] = [
     (Mode::Story, "STORY MODE", None),
+    (Mode::Online, "GTA ONLINE", Some("Freemode with other players, matched automatically, no servers.")),
     (Mode::Sandbox, "SANDBOX", Some("The whole map, free roam, no missions.")),
     (Mode::Benchmark, "BENCHMARK", Some("The game's fly-through of the map: how it runs here.")),
 ];
@@ -438,6 +439,13 @@ fn settings_items(
                 if action_button(ui, if MOBILE { "Find files" } else { "Choose…" }).clicked() {
                     actions.push(if MOBILE { Action::FindGame } else { Action::ChooseGame });
                 }
+            });
+            let next = next_start(started.is_some());
+            setting(ui, "Online name", Control::Action, next.or(Some("As the other players see you")), |ui| {
+                text_field(ui, &mut settings.online_name, 16)
+            });
+            setting(ui, "Private lobby", Control::Action, next.or(Some("A code to play with friends only")), |ui| {
+                text_field(ui, &mut settings.online_lobby, 32)
             });
             if started.is_none() {
                 setting(

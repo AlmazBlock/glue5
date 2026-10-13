@@ -41,6 +41,8 @@ pub enum Mode {
     Story,
     /// The whole map, free roam, no missions.
     Sandbox,
+    /// GTA Online's freemode, with the lobby's other players.
+    Online,
     /// The game's fly-through of the map, its results on the start page.
     Benchmark,
 }
@@ -233,6 +235,12 @@ impl Ui {
     /// the application can wait for input otherwise.
     pub fn wants_frame(&self) -> bool {
         !self.events.is_empty() || self.repaint_at.is_some_and(|t| Instant::now() >= t)
+    }
+
+    /// A text field of the app's has the focus: text input on (the system
+    /// keyboard on touch screens).
+    pub fn wants_text(&self) -> bool {
+        self.page.is_some() && self.ctx.egui_wants_keyboard_input()
     }
 
     pub fn idle_for(&self) -> Duration {

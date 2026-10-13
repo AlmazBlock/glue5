@@ -118,7 +118,11 @@ pub fn run() -> Result<()> {
     // Text input runs only while the game's text box is open (see `update`).
     let text_input = video.text_input();
     let refresh_rate = window_refresh_rate(&window);
-    let mode = if settings.sandbox { Mode::Sandbox } else { Mode::Story };
+    let mode = match () {
+        _ if settings.online => Mode::Online,
+        _ if settings.sandbox => Mode::Sandbox,
+        _ => Mode::Story,
+    };
     let last_benchmark = benchmark::last(&user_dir);
     let mut app = App {
         pads: pads::Pads::new(sdl.gamepad().map_err(|e| anyhow!("SDL gamepad: {e}"))?),
@@ -438,6 +442,7 @@ impl App {
                     self.mode = mode;
                     if mode != Mode::Benchmark {
                         self.settings.sandbox = mode == Mode::Sandbox;
+                        self.settings.online = mode == Mode::Online;
                     }
                     self.play()?;
                 }
@@ -474,7 +479,7 @@ impl App {
         // the system's input methods, whose accent menu (a held key, macOS),
         // dead keys and IME windows would otherwise get in the way of play.
         // Keys reach the game and the UI by scancode either way.
-        let want_typing = glue5_runtime::input::text_box_open();
+        let want_typing = glue5_runtime::input::text_box_open() || self.ui.wants_text();
         if want_typing != self.typing {
             self.typing = want_typing;
             if want_typing {
@@ -531,6 +536,9 @@ impl App {
                 Err(e) => log::warn!("cannot write the low-memory preset: {e}"),
             }
         }
+        if self.mode == Mode::Online && self.settings.online_name.trim().is_empty() {
+            self.settings.online_name = settings::default_online_name();
+        }
         self.settings.save(&self.user_dir);
         // A new attempt: the last one's failure is history.
         let _ = std::fs::remove_file(self.user_dir.join(FAILURE_FILE));
@@ -548,7 +556,10 @@ impl App {
                 benchmark: self.mode == Mode::Benchmark,
                 low_memory: s.low_memory,
                 max_fps: s.max_fps,
-                online: None,
+                online: (self.mode == Mode::Online).then(|| glue5_runtime::Online {
+                    name: s.online_name.trim().into(),
+                    lobby: s.online_lobby.trim().into(),
+                }),
             },
             glue5_gpu::backend(gpu_settings, Some(screen)),
         )?;

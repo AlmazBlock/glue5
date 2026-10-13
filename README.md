@@ -184,10 +184,11 @@ touch screens, an on-screen controller appears while touch is in use and
 hides when a controller or keyboard is used. The game's text boxes bring
 up the system keyboard on touch devices.
 
-The start page shows the game files, Story mode, Sandbox (the whole map,
-free roam, no missions) and Settings; the last mode played comes first. App
-settings cover resolution, upscaling, VSync, frame rate, touch controls, low
-memory and the game folder. During play, open them with F1, the ⚙ button on
+The start page shows the game files, Story mode, GTA Online, Sandbox (the
+whole map, free roam, no missions) and Settings; the last mode played comes
+first. App settings cover resolution, upscaling, VSync, frame rate, touch
+controls, low memory, the game folder and GTA Online's name and private
+lobby. During play, open them with F1, the ⚙ button on
 touch screens, or by holding Back + Start on a controller. Use the D-pad or arrow keys to
 navigate, A or Enter to select, and B or Esc to go back.
 
@@ -195,6 +196,25 @@ Esc / Start opens the game's own menu. Graphics quality is configured in
 Settings › Graphics and saved in `settings.xml`. Confirming a change that
 requires a restart, such as texture quality, ends the game. On desktop,
 the app restarts directly into the game. On a phone, reopen the app.
+
+## GTA Online
+
+GTA Online's freemode runs without Rockstar's services and without a
+server of ours. GTA ONLINE on the start page puts the player in the lobby
+of everyone playing, where the game's own matchmaking finds or hosts a
+session; Settings › Game › Private lobby takes a code instead, to play with
+whoever enters the same one. The name other players see is in the same tab.
+
+- The lobby is a virtual LAN the engine plays on as on a real one
+  (`vnet.rs`): its sockets carry their datagrams over one UDP socket per
+  player (`p2p.rs`, port 47000 to 47015, or another if all are taken).
+- Players find each other on the same network by broadcast, and on the
+  Internet through the BitTorrent DHT (`dht.rs`), where each announces
+  itself under the lobby's key. Behind NATs both send until the NATs let
+  them through; players who cannot reach each other go through one who
+  can.
+- Characters are kept in the user directory, `cloud/` (`cloud.rs`, with the
+  stats the game's data lacks: `stats.rs`); the gamer id in `online-id`.
 
 ## Renderer
 
