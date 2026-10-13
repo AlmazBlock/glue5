@@ -139,6 +139,21 @@ pub fn install(imports: Imports, hooks: Hooks) {
     }
 }
 
+/// Host functions the game can call through function pointers (e.g. from
+/// vtables the host builds in wasm memory): each is an `unsafe extern "C"`
+/// function taking the thread's `*mut Env` first, then the call's arguments,
+/// given as its address. Call once, before creating any instance.
+pub fn set_host_functions(fns: &'static [usize]) {
+    let count = u32::try_from(fns.len()).expect("host functions");
+    unsafe { glue5_set_host_functions(fns.as_ptr().cast(), count) }
+}
+
+/// The game's function pointer (table index) for `set_host_functions`'
+/// entry `i`. Valid once an instance exists.
+pub fn host_function(i: u32) -> u64 {
+    u64::from(unsafe { glue5_host_functions_base }) + u64::from(i)
+}
+
 /// Creates the calling thread's instance in `env` and runs the start function.
 pub unsafe fn instantiate(env: *mut Env) -> Result<(), Trap> {
     Trap::check(unsafe { glue5_instance_new(env) })
@@ -167,6 +182,8 @@ unsafe extern "C" {
     fn glue5_memory_init(memory: *mut Memory, data: *mut u8, pages: u64, max_pages: u64);
     fn glue5_instance_new(env: *mut Env) -> u32;
     fn glue5_instance_free(env: *mut Env);
+    fn glue5_set_host_functions(fns: *const *const c_void, count: u32);
+    static glue5_host_functions_base: u32;
     fn wasm_rt_strerror(trap: u32) -> *const c_char;
     fn glue5_unwind() -> !;
     /// wasm2c runtime (patches/wabt/0005).

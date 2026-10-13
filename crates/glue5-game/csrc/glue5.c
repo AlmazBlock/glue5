@@ -62,6 +62,38 @@ wasm_rt_shared_memory_t* w2c_env_memory(struct w2c_env* env) {
   return env->memory;
 }
 
+static const void* const* glue5_host_fns;
+static uint32_t glue5_host_count;
+
+void glue5_set_host_functions(const void* const* fns, uint32_t count) {
+  glue5_host_fns = fns;
+  glue5_host_count = count;
+}
+
+/* The host's functions after the module's in `instance`'s table, each called
+ * with the thread's env (the generated code passes an entry's
+ * module_instance first): the game reaches them through function pointers,
+ * e.g. in vtables the host builds. Returns the first one's index. */
+static uint32_t glue5_append_host_functions(struct w2c_env* env, w2c_game* instance) {
+  wasm_rt_funcref_table_t* table = w2c_game_0x5F_indirect_function_table(instance);
+  uint32_t base = table->size;
+  if (!glue5_host_count) {
+    return base;
+  }
+  wasm_rt_funcref_t* data = realloc(table->data, (base + glue5_host_count) * sizeof *data);
+  if (!data) {
+    abort();
+  }
+  for (uint32_t i = 0; i < glue5_host_count; i++) {
+    data[base + i] = (wasm_rt_funcref_t){NULL, (wasm_rt_function_ptr_t)glue5_host_fns[i], {NULL}, env};
+  }
+  table->data = data;
+  table->size = table->max_size = base + glue5_host_count;
+  return base;
+}
+
+uint32_t glue5_host_functions_base;
+
 /* Creates this thread's instance; runs the start function (which initialises
  * memory only on the first instance). Returns the trap code. */
 uint32_t glue5_instance_new(struct w2c_env* env) {
@@ -70,8 +102,8 @@ uint32_t glue5_instance_new(struct w2c_env* env) {
     abort();
   }
   env->instance = instance;
-  GLUE5_TRY(wasm2c_game_instantiate(
-      instance, env, (struct w2c_wasi__snapshot__preview1*)env));
+  GLUE5_TRY(wasm2c_game_instantiate(instance, env, (struct w2c_wasi__snapshot__preview1*)env);
+            glue5_host_functions_base = glue5_append_host_functions(env, instance));
 }
 
 void glue5_instance_free(struct w2c_env* env) {

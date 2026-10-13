@@ -222,8 +222,11 @@ fn apply_hooks(hooks: &[codegen::Hook], sources: &mut [PathBuf]) -> Result<()> {
                 .match_indices(&needle)
                 .map(|(i, _)| current[..i].rfind('\n').map_or(0, |n| n + 1))
                 .find(|&ls| {
-                    let line = current[ls..].lines().next().unwrap_or("");
-                    line.trim_end().ends_with('{') && !line.starts_with("static")
+                    // A definition, not a declaration: its signature (on
+                    // one line, or wrapped over several) ends with `{`.
+                    let rest = &current[ls..];
+                    let end = rest.find(['{', ';']).unwrap_or(0);
+                    rest[end..].starts_with('{') && !rest.starts_with("static")
                 })
             else {
                 return true;

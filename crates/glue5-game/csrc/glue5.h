@@ -65,6 +65,8 @@ void glue5_memory_init(wasm_rt_shared_memory_t* memory,
                        uint64_t max_pages);
 size_t glue5_memory_struct_size(void);
 uint32_t glue5_instance_new(struct w2c_env* env);
+void glue5_set_host_functions(const void* const* fns, uint32_t count);
+extern uint32_t glue5_host_functions_base;
 void glue5_instance_free(struct w2c_env* env);
 _Noreturn void glue5_longjmp(struct w2c_env* env);
 
