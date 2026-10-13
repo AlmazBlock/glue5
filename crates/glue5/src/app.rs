@@ -132,6 +132,7 @@ pub fn run() -> Result<()> {
         window,
         text_input,
         typing: false,
+        keyboard_away: false,
         presentation,
         #[cfg(target_os = "android")]
         instance: surfaces,
@@ -208,6 +209,9 @@ struct App {
     text_input: sdl3::keyboard::TextInputUtil,
     /// Typed text is on: while the game's text box is open.
     typing: bool,
+    /// The on-screen keyboard, which hides the touch controls, was put away
+    /// with a tap above it: the game's text box takes A or B from them.
+    keyboard_away: bool,
     pads: pads::Pads,
     presentation: Presentation,
     /// For the window's surfaces after the first.
@@ -337,6 +341,12 @@ impl App {
                 return false;
             }
             self.touch_input = true;
+            // A tap above the on-screen keyboard puts it away (it covers the
+            // touch controls, and a phone's has no key to hide it).
+            if MOBILE && self.typing && !self.ui.is_open() {
+                self.keyboard_away = true;
+                return false;
+            }
         }
         if let Event::KeyDown { scancode: Some(Scancode::F1), repeat: false, .. } = event {
             self.ui.toggle_settings();
@@ -479,7 +489,9 @@ impl App {
         // the system's input methods, whose accent menu (a held key, macOS),
         // dead keys and IME windows would otherwise get in the way of play.
         // Keys reach the game and the UI by scancode either way.
-        let want_typing = glue5_runtime::input::text_box_open() || self.ui.wants_text();
+        let text_box = glue5_runtime::input::text_box_open();
+        self.keyboard_away &= text_box;
+        let want_typing = (text_box && !self.keyboard_away) || self.ui.wants_text();
         if want_typing != self.typing {
             self.typing = want_typing;
             if want_typing {
