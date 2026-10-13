@@ -163,6 +163,65 @@ const TEXT_LEN: u32 = 64;
 const WIN_W: u64 = 432;
 const WIN_H: u64 = 436;
 
+/// Keys pressed since the engine last read the keyboard, and those of them
+/// released meanwhile, by virtual-key code (bit sets). The engine copies the
+/// key bytes once a frame (`CControlMgr::Update`) and acts on a key seen down
+/// then up (its text box takes Enter when released); a press that begins
+/// and ends in between (the on-screen keyboard's Return, which SDL releases
+/// at once) would never reach it, so it stays down until the engine's next
+/// read.
+static KEY_LATCH: Mutex<KeyLatch> = Mutex::new(KeyLatch::NONE);
+
+/// Bit sets of virtual-key codes.
+type Keys = [u64; 4];
+
+struct KeyLatch {
+    pressed: Keys,
+    released: Keys,
+}
+
+impl KeyLatch {
+    const NONE: KeyLatch = KeyLatch { pressed: [0; 4], released: [0; 4] };
+
+    /// A key goes down or up: whether to write that now (an up waits for
+    /// the engine to have read the key down).
+    fn change(&mut self, vk: u8, down: bool) -> bool {
+        let (word, bit) = (vk as usize / 64, 1 << (vk % 64));
+        if down {
+            self.pressed[word] |= bit;
+            self.released[word] &= !bit;
+        } else if self.pressed[word] & bit != 0 {
+            self.released[word] |= bit;
+            return false;
+        }
+        true
+    }
+
+    /// The engine has read the keys pressed until `seen` was taken: those of
+    /// them released meanwhile, to let go now.
+    fn seen(&mut self, seen: Keys) -> impl Iterator<Item = u8> {
+        let mut up = [0; 4];
+        for ((up, released), seen) in up.iter_mut().zip(&mut self.released).zip(seen) {
+            *up = *released & seen;
+            *released &= !seen;
+        }
+        (0..=255u8).filter(move |&vk| up[vk as usize / 64] & (1 << (vk % 64)) != 0)
+    }
+}
+
+/// Hook for `CControlMgr::Update()`: the engine reads the keys; those
+/// released since it last did are let go once it has seen them down.
+pub(crate) unsafe extern "C" fn control_update(env: *mut Env) {
+    // Keys pressed from here on are for the next read.
+    let seen = std::mem::take(&mut KEY_LATCH.lock().unwrap().pressed);
+    unsafe { orig::control_update(env) };
+    let Some(at) = crate::nonzero(crate::rt().input_block.load(Ordering::Acquire)) else { return };
+    let mem = unsafe { Mem::of(env) };
+    for vk in KEY_LATCH.lock().unwrap().seen(seen) {
+        mem.set_u8(at + KEYS + vk as u64, 0);
+    }
+}
+
 /// Mouse buttons in the input block.
 pub mod mouse {
     pub const LEFT: u32 = 1;
@@ -184,13 +243,17 @@ impl InputBlock {
         InputBlock { mem, at }
     }
 
-    /// A key by Windows virtual-key code.
+    /// A key by Windows virtual-key code. One released before the engine
+    /// has seen it down stays down until it has (see [`KEY_LATCH`]).
     pub fn key(&self, vk: u8, down: bool) {
-        self.mem.set_u8(self.at + KEYS + vk as u64, if down { 0x80 } else { 0 });
+        if KEY_LATCH.lock().unwrap().change(vk, down) {
+            self.mem.set_u8(self.at + KEYS + vk as u64, if down { 0x80 } else { 0 });
+        }
     }
 
     /// Releases every key and button (e.g. on focus loss).
     pub fn release_all(&self) {
+        *KEY_LATCH.lock().unwrap() = KeyLatch::NONE;
         self.mem.bytes_mut(self.at + KEYS, 256).fill(0);
         self.mem.atomic_u32(self.at + MOUSE_BUTTONS).store(0, Ordering::Relaxed);
     }
@@ -255,6 +318,35 @@ impl InputBlock {
 /// This module's hooks.
 pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.pad_update = Some(pad_update);
+    hooks.control_update = Some(control_update);
     hooks.text_box_open = Some(text_box_open_hook);
     hooks.text_box_close = Some(text_box_close_hook);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KeyLatch;
+
+    const ENTER: u8 = 0x0D;
+
+    #[test]
+    fn a_key_released_before_the_engine_read_it_waits_for_the_read() {
+        let mut latch = KeyLatch::NONE;
+        // Down and up between two reads (iOS's Return): the up waits.
+        assert!(latch.change(ENTER, true));
+        assert!(!latch.change(ENTER, false));
+        let seen = std::mem::take(&mut latch.pressed);
+        assert_eq!(latch.seen(seen).collect::<Vec<_>>(), [ENTER]);
+        // Held across a read: the up applies at once.
+        assert!(latch.change(0xA0, true));
+        let seen = std::mem::take(&mut latch.pressed);
+        assert_eq!(latch.seen(seen).count(), 0);
+        assert!(latch.change(0xA0, false));
+        // Down again before the read: nothing to let go.
+        assert!(latch.change(ENTER, true));
+        assert!(!latch.change(ENTER, false));
+        assert!(latch.change(ENTER, true));
+        let seen = std::mem::take(&mut latch.pressed);
+        assert_eq!(latch.seen(seen).count(), 0);
+    }
 }
