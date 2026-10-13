@@ -548,6 +548,7 @@ impl App {
                 benchmark: self.mode == Mode::Benchmark,
                 low_memory: s.low_memory,
                 max_fps: s.max_fps,
+                online: None,
             },
             glue5_gpu::backend(gpu_settings, Some(screen)),
         )?;

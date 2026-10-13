@@ -700,6 +700,7 @@ dependencies = [
  "jiff",
  "libc",
  "log",
+ "sha2",
  "windows-sys",
 ]
 

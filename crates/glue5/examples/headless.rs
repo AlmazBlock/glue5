@@ -41,6 +41,8 @@ it stops working (an engine thread's trap).
                         (settings.xml names, e.g. ShadowQuality=3), after --low
   --sandbox             start in the sandbox (the map, no story) instead of
                         the story mode
+  --online <name>       GTA Online, as this player name
+  --lobby <code>        with --online: a private lobby instead of everyone
   --benchmark           the game's benchmark (a fly-through of the map; the
                         run ends with it, results in the user directory)
   --tour <file> <s>     visit the map: s seconds at each stop of file (lines
@@ -75,6 +77,8 @@ fn main() -> Result<()> {
     let mut game_settings: Vec<(String, String)> = Vec::new();
     let mut start_mode = 1;
     let mut benchmark = false;
+    let mut online = None;
+    let mut lobby = String::new();
     let mut tour = None;
     let mut user_dir = std::env::temp_dir().join("glue5-headless");
     let mut args = std::env::args().skip(1);
@@ -109,6 +113,8 @@ fn main() -> Result<()> {
             }
             "--sandbox" => start_mode = 2,
             "--benchmark" => benchmark = true,
+            "--online" => online = Some(next()?),
+            "--lobby" => lobby = next()?,
             "--tour" => {
                 let path = next()?;
                 let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
@@ -153,7 +159,17 @@ fn main() -> Result<()> {
         glue5_runtime::tour::start(stops, stay);
     }
     let game = glue5_runtime::start(
-        glue5_runtime::Config { game_dir, user_dir, width, height, start_mode, low_memory: low, max_fps, benchmark },
+        glue5_runtime::Config {
+            game_dir,
+            user_dir,
+            width,
+            height,
+            start_mode,
+            low_memory: low,
+            max_fps,
+            benchmark,
+            online: online.map(|name| glue5_runtime::Online { name, lobby }),
+        },
         gpu,
     )?;
     if audio {

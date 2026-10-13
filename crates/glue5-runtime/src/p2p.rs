@@ -1,0 +1,470 @@
+//! The players' network, with no server of ours: one UDP socket per player,
+//! carrying the engine's datagrams between the players of a lobby.
+//!
+//! A lobby is a virtual LAN (see vnet.rs): each player has an address on
+//! it, and the game finds and joins sessions on it with its own LAN
+//! matchmaking. The public lobby is everyone playing; a private one is
+//! whoever knows its code.
+//!
+//! Players find each other
+//! - on the same network or machine, by broadcasting to the lobby ports;
+//! - on the Internet, through the BitTorrent DHT (dht.rs), which gives each
+//!   the others' public addresses (the ones their NATs opened).
+//!
+//! Two players behind NATs both send to each other until the NATs let the
+//! datagrams through ("hole punching"); each new player is introduced to
+//! the others by the first player it reaches, and while two players cannot
+//! reach each other directly, that player relays between them.
+
+use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
+
+use crate::dht::{self, Dht};
+
+/// The lobby ports, also the ports looked at for players on the same
+/// network: several players on one machine take the next free one.
+const PORTS: std::ops::Range<u16> = 47000..47016;
+/// The virtual LAN: 10.77.0.0/16.
+pub const NET: u32 = 10 << 24 | 77 << 16;
+const MAGIC: [u8; 3] = [b'G', b'5', 1];
+const HELLO: u8 = 1;
+const PEERS: u8 = 2;
+const DATA: u8 = 3;
+/// HELLO: please answer.
+const ASK: u8 = 1;
+/// How often players greet each other (keeping the NATs' mappings open),
+/// and when a silent one is gone.
+const KEEPALIVE: Duration = Duration::from_secs(2);
+const GONE: Duration = Duration::from_secs(20);
+/// How long an address is tried before giving up on it.
+const PUNCH: Duration = Duration::from_secs(30);
+/// How often the players reached are introduced to each other again.
+const INTRODUCE: Duration = Duration::from_secs(8);
+
+struct Peer {
+    vip: u32,
+    /// Where its datagrams come from, when they do.
+    addr: Option<SocketAddrV4>,
+    /// When it was last heard from directly, or introduced.
+    heard: Instant,
+    introduced: Instant,
+    /// Who introduced it: the relay while it cannot be reached directly.
+    via: Option<SocketAddrV4>,
+}
+
+impl Peer {
+    fn new(vip: u32, now: Instant) -> Peer {
+        Peer { vip, addr: None, heard: now.checked_sub(GONE).unwrap_or(now), introduced: now, via: None }
+    }
+
+    fn direct(&self, now: Instant) -> bool {
+        self.addr.is_some() && now - self.heard < KEEPALIVE * 3
+    }
+}
+
+/// How close an address is: this machine, this network, the Internet.
+fn nearness(addr: SocketAddrV4) -> u8 {
+    let ip = addr.ip();
+    if ip.is_loopback() {
+        0
+    } else if ip.is_private() || ip.is_link_local() {
+        1
+    } else {
+        2
+    }
+}
+
+struct State {
+    /// By peer id.
+    peers: HashMap<u64, Peer>,
+    /// Addresses tried, not answering yet (since when).
+    trying: HashMap<SocketAddrV4, Instant>,
+    /// This player's own addresses (the DHT hands them out too).
+    own: std::collections::HashSet<SocketAddrV4>,
+    introduced: Instant,
+    dht: Dht,
+}
+
+pub struct P2p {
+    socket: UdpSocket,
+    port: u16,
+    id: u64,
+    lobby: [u8; 8],
+    vip: AtomicU32,
+    /// The engine took the address: it cannot change any more.
+    vip_taken: AtomicBool,
+    state: Mutex<State>,
+}
+
+/// Datagrams for the engine: from (virtual address, port), to port.
+pub type Deliver = fn(u32, u16, u16, &[u8]);
+
+static P2P: OnceLock<P2p> = OnceLock::new();
+
+fn random() -> u64 {
+    std::collections::hash_map::RandomState::new().build_hasher().finish()
+}
+
+/// Joins `lobby` (any text: "public" or a private lobby's code) for this
+/// game build.
+pub fn start(lobby: &str, deliver: Deliver) -> std::io::Result<&'static P2p> {
+    if let Some(p2p) = P2P.get() {
+        return Ok(p2p);
+    }
+    let socket = PORTS
+        .clone()
+        .find_map(|port| UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).ok())
+        .map_or_else(|| UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)), Ok)?;
+    socket.set_broadcast(true)?;
+    socket.set_read_timeout(Some(Duration::from_millis(50)))?;
+    let port = socket.local_addr()?.port();
+    let key: [u8; 32] = Sha256::digest(format!("glue5 lobby 1 {} {lobby}", crate::GAME_BUILD)).into();
+    let id = random();
+    let dht_id: dht::Id = Sha256::digest(id.to_le_bytes()).as_slice()[..20].try_into().unwrap();
+    let p2p = P2p {
+        socket,
+        port,
+        id,
+        lobby: key[..8].try_into().unwrap(),
+        vip: AtomicU32::new(0),
+        vip_taken: AtomicBool::new(false),
+        state: Mutex::new(State {
+            peers: HashMap::new(),
+            trying: HashMap::new(),
+            own: Default::default(),
+            introduced: Instant::now(),
+            dht: Dht::new(dht_id, key[..20].try_into().unwrap(), port),
+        }),
+    };
+    p2p.vip.store(free_vip(&[]), Ordering::Relaxed);
+    let p2p = P2P.get_or_init(|| p2p);
+    log::info!(
+        "p2p: lobby {:02x?}, port {port}, address {}",
+        p2p.lobby,
+        Ipv4Addr::from(p2p.vip.load(Ordering::Relaxed))
+    );
+    std::thread::Builder::new().name("p2p".into()).spawn(move || p2p.run(deliver))?;
+    Ok(p2p)
+}
+
+pub fn get() -> Option<&'static P2p> {
+    P2P.get()
+}
+
+/// An address none of `taken` is: 10.77.a.b, b not 0 or 255.
+fn free_vip(taken: &[u32]) -> u32 {
+    loop {
+        let r = random() as u32;
+        let vip = NET | (r & 0xff00) | (r % 254 + 1);
+        if !taken.contains(&vip) {
+            return vip;
+        }
+    }
+}
+
+fn is_broadcast(ip: u32) -> bool {
+    ip == u32::MAX || (ip & 0xffff_0000 == NET && ip & 0xff == 0xff)
+}
+
+impl P2p {
+    /// This player's address on the virtual LAN; the engine takes it.
+    pub fn local_ip(&self) -> u32 {
+        self.vip_taken.store(true, Ordering::Relaxed);
+        self.vip.load(Ordering::Relaxed)
+    }
+
+    /// Sends an engine datagram (from `src_port`) to a player's address, or
+    /// to all of them (a broadcast).
+    pub fn send(&self, src_port: u16, dst: u32, dst_port: u16, payload: &[u8]) {
+        let vip = self.vip.load(Ordering::Relaxed);
+        let mut d = Vec::with_capacity(MAGIC.len() + 13 + payload.len());
+        d.extend_from_slice(&MAGIC);
+        d.push(DATA);
+        d.extend_from_slice(&vip.to_be_bytes());
+        d.extend_from_slice(&src_port.to_be_bytes());
+        d.extend_from_slice(&dst.to_be_bytes());
+        d.extend_from_slice(&dst_port.to_be_bytes());
+        d.extend_from_slice(payload);
+        const DST: std::ops::Range<usize> = MAGIC.len() + 7..MAGIC.len() + 11;
+        let now = Instant::now();
+        let state = self.state.lock().unwrap();
+        for peer in state.peers.values() {
+            if peer.vip != dst && !is_broadcast(dst) {
+                continue;
+            }
+            let Some(to) = Self::path(peer, now) else { continue };
+            // Through a relay a broadcast goes to the player alone (the
+            // relay would keep it).
+            if is_broadcast(dst) && Some(to) != peer.addr {
+                d[DST].copy_from_slice(&peer.vip.to_be_bytes());
+                let _ = self.socket.send_to(&d, to);
+                d[DST].copy_from_slice(&dst.to_be_bytes());
+            } else {
+                let _ = self.socket.send_to(&d, to);
+            }
+        }
+    }
+
+    /// Directly while the player answers there, else through who
+    /// introduced it.
+    fn path(peer: &Peer, now: Instant) -> Option<SocketAddrV4> {
+        if peer.direct(now) { peer.addr } else { peer.via.or(peer.addr) }
+    }
+
+    fn hello(&self, to: SocketAddrV4, flags: u8) {
+        let mut d = Vec::with_capacity(32);
+        d.extend_from_slice(&MAGIC);
+        d.push(HELLO);
+        d.extend_from_slice(&self.lobby);
+        d.extend_from_slice(&self.id.to_be_bytes());
+        d.extend_from_slice(&self.vip.load(Ordering::Relaxed).to_be_bytes());
+        d.push(flags);
+        let _ = self.socket.send_to(&d, to);
+    }
+
+    /// Introduces players: `about` to `to`.
+    fn peers(&self, to: SocketAddrV4, about: &[(u64, u32, SocketAddrV4)]) {
+        for chunk in about.chunks(32) {
+            let mut d = Vec::with_capacity(16 + chunk.len() * 18);
+            d.extend_from_slice(&MAGIC);
+            d.push(PEERS);
+            d.extend_from_slice(&self.lobby);
+            for (id, vip, addr) in chunk {
+                d.extend_from_slice(&id.to_be_bytes());
+                d.extend_from_slice(&vip.to_be_bytes());
+                d.extend_from_slice(&addr.ip().octets());
+                d.extend_from_slice(&addr.port().to_be_bytes());
+            }
+            let _ = self.socket.send_to(&d, to);
+        }
+    }
+
+    fn run(&self, deliver: Deliver) {
+        let mut buf = [0u8; 2048];
+        let mut ticked = Instant::now() - KEEPALIVE;
+        let mut dht_ticked = ticked;
+        loop {
+            match self.socket.recv_from(&mut buf) {
+                Ok((len, SocketAddr::V4(from))) => self.receive(from, &buf[..len], deliver),
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                // ICMP port unreachable, from a player gone (Windows).
+                Err(_) => {}
+            }
+            let now = Instant::now();
+            if now - dht_ticked > Duration::from_millis(250) {
+                dht_ticked = now;
+                let mut out = dht::Output::default();
+                self.state.lock().unwrap().dht.tick(now, &mut out);
+                self.dht_output(out);
+            }
+            if now - ticked > KEEPALIVE {
+                ticked = now;
+                self.tick(now);
+            }
+        }
+    }
+
+    fn dht_output(&self, out: dht::Output) {
+        for (to, d) in &out.send {
+            let _ = self.socket.send_to(d, to);
+        }
+        if out.peers.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let new: Vec<SocketAddrV4> = out
+            .peers
+            .into_iter()
+            .filter(|a| {
+                !state.own.contains(a)
+                    && !state.trying.contains_key(a)
+                    && state.peers.values().all(|p| p.addr != Some(*a))
+            })
+            .collect();
+        for addr in &new {
+            log::debug!("p2p: trying {addr}, from the DHT");
+            state.trying.insert(*addr, now);
+        }
+        drop(state);
+        for addr in new {
+            self.hello(addr, ASK);
+        }
+    }
+
+    fn tick(&self, now: Instant) {
+        // Players on this network or machine.
+        for port in PORTS.filter(|&p| p != self.port) {
+            self.hello(SocketAddrV4::new(Ipv4Addr::BROADCAST, port), ASK);
+            self.hello(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port), ASK);
+        }
+        let mut state = self.state.lock().unwrap();
+        state.peers.retain(|id, p| {
+            let alive = now - p.heard < GONE || now - p.introduced < GONE;
+            if !alive {
+                log::info!("p2p: player {id:016x} ({}) gone", Ipv4Addr::from(p.vip));
+            }
+            alive
+        });
+        state.trying.retain(|_, since| now - *since < PUNCH);
+        let greet: Vec<SocketAddrV4> =
+            state.peers.values().filter_map(|p| p.addr).chain(state.trying.keys().copied()).collect();
+        // Introductions again now and then: they keep the players reached
+        // only through others, and retry the ones not reached yet.
+        let reached: Vec<(u64, u32, SocketAddrV4)> =
+            state.peers.iter().filter(|(_, p)| p.direct(now)).map(|(i, p)| (*i, p.vip, p.addr.unwrap())).collect();
+        let introduce = now.duration_since(state.introduced) > INTRODUCE;
+        if introduce {
+            state.introduced = now;
+        }
+        drop(state);
+        for addr in greet {
+            self.hello(addr, ASK);
+        }
+        if introduce {
+            for (id, _, addr) in &reached {
+                let others: Vec<_> = reached.iter().filter(|(i, ..)| i != id).copied().collect();
+                self.peers(*addr, &others);
+            }
+        }
+    }
+
+    fn receive(&self, from: SocketAddrV4, d: &[u8], deliver: Deliver) {
+        if Dht::is_dht(d) {
+            let mut out = dht::Output::default();
+            self.state.lock().unwrap().dht.receive(from, d, &mut out);
+            self.dht_output(out);
+            return;
+        }
+        if d.len() < MAGIC.len() + 1 || d[..MAGIC.len()] != MAGIC {
+            return;
+        }
+        let kind = d[MAGIC.len()];
+        let d = &d[MAGIC.len() + 1..];
+        match kind {
+            HELLO if d.len() >= 21 && d[..8] == self.lobby => {
+                let id = u64::from_be_bytes(d[8..16].try_into().unwrap());
+                let vip = u32::from_be_bytes(d[16..20].try_into().unwrap());
+                self.on_hello(from, id, vip, d[20]);
+            }
+            PEERS if d.len() >= 8 && d[..8] == self.lobby => {
+                let about: Vec<(u64, u32, SocketAddrV4)> = d[8..]
+                    .as_chunks::<18>()
+                    .0
+                    .iter()
+                    .map(|e| {
+                        let id = u64::from_be_bytes(e[..8].try_into().unwrap());
+                        let vip = u32::from_be_bytes(e[8..12].try_into().unwrap());
+                        let ip = Ipv4Addr::new(e[12], e[13], e[14], e[15]);
+                        (id, vip, SocketAddrV4::new(ip, u16::from_be_bytes([e[16], e[17]])))
+                    })
+                    .collect();
+                self.on_peers(from, &about);
+            }
+            DATA if d.len() >= 12 => {
+                let src = u32::from_be_bytes(d[..4].try_into().unwrap());
+                let src_port = u16::from_be_bytes(d[4..6].try_into().unwrap());
+                let dst = u32::from_be_bytes(d[6..10].try_into().unwrap());
+                let dst_port = u16::from_be_bytes(d[10..12].try_into().unwrap());
+                let vip = self.vip.load(Ordering::Relaxed);
+                let state = self.state.lock().unwrap();
+                // Only from players of the lobby.
+                if !state.peers.values().any(|p| p.addr == Some(from) || p.vip == src) {
+                    return;
+                }
+                if dst == vip || is_broadcast(dst) {
+                    drop(state);
+                    deliver(src, src_port, dst_port, &d[12..]);
+                } else if let Some(to) = state.peers.values().find(|p| p.vip == dst).and_then(|p| p.addr) {
+                    // A relay for two players who cannot reach each other.
+                    let mut relayed = Vec::with_capacity(MAGIC.len() + 1 + d.len());
+                    relayed.extend_from_slice(&MAGIC);
+                    relayed.push(DATA);
+                    relayed.extend_from_slice(d);
+                    let _ = self.socket.send_to(&relayed, to);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_hello(&self, from: SocketAddrV4, id: u64, vip: u32, flags: u8) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        state.trying.remove(&from);
+        if id == self.id {
+            state.own.insert(from);
+            return;
+        }
+        let known = state.peers.contains_key(&id);
+        // Two players with one address: the one whose address the engine
+        // has not taken yet takes another.
+        if vip == self.vip.load(Ordering::Relaxed) {
+            if self.vip_taken.load(Ordering::Relaxed) {
+                log::warn!("p2p: player {id:016x} has this player's address {}", Ipv4Addr::from(vip));
+            } else {
+                let taken: Vec<u32> = state.peers.values().map(|p| p.vip).chain([vip]).collect();
+                self.vip.store(free_vip(&taken), Ordering::Relaxed);
+            }
+        }
+        let peer = state.peers.entry(id).or_insert(Peer::new(vip, now));
+        peer.vip = vip;
+        // The nearest of its addresses that answer.
+        if !peer.direct(now) || peer.addr.is_none_or(|a| nearness(from) <= nearness(a)) {
+            peer.addr = Some(from);
+        }
+        peer.heard = now;
+        if !known {
+            log::info!("p2p: player {id:016x} ({}) at {from}", Ipv4Addr::from(vip));
+            // Introductions: the newcomer to everyone, everyone to it.
+            let others: Vec<(u64, u32, SocketAddrV4)> =
+                state.peers.iter().filter(|(i, _)| **i != id).filter_map(|(i, p)| Some((*i, p.vip, p.addr?))).collect();
+            drop(state);
+            self.peers(from, &others);
+            for (_, _, addr) in &others {
+                self.peers(*addr, &[(id, vip, from)]);
+            }
+        } else {
+            drop(state);
+        }
+        if flags & ASK != 0 {
+            self.hello(from, 0);
+        }
+    }
+
+    fn on_peers(&self, from: SocketAddrV4, about: &[(u64, u32, SocketAddrV4)]) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        // Only a player of the lobby introduces others.
+        if !state.peers.values().any(|p| p.addr == Some(from)) {
+            return;
+        }
+        let mut punch = Vec::new();
+        for &(id, vip, addr) in about {
+            if id == self.id {
+                continue;
+            }
+            let peer = state.peers.entry(id).or_insert(Peer::new(vip, now));
+            peer.vip = vip;
+            peer.via = Some(from);
+            peer.introduced = now;
+            if !peer.direct(now) && !state.own.contains(&addr) {
+                punch.push(addr);
+            }
+        }
+        for addr in &punch {
+            state.trying.insert(*addr, now);
+        }
+        drop(state);
+        for addr in punch {
+            self.hello(addr, ASK);
+        }
+    }
+}

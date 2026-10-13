@@ -7,7 +7,9 @@
 
 pub mod audio;
 mod audio_update;
+mod cloud;
 mod device_reset;
+mod dht;
 pub mod exit;
 pub mod game_settings;
 mod gamelog;
@@ -16,15 +18,19 @@ mod imports;
 pub mod input;
 pub mod memory;
 mod msaa;
+mod online;
+mod p2p;
 pub mod qos;
 mod readback;
 mod scenario;
 mod skin;
+mod stats;
 mod threads;
 mod time;
 pub mod tour;
 mod trap_site;
 pub mod vfs;
+mod vnet;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -89,6 +95,18 @@ pub struct Config {
     /// game; the engine writes the results in the user directory
     /// (`Documents/Rockstar Games/GTA V/Benchmarks`) and asks to quit.
     pub benchmark: bool,
+    /// GTA Online in a lobby, instead of story mode or the sandbox.
+    pub online: Option<Online>,
+}
+
+/// How the game plays online.
+#[derive(Clone, Debug)]
+pub struct Online {
+    /// The player's name, as the others see it (16 characters at most).
+    pub name: String,
+    /// A private lobby's code; empty: the lobby of everyone, where the
+    /// game's matchmaking puts the player in a session.
+    pub lobby: String,
 }
 
 impl Config {
@@ -139,6 +157,10 @@ impl Config {
             args.push("-FrameQueueLimit=2".into());
         }
         args.extend(extra);
+        if self.online.is_some() {
+            args.retain(|a| a != "-nonetwork");
+            args.extend(online::ENGINE_ARGS.iter().map(|a| a.to_string()));
+        }
         args
     }
 }
@@ -232,6 +254,9 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     audio_update::hooks(&mut hooks);
     scenario::hooks(&mut hooks);
     tour::hooks(&mut hooks);
+    if let Some(online) = &rt().config.online {
+        online::start(online, &mut hooks);
+    }
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;
     Ok(Game { engine })

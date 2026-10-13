@@ -101,6 +101,8 @@ pub unsafe extern "C" fn wasm_module_int_js(env: *mut Env, name: u64, default: u
     let value = match std::env::var(name.to_ascii_uppercase()).ok().and_then(|v| v.parse().ok()) {
         Some(v) => v,
         None if name == "gameResourceMB" && low => default.min(768),
+        // Online, the network's threads run (bit 2).
+        None if name == "keepThreads" && rt().config.online.is_some() => default | 2,
         None => default,
     };
     // Low memory: the resource heap's budget is its starting size.
