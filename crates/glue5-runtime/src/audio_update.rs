@@ -49,3 +49,8 @@ pub(crate) unsafe extern "C" fn start_update(env: *mut Env) {
     }
     unsafe { orig::audio_start_update(env) }
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.audio_start_update = Some(start_update);
+}

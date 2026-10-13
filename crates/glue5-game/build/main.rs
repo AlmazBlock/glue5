@@ -52,7 +52,7 @@ fn run() -> Result<()> {
     let tools =
         env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target")).join("glue5-tools");
 
-    for path in ["build", "hooks.rs", "csrc"] {
+    for path in ["build", "hooks.rs", "hooks", "csrc"] {
         println!("cargo:rerun-if-changed={}", manifest.join(path).display());
     }
     println!("cargo:rerun-if-env-changed=GLUE5_GAME_DIR");
@@ -102,7 +102,7 @@ fn run() -> Result<()> {
 
     // 3. Hooks and glue.
     let module = module::parse(&wasm)?;
-    let hooks = codegen::resolve_hooks(&module, HOOKS)?;
+    let hooks = codegen::resolve_hooks(&module, &HOOKS.concat())?;
     let mut sources: Vec<PathBuf> = (0..OUTPUTS).map(|i| gen_dir.join(format!("game_{i}.c"))).collect();
     apply_hooks(&hooks, &mut sources)?;
     write_if_changed(&gen_dir.join("glue.c"), &codegen::glue_c(&module, &hooks)?)?;

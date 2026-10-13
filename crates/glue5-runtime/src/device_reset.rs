@@ -76,3 +76,8 @@ fn ssao_blur_source(mem: Mem, size: u64) -> Option<(u64, u32)> {
     let len = BLUR_SOURCE_NAME.len();
     (within(name, len as u64) && mem.bytes(name, len) == BLUR_SOURCE_NAME).then_some((shader, var))
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.device_lost = Some(device_lost);
+}

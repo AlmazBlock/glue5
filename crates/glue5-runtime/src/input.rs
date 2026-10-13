@@ -251,3 +251,10 @@ impl InputBlock {
         self.mem.set_u32(self.at + WIN_H, height);
     }
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.pad_update = Some(pad_update);
+    hooks.text_box_open = Some(text_box_open_hook);
+    hooks.text_box_close = Some(text_box_close_hook);
+}

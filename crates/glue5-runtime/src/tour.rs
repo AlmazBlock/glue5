@@ -190,3 +190,8 @@ mod tests {
         assert!(parse("1 2 3").is_err());
     }
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.warp_update = Some(warp_update);
+}

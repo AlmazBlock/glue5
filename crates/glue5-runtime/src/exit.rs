@@ -82,3 +82,9 @@ fn request(from: &str) {
     log::info!("the engine asks to {} ({from})", if restart { "restart" } else { "exit" });
     REQUEST.store(if restart { 2 } else { 1 }, Ordering::Relaxed);
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.want_to_exit = Some(want_to_exit);
+    hooks.rl_shutdown = Some(rl_shutdown);
+}

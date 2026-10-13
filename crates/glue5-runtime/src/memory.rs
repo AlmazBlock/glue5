@@ -326,3 +326,10 @@ fn asking<R>(f: impl FnOnce() -> R) -> R {
     ASKING.set(false);
     r
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.grow_heap = Some(grow_heap);
+    hooks.memory_available = Some(memory_available);
+    hooks.largest_block = Some(largest_block);
+}

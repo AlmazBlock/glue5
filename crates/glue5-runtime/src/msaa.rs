@@ -42,3 +42,9 @@ pub(crate) unsafe extern "C" fn settings_request(env: *mut Env, settings: u64) {
     turn_off(env, settings);
     unsafe { orig::settings_request(env, settings) }
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.settings_load = Some(settings_load);
+    hooks.settings_request = Some(settings_request);
+}

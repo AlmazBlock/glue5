@@ -32,3 +32,8 @@ pub(crate) unsafe extern "C" fn is_position_clear_for_ped(env: *mut Env, pos: u6
     let max = if size > 1 { size - 1 } else { max };
     unsafe { orig::is_position_clear_for_ped(env, pos, radius, max, list) }
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.is_position_clear_for_ped = Some(is_position_clear_for_ped);
+}

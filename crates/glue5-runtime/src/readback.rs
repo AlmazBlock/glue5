@@ -59,3 +59,15 @@ destructors! {
     texture2d_dtor, texture2d_delete;
     texture3d_dtor, texture3d_delete;
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.buffer_dtor = Some(buffer_dtor);
+    hooks.buffer_delete = Some(buffer_delete);
+    hooks.texture1d_dtor = Some(texture1d_dtor);
+    hooks.texture1d_delete = Some(texture1d_delete);
+    hooks.texture2d_dtor = Some(texture2d_dtor);
+    hooks.texture2d_delete = Some(texture2d_delete);
+    hooks.texture3d_dtor = Some(texture3d_dtor);
+    hooks.texture3d_delete = Some(texture3d_delete);
+}

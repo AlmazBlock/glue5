@@ -67,3 +67,9 @@ pub(crate) unsafe extern "C" fn skin_light_pass(env: *mut Env, target: u64, flag
     VIEW.set(0);
     let _ = unsafe { exports::_emscripten_stack_restore(env, top) };
 }
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.skin_light_pass = Some(skin_light_pass);
+    hooks.get_settings = Some(get_settings);
+}

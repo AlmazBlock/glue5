@@ -220,44 +220,18 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     if RUNTIME.set(runtime).is_err() {
         anyhow::bail!("the game is already running");
     }
-    let hooks = glue5_game::Hooks {
-        pad_update: Some(input::pad_update),
-        text_box_open: Some(input::text_box_open_hook),
-        text_box_close: Some(input::text_box_close_hook),
-        want_to_exit: Some(exit::want_to_exit),
-        rl_shutdown: Some(exit::rl_shutdown),
-        grow_heap: Some(memory::grow_heap),
-        heap_size: None,
-        memory_available: Some(memory::memory_available),
-        largest_block: Some(memory::largest_block),
-        skin_light_pass: Some(skin::skin_light_pass),
-        get_settings: Some(skin::get_settings),
-        settings_load: Some(msaa::settings_load),
-        settings_request: Some(msaa::settings_request),
-        settings_instance: None,
-        device_lost: Some(device_reset::device_lost),
-        gpu_fence: None,
-        sprite_depth_texture: None,
-        effect_set_texture: None,
-        wait_readback: None,
-        buffer_dtor: Some(readback::buffer_dtor),
-        buffer_delete: Some(readback::buffer_delete),
-        texture1d_dtor: Some(readback::texture1d_dtor),
-        texture1d_delete: Some(readback::texture1d_delete),
-        texture2d_dtor: Some(readback::texture2d_dtor),
-        texture2d_delete: Some(readback::texture2d_delete),
-        texture3d_dtor: Some(readback::texture3d_dtor),
-        texture3d_delete: Some(readback::texture3d_delete),
-        audio_start_update: Some(audio_update::start_update),
-        is_position_clear_for_ped: Some(scenario::is_position_clear_for_ped),
-        warp_update: Some(tour::warp_update),
-        find_player_ped: None,
-        warp: None,
-        clock_set_time: None,
-        weather_index: None,
-        weather_force_now: None,
-        height_max: None,
-    };
+    // Each module sets the hooks it implements (glue5-game's hooks/).
+    let mut hooks = glue5_game::Hooks::default();
+    input::hooks(&mut hooks);
+    exit::hooks(&mut hooks);
+    memory::hooks(&mut hooks);
+    skin::hooks(&mut hooks);
+    msaa::hooks(&mut hooks);
+    device_reset::hooks(&mut hooks);
+    readback::hooks(&mut hooks);
+    audio_update::hooks(&mut hooks);
+    scenario::hooks(&mut hooks);
+    tour::hooks(&mut hooks);
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;
     Ok(Game { engine })
