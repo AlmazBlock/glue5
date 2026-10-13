@@ -6,6 +6,8 @@
 /third_party/wgpu-core.tmp
 /third_party/wgpu-hal
 /third_party/wgpu-hal.tmp
+/third_party/wgpu-ffx
+/third_party/wgpu-ffx.tmp
 .DS_Store
 # Personal mise settings (e.g. GLUE5_TEAM).
 /.mise/config.local.toml

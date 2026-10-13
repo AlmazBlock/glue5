@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mempage4k <mempage4k@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 23:55:00 +0200
+Subject: [PATCH] wgpu-ffx: build with wgpu 30
+
+The release depends on wgpu 29; our wgpu is 30 (with its own patches).
+Its only change that reaches wgpu-ffx: a passthrough shader module names
+its entry points instead of giving one workgroup size. The examples' dev
+dependency goes (they are not built here).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+diff --git a/Cargo.toml b/Cargo.toml
+index 71bae7e..c522181 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -62,7 +62,7 @@ version = "0.4"
+ version = "2"
+ 
+ [dependencies.wgpu]
+-version = "29"
++version = "30"
+ features = [
+     "spirv",
+     "wgsl",
+@@ -72,11 +72,3 @@ default-features = false
+ [dependencies.wgpu-ffx-shaders-spv]
+ version = "0.1.0"
+ 
+-[dev-dependencies.wgpu]
+-version = "29"
+-features = [
+-    "vulkan",
+-    "metal",
+-    "dx12",
+-]
+-default-features = false
+diff --git a/src/pass.rs b/src/pass.rs
+index 97be8ea..f83fb3d 100644
+--- a/src/pass.rs
++++ b/src/pass.rs
+@@ -27,7 +27,7 @@ impl FsrPass {
+             unsafe {
+                 device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+                     label: Some(kind.label()),
+-                    num_workgroups: (0, 0, 0),
++                    entry_points: Cow::Borrowed(&[]),
+                     spirv: Some(Cow::Borrowed(bytemuck::cast_slice(kind.shader(shaders)))),
+                     dxil: None,
+                     msl: None,

@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mempage4k <mempage4k@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 23:55:00 +0200
+Subject: [PATCH] wgpu-ffx: shaders naga and Metal accept
+
+Without passthrough shaders wgpu reads the SPIR-V through naga, whose
+validator (30) refuses two things in FSR 3's passes:
+
+- `Coherent` on the SPD pass's storage image (memory decorations only on
+  storage buffers): the `Coherent` and `Volatile` decorations go;
+- on Metal, `Rg16Float` storage textures read and written (the SPD mips):
+  two-channel half-float storage images become four-channel ones, in the
+  SPIR-V and in the textures (the SPD mips and the dilated motion vectors,
+  which the caller allocates).
+
+Checked on Apple M1 Pro against a supersampled reference (glue5's
+upscale_tests): 48 jittered frames come 3x closer to it than still ones.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+diff --git a/src/pass.rs b/src/pass.rs
+index f83fb3d..7eb7422 100644
+--- a/src/pass.rs
++++ b/src/pass.rs
+@@ -40,9 +40,9 @@ impl FsrPass {
+         } else {
+             device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                 label: Some(kind.label()),
+-                source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Borrowed(
++                source: wgpu::ShaderSource::SpirV(Cow::Owned(without_memory_decorations(
+                     bytemuck::cast_slice(kind.shader(shaders)),
+-                )),
++                ))),
+             })
+         };
+ 
+@@ -423,3 +423,36 @@ pub(crate) struct ResourceAccess {
+     pub access_type: AccessType,
+     pub desc: Option<wgpu::TextureViewDescriptor<'static>>,
+ }
++
++/// The SPIR-V as wgpu takes it everywhere:
++/// - without `Coherent` and `Volatile` decorations, which naga's validator
++///   only takes on storage buffers (the SPD pass puts `Coherent` on a
++///   storage image);
++/// - two-channel half-float storage images as four-channel ones (Metal
++///   cannot read and write `Rg16Float`; see `FsrResourceName::format`).
++fn without_memory_decorations(words: &[u32]) -> Vec<u32> {
++    const OP_DECORATE: u32 = 71;
++    const OP_TYPE_IMAGE: u32 = 25;
++    const VOLATILE: u32 = 21;
++    const COHERENT: u32 = 23;
++    const RGBA16F: u32 = 2;
++    const RG16F: u32 = 7;
++    let mut out = words[..5.min(words.len())].to_vec();
++    let mut i = 5;
++    while i < words.len() {
++        let count = (words[i] >> 16).max(1) as usize;
++        let op = words[i] & 0xffff;
++        let end = (i + count).min(words.len());
++        let drop = op == OP_DECORATE && count >= 3 && matches!(words[i + 2], VOLATILE | COHERENT);
++        if !drop {
++            let at = out.len();
++            out.extend_from_slice(&words[i..end]);
++            // OpTypeImage result, sampled type, dim, depth, arrayed, ms, sampled, format.
++            if op == OP_TYPE_IMAGE && count >= 9 && out[at + 8] == RG16F {
++                out[at + 8] = RGBA16F;
++            }
++        }
++        i = end;
++    }
++    out
++}
+diff --git a/src/resources.rs b/src/resources.rs
+index 840a508..ffd8ca8 100644
+--- a/src/resources.rs
++++ b/src/resources.rs
+@@ -108,7 +108,7 @@ impl FsrResourceName {
+             }
+             FsrResourceName::OutputColor => wgpu::TextureFormat::Rgba16Float,
+             FsrResourceName::OutputDilatedDepth => wgpu::TextureFormat::R32Float,
+-            FsrResourceName::OutputDilatedMotionVectors => wgpu::TextureFormat::Rg16Float,
++            FsrResourceName::OutputDilatedMotionVectors => wgpu::TextureFormat::Rgba16Float,
+             FsrResourceName::OutputReconstructedPreviousDepth => {
+                 panic!("ReconstructedPreviousDepth is a buffer")
+             }
+@@ -128,7 +128,7 @@ impl FsrResourceName {
+             FsrResourceName::NewLocks => wgpu::TextureFormat::R8Unorm,
+             FsrResourceName::InternalUpscaledCurrent
+             | FsrResourceName::InternalUpscaledPrevious => wgpu::TextureFormat::Rgba16Float,
+-            FsrResourceName::SpdMips => wgpu::TextureFormat::Rg16Float,
++            FsrResourceName::SpdMips => wgpu::TextureFormat::Rgba16Float,
+             FsrResourceName::FarthestDepthMip1 => wgpu::TextureFormat::R16Float,
+             FsrResourceName::LumaHistoryCurrent | FsrResourceName::LumaHistoryPrevious => {
+                 wgpu::TextureFormat::Rgba16Float
+@@ -404,7 +404,7 @@ impl FsrResources {
+             mip_level_count: half_max_render_size.max_mips(wgpu::TextureDimension::D2),
+             sample_count: 1,
+             dimension: wgpu::TextureDimension::D2,
+-            format: wgpu::TextureFormat::Rg16Float,
++            format: wgpu::TextureFormat::Rgba16Float,
+             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+             view_formats: &[],
+         });
