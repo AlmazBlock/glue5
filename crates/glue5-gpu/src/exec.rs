@@ -1174,7 +1174,10 @@ impl Gpu {
             self.uniforms.bytes_allocated() >> 20,
             std::mem::take(&mut self.recycler.reused)
         );
-        let frames_line = frame_times(st.frame_ms) + &on_screen(crate::present::take_on_screen());
+        let mut frames_line = frame_times(st.frame_ms) + &on_screen(crate::present::take_on_screen());
+        if let Some(ms) = crate::present::take_upscaling() {
+            frames_line += &format!(", upscaling {ms:.2} ms GPU");
+        }
         let [encode, submit, gpu_wait, drawable, present, release] = self.submitter.stats.take();
         let per_frame = |d: Duration| d.as_secs_f64() * 1000.0 / frames as f64;
         let mut skipped: Vec<_> = st.skipped.iter().map(|(k, n)| format!("{k} {n}")).collect();

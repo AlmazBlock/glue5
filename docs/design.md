@@ -293,6 +293,13 @@ frames use the bicubic path, and they are made once the sizes have held for
 250 ms. Upscaler changes apply on the next frame. Linking the MetalFX
 framework requires macOS 13; the iOS requirement remains iOS 16.
 
+What they cost grows with the window's pixels, not the scene's. From
+1280x720 to 2560x1440 on an M1 Pro (`upscale_cost` in `upscale_tests.rs`):
+MetalFX spatial about 2 ms a frame, MetalFX Temporal 4.3, FSR 16. On Apple
+GPUs the statistics show the upscalers' GPU time a frame (`upscaling ms
+GPU`), measured between two empty command buffers around their commands
+(wgpu-core gives each pass a command buffer of its own).
+
 The spatial scaler uses perceptual mode to match the gamma-encoded back
 buffer, and scales the game's HUD along with the scene; the app overlay is
 drawn afterwards.

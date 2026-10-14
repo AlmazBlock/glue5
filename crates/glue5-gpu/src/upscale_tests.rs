@@ -279,3 +279,61 @@ fn upscale_metalfx_converges_with_the_jitter() {
     println!("MetalFX: error {:.5} still, {:.5} jittered", errors[0], errors[1]);
     assert!(errors[1] < errors[0] * 0.5, "{errors:?}");
 }
+
+/// What each upscaler costs a frame (the GPU waited for after each), at
+/// 1280x720 and 640x360 to 2560x1440: printed, not checked.
+#[test]
+#[ignore]
+fn upscale_cost() {
+    let bench = Bench::new();
+    let frames = |input: (u32, u32), upscale: &mut dyn FnMut(&Present) -> Option<crate::present::Upscaled>| {
+        let color = bench.texture(input, wgpu::TextureFormat::Bgra8Unorm);
+        let depth = bench.texture(input, wgpu::TextureFormat::Depth32Float);
+        let motion = bench.texture(input, wgpu::TextureFormat::Rg16Float);
+        let present = |i: u32| Present {
+            view: color.create_view(&Default::default()),
+            texture: color.clone(),
+            width: input.0,
+            height: input.1,
+            scene: Some(SceneInputs {
+                color: color.clone(),
+                depth: depth.clone(),
+                motion: motion.clone(),
+                jitter: [halton(i % phases(2.0) + 1, 2) - 0.5, halton(i % phases(2.0) + 1, 3) - 0.5],
+                reset: i == 0,
+                camera: Camera { near: 0.15, far: 1000.0, fov_y: 60.0, aspect: 16.0 / 9.0, reversed: true },
+            }),
+        };
+        let mut times = Vec::new();
+        for i in 0..80 {
+            let p = present(i);
+            let up = ready(upscale, &p);
+            let t = std::time::Instant::now();
+            bench.queue.submit(crate::present::timed(&bench.device, up.expect("upscaled").commands));
+            bench.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            if i == 19 {
+                crate::present::take_upscaling();
+            }
+            if i >= 20 {
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        println!("  (measured on the GPU: {:?} ms a frame)", crate::present::take_upscaling());
+        times[times.len() / 2]
+    };
+    for input in [(1280, 720), (960, 540)] {
+        let mut fsr = crate::fsr::Fsr::default();
+        let ms = frames(input, &mut |p| fsr.upscale(&bench.device, &bench.queue, p, (2560, 1440), 0.5, 1.0 / 60.0));
+        println!("FSR {input:?} -> 2560x1440: {ms:.2} ms");
+        #[cfg(target_vendor = "apple")]
+        {
+            use crate::metalfx::{Kind, MetalFx};
+            for kind in [Kind::Spatial, Kind::Temporal] {
+                let mut fx = MetalFx::new(&bench.device);
+                let ms = frames(input, &mut |p| fx.upscale(&bench.device, p, (2560, 1440), Some(kind), false, 0.0));
+                println!("MetalFX {kind:?} {input:?} -> 2560x1440: {ms:.2} ms");
+            }
+        }
+    }
+}

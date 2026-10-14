@@ -260,6 +260,66 @@ impl Presentation {
 /// statistics last took them.
 static ON_SCREEN: Mutex<Vec<f64>> = Mutex::new(Vec::new());
 
+/// The upscalers' GPU time (seconds) and the frames they upscaled, since the
+/// statistics last took them (Apple GPUs: their command buffers' times).
+static UPSCALING: Mutex<(f64, u32)> = Mutex::new((0.0, 0));
+
+/// The upscalers' GPU time per frame they upscaled, in milliseconds, since
+/// the last call (none: nothing upscaled, or not measured here).
+pub(crate) fn take_upscaling() -> Option<f64> {
+    let (seconds, frames) = std::mem::take(&mut *UPSCALING.lock().unwrap());
+    (frames > 0 && seconds > 0.0).then(|| seconds * 1000.0 / frames as f64)
+}
+
+/// One frame's upscaling `commands` between two empty command buffers whose
+/// times measure them, added to the upscalers' (on Apple GPUs; elsewhere
+/// as they are).
+pub(crate) fn timed(device: &wgpu::Device, commands: Vec<wgpu::CommandBuffer>) -> Vec<wgpu::CommandBuffer> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use block2::RcBlock;
+        use objc2_metal::MTLCommandBuffer;
+        let ended = Arc::new(Mutex::new(None::<f64>));
+        // An empty command buffer calling `done` with itself once the GPU is past it.
+        let marker = |done: RcBlock<dyn Fn(std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>)>| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("timing") });
+            unsafe {
+                encoder.as_hal_mut::<Metal, _, _>(|e| {
+                    if let Some(commands) = e.and_then(|e| e.raw_command_buffer()) {
+                        commands.addCompletedHandler(RcBlock::as_ptr(&done));
+                    }
+                })
+            };
+            encoder.finish()
+        };
+        let before = {
+            let ended = ended.clone();
+            marker(RcBlock::new(move |c: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                *ended.lock().unwrap() = Some(unsafe { c.as_ref() }.GPUEndTime());
+            }))
+        };
+        let after = marker(RcBlock::new(move |c: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            let start = unsafe { c.as_ref() }.GPUStartTime();
+            if let Some(end) = ended.lock().unwrap().take()
+                && start > end
+            {
+                UPSCALING.lock().unwrap().0 += start - end;
+            }
+        }));
+        UPSCALING.lock().unwrap().1 += 1;
+        let mut all = Vec::with_capacity(commands.len() + 2);
+        all.push(before);
+        all.extend(commands);
+        all.push(after);
+        all
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = device;
+        commands
+    }
+}
+
 /// The times frames stayed on screen, in milliseconds, since the last call.
 pub(crate) fn take_on_screen() -> Vec<f32> {
     let mut times = ON_SCREEN.lock().unwrap();
@@ -898,7 +958,9 @@ impl Output {
             // At most what they are made for; the present pass scales the rest.
             size = temporal_size((src.width, src.height), size);
         }
-        self.upscale_into(device, queue, src, size)
+        let mut up = self.upscale_into(device, queue, src, size)?;
+        up.commands = timed(device, std::mem::take(&mut up.commands));
+        Some(up)
     }
 
     fn upscale_into(
