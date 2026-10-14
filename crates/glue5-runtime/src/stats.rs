@@ -95,9 +95,55 @@ pub(crate) unsafe extern "C" fn stat_find(env: *mut Env, id: u64, iter: u64) -> 
 }
 
 pub(crate) unsafe extern "C" fn packed_key(env: *mut Env, id: u64, index: u32, slot: u32) -> u32 {
-    let found = unsafe { orig::packed_key(env, id, index, slot) };
+    let m = unsafe { Mem::of(env) };
+    let map = stats_map(m);
+    let missing = with_misses(map, |keys| keys.get(&(index, slot)).copied());
+    let found = match missing {
+        Some(hash) => {
+            m.set_u32(id, hash);
+            0
+        }
+        None => {
+            let found = unsafe { orig::packed_key(env, id, index, slot) };
+            if found == 0 {
+                with_misses(map, |keys| keys.insert((index, slot), m.u32(id)));
+            }
+            found
+        }
+    };
     MISSING.set(found == 0);
     found
+}
+
+/// The packed stats `GetStatKey` found missing: (index, slot) → the key's
+/// hash. The scripts ask for the same few dozen every frame (and for every
+/// packed stat once while the character loads, ~27000), and each miss
+/// costs the engine a name (snprintf), its hash and an error in the log
+/// (~1 GB an hour). The answer depends only on (index, slot) and on the
+/// stats map, so it holds while the map is the same: no stat registered or
+/// cleared since.
+struct Misses {
+    map: (u64, u16, u8),
+    keys: BTreeMap<(u32, u32), u32>,
+}
+
+static MISSES: Mutex<Misses> = Mutex::new(Misses { map: (0, 0, 0), keys: BTreeMap::new() });
+
+/// `CStatsDataMgr`'s stats map (an atBinaryMap: entries, count, sorted).
+fn stats_map(m: Mem) -> (u64, u16, u8) {
+    const ENTRIES: u64 = 25461184;
+    const COUNT: u64 = 25461192;
+    const SORTED: u64 = 25461176;
+    (m.u64(ENTRIES), m.u16(COUNT), m.u8(SORTED))
+}
+
+fn with_misses<R>(map: (u64, u16, u8), f: impl FnOnce(&mut BTreeMap<(u32, u32), u32>) -> R) -> R {
+    let mut misses = MISSES.lock().unwrap();
+    if misses.map != map {
+        misses.map = map;
+        misses.keys.clear();
+    }
+    f(&mut misses.keys)
 }
 
 fn hash_key(hash: u32) -> String {
