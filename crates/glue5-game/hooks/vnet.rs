@@ -7,6 +7,7 @@
     ("socket_bind", "rage::netSocket::NativeBind()"),
     ("socket_send", "rage::netSocket::Send(rage::netSocketAddress const&, void const*, unsigned int, rage::netSocketError*)"),
     ("socket_receive", "rage::netSocket::Receive(rage::netSocketAddress*, void*, int, rage::netSocketError*)"),
+    ("socket_select", "rage::netSocket::Select(int, fd_set*, fd_set*, fd_set*, timeval*)"),
     ("local_ip_address", "rage::netHardware::GetLocalIpAddress(rage::netIpAddress*)"),
     ("public_ip_address", "rage::netHardware::GetPublicIpAddress(rage::netIpAddress*)"),
 ]

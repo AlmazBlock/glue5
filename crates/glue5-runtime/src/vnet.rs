@@ -6,8 +6,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
-use std::sync::{LazyLock, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use glue5_game::{Env, orig};
 
@@ -33,8 +34,23 @@ struct Packet {
     data: Vec<u8>,
 }
 
-/// Datagrams received, by the engine port they are for (bound ports only).
-static QUEUES: LazyLock<Mutex<HashMap<u16, VecDeque<Packet>>>> = LazyLock::new(Mutex::default);
+#[derive(Default)]
+struct Sockets {
+    /// Datagrams received, by the engine port they are for (bound ports only).
+    queues: HashMap<u16, VecDeque<Packet>>,
+    /// The bound sockets' ports, by handle (the descriptor `select` gets).
+    ports: HashMap<u32, u16>,
+}
+
+impl Sockets {
+    fn has_data(&self, handle: u32) -> bool {
+        self.ports.get(&handle).and_then(|port| self.queues.get(port)).is_some_and(|q| !q.is_empty())
+    }
+}
+
+static SOCKETS: LazyLock<Mutex<Sockets>> = LazyLock::new(Mutex::default);
+/// A datagram queued (`socket_select` waits for one).
+static ARRIVED: Condvar = Condvar::new();
 
 fn local_ip() -> u32 {
     crate::p2p::get().map_or(crate::p2p::NET | 1, |p| p.local_ip())
@@ -42,11 +58,12 @@ fn local_ip() -> u32 {
 
 /// A datagram from the lobby (p2p.rs) for the engine.
 pub(crate) fn deliver(from_ip: u32, from_port: u16, to_port: u16, data: &[u8]) {
-    let mut queues = QUEUES.lock().unwrap();
-    if let Some(queue) = queues.get_mut(&to_port)
+    let mut sockets = SOCKETS.lock().unwrap();
+    if let Some(queue) = sockets.queues.get_mut(&to_port)
         && queue.len() < QUEUE
     {
         queue.push_back(Packet { from_ip, from_port, data: data.to_vec() });
+        ARRIVED.notify_all();
     }
 }
 
@@ -79,8 +96,12 @@ pub(crate) unsafe extern "C" fn native_bind(env: *mut Env, socket: u64) -> u32 {
     if port == 0 {
         port = EPHEMERAL.fetch_add(1, Ordering::Relaxed) as u16;
     }
-    QUEUES.lock().unwrap().entry(port).or_default();
-    m.set_i64(socket + SOCKET_HANDLE, NEXT.fetch_add(1, Ordering::Relaxed) as i64);
+    let handle = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut sockets = SOCKETS.lock().unwrap();
+    sockets.queues.entry(port).or_default();
+    sockets.ports.insert(handle as u32, port);
+    drop(sockets);
+    m.set_i64(socket + SOCKET_HANDLE, handle as i64);
     m.set_u8(socket + SOCKET_FLAGS, m.u8(socket + SOCKET_FLAGS) | FLAG_BROADCAST);
     let address = socket + SOCKET_ADDRESS;
     m.set_u32(address, local_ip());
@@ -127,7 +148,7 @@ pub(crate) unsafe extern "C" fn socket_receive(
         m.set_u32(error, 0);
     }
     let port = m.u16(socket + SOCKET_ADDRESS + ADDRESS_PORT);
-    let packet = QUEUES.lock().unwrap().get_mut(&port).and_then(VecDeque::pop_front);
+    let packet = SOCKETS.lock().unwrap().queues.get_mut(&port).and_then(VecDeque::pop_front);
     let Some(packet) = packet else { return 0 };
     let len = packet.data.len().min(max as usize);
     m.bytes_mut(buf, len).copy_from_slice(&packet.data[..len]);
@@ -138,6 +159,45 @@ pub(crate) unsafe extern "C" fn socket_receive(
         m.set_u8(from + ADDRESS_V6, 0);
     }
     len as u32
+}
+
+/// Hook for `rage::netSocket::Select(int, fd_set*, fd_set*, fd_set*,
+/// timeval*)`: waits until a datagram is queued for a socket of the read
+/// set (the handles), up to the timeout, as `select` would; then the
+/// browser build's `select`, which has every socket ready at once. Without
+/// the wait the socket manager's receive thread (a second's timeout) spun,
+/// a core busy and the network's locks taken from the game's update.
+pub(crate) unsafe extern "C" fn socket_select(
+    env: *mut Env,
+    count: u32,
+    read: u64,
+    write: u64,
+    except: u64,
+    timeout: u64,
+) -> u32 {
+    let m = unsafe { Mem::of(env) };
+    // fd_set: bits in 64-bit words.
+    let handles = |set: u64| {
+        (0..count.min(1024)).filter(move |&fd| set != 0 && m.u64(set + u64::from(fd / 64) * 8) >> (fd % 64) & 1 != 0)
+    };
+    // Sockets are always writable.
+    if handles(write).next().is_none() {
+        let deadline = (timeout != 0).then(|| {
+            Instant::now() + Duration::from_secs(m.u64(timeout)) + Duration::from_micros(m.u32(timeout + 8).into())
+        });
+        let mut sockets = SOCKETS.lock().unwrap();
+        while !handles(read).any(|fd| sockets.has_data(fd)) {
+            let Some(left) = deadline.map(|d| d.saturating_duration_since(Instant::now())) else {
+                sockets = ARRIVED.wait(sockets).unwrap();
+                continue;
+            };
+            if left.is_zero() {
+                break;
+            }
+            sockets = ARRIVED.wait_timeout(sockets, left).unwrap().0;
+        }
+    }
+    unsafe { orig::socket_select(env, count, read, write, except, timeout) }
 }
 
 /// Hook for `rage::netHardware::GetLocalIpAddress(netIpAddress*)`, and the
@@ -188,6 +248,7 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.socket_bind = Some(native_bind);
     hooks.socket_send = Some(socket_send);
     hooks.socket_receive = Some(socket_receive);
+    hooks.socket_select = Some(socket_select);
     hooks.local_ip_address = Some(local_ip_address);
     hooks.public_ip_address = Some(public_ip_address);
 }
