@@ -109,7 +109,7 @@ pub fn glue_c(module: &Module, hooks: &[Hook]) -> Result<String> {
             import.name
         );
         let call = format!(
-            "(({} (*)(void*{}))f->func)(f->module_instance{})",
+            "(({} (*)(void*{}))f->func)(env->instance{})",
             c_ret(&callee),
             callee.params.iter().map(|&t| format!(", {}", c_ty(t))).collect::<String>(),
             args(sig.params.len(), 1),

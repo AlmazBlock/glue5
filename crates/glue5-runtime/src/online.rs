@@ -13,6 +13,7 @@
 //! The rest are the checks on the way into freemode that Rockstar's
 //! services would pass, passed here.
 
+use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
 use glue5_game::{Env, orig};
@@ -95,25 +96,28 @@ const NOTHING: u32 = 1;
 const SIGNED_IN: u32 = 2;
 const SIGN_IN_INFO: u32 = 3;
 
+// Host functions: called with the thread's instance first, not its `Env`
+// (see `glue5_game::set_host_functions`); the wasm memory is the runtime's.
+
 /// QueryInterface(iid, void** out): no other interface is offered.
-unsafe extern "C" fn query_interface(env: *mut Env, _this: u64, _iid: u64, out: u64) -> u64 {
+unsafe extern "C" fn query_interface(_: *mut c_void, _this: u64, _iid: u64, out: u64) -> u64 {
     if out != 0 {
-        unsafe { Mem::of(env) }.set_u64(out, 0);
+        crate::rt().memory.mem().set_u64(out, 0);
     }
     0x8000_4002 // E_NOINTERFACE
 }
 
-unsafe extern "C" fn nothing(_: *mut Env) -> u64 {
+unsafe extern "C" fn nothing(_: *mut c_void) -> u64 {
     0
 }
 
-unsafe extern "C" fn signed_in(_: *mut Env) -> u64 {
+unsafe extern "C" fn signed_in(_: *mut c_void) -> u64 {
     1
 }
 
 /// GetSignInInfo(IProfile*): { vtable*, s64 id, char nickname[17] }.
-unsafe extern "C" fn sign_in_info(env: *mut Env, _this: u64, profile: u64) -> u64 {
-    let m = unsafe { Mem::of(env) };
+unsafe extern "C" fn sign_in_info(_: *mut c_void, _this: u64, profile: u64) -> u64 {
+    let m = crate::rt().memory.mem();
     m.set_u64(profile + 8, gamer_id());
     m.write_str(profile + 16, &gamer_name(), 17);
     0

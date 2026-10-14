@@ -33,6 +33,9 @@ const DEFINES: &[(&str, &str)] = &[
     ("WASM_RT_NONCONFORMING_PLAIN_SHARED_ACCESS", "1"),
     ("WASM_RT_NONCONFORMING_UNCHECKED_CALL_INDIRECT", "1"),
     ("WASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION", "1"),
+    // Indirect calls pass the caller's instance: every thread's instance
+    // shares one function table (`glue5_instance_new`), ~2.9 MB each saved.
+    ("WASM_RT_NONCONFORMING_CALLER_INSTANCE", "1"),
     // The memory never moves: its base is a constant for the generated code
     // (set by `Memory::new`), not two loads after every store and call.
     ("WASM_RT_NONCONFORMING_FIXED_MEMORY_BASE", "1"),

@@ -70,12 +70,18 @@ void glue5_set_host_functions(const void* const* fns, uint32_t count) {
   glue5_host_count = count;
 }
 
-/* The host's functions after the module's in `instance`'s table, each called
- * with the thread's env (the generated code passes an entry's
- * module_instance first): the game reaches them through function pointers,
- * e.g. in vtables the host builds. Returns the first one's index. */
-static uint32_t glue5_append_host_functions(struct w2c_env* env, w2c_game* instance) {
-  wasm_rt_funcref_table_t* table = w2c_game_0x5F_indirect_function_table(instance);
+/* The one function table every thread's instance uses: indirect calls pass
+ * the caller's instance (WASM_RT_NONCONFORMING_CALLER_INSTANCE), so the
+ * entries' instances do not matter and the per-instance copies (~2.9 MB
+ * each, one per engine thread) need not be kept. The first instance's
+ * table, made by the main thread before any other thread starts. */
+static wasm_rt_funcref_t* glue5_shared_table;
+static uint32_t glue5_shared_table_size;
+
+/* The host's functions after the module's in the table, each called with the
+ * calling thread's instance first: the game reaches them through function
+ * pointers, e.g. in vtables the host builds. Returns the first one's index. */
+static uint32_t glue5_append_host_functions(wasm_rt_funcref_table_t* table) {
   uint32_t base = table->size;
   if (!glue5_host_count) {
     return base;
@@ -85,7 +91,7 @@ static uint32_t glue5_append_host_functions(struct w2c_env* env, w2c_game* insta
     abort();
   }
   for (uint32_t i = 0; i < glue5_host_count; i++) {
-    data[base + i] = (wasm_rt_funcref_t){NULL, (wasm_rt_function_ptr_t)glue5_host_fns[i], {NULL}, env};
+    data[base + i] = (wasm_rt_funcref_t){NULL, (wasm_rt_function_ptr_t)glue5_host_fns[i], {NULL}, NULL};
   }
   table->data = data;
   table->size = table->max_size = base + glue5_host_count;
@@ -93,6 +99,21 @@ static uint32_t glue5_append_host_functions(struct w2c_env* env, w2c_game* insta
 }
 
 uint32_t glue5_host_functions_base;
+
+/* Points `instance` at the shared table, freeing the copy instantiation made
+ * (the first instance's becomes the shared one, host functions appended). */
+static void glue5_share_table(w2c_game* instance) {
+  wasm_rt_funcref_table_t* table = w2c_game_0x5F_indirect_function_table(instance);
+  if (!glue5_shared_table) {
+    glue5_host_functions_base = glue5_append_host_functions(table);
+    glue5_shared_table = table->data;
+    glue5_shared_table_size = table->size;
+    return;
+  }
+  free(table->data);
+  table->data = glue5_shared_table;
+  table->size = table->max_size = glue5_shared_table_size;
+}
 
 /* Creates this thread's instance; runs the start function (which initialises
  * memory only on the first instance). Returns the trap code. */
@@ -103,11 +124,16 @@ uint32_t glue5_instance_new(struct w2c_env* env) {
   }
   env->instance = instance;
   GLUE5_TRY(wasm2c_game_instantiate(instance, env, (struct w2c_wasi__snapshot__preview1*)env);
-            glue5_host_functions_base = glue5_append_host_functions(env, instance));
+            glue5_share_table(instance));
 }
 
 void glue5_instance_free(struct w2c_env* env) {
   if (env->instance) {
+    /* The shared table stays (other threads use it). */
+    wasm_rt_funcref_table_t* table = w2c_game_0x5F_indirect_function_table(env->instance);
+    if (table->data == glue5_shared_table) {
+      table->data = NULL;
+    }
     wasm2c_game_free(env->instance);
     free(env->instance);
     env->instance = NULL;
@@ -122,7 +148,7 @@ uint32_t glue5_call_ptr_ptr(struct w2c_env* env, uint64_t index, uint64_t arg, u
     abort();
   }
   const wasm_rt_funcref_t* f = &table->data[index];
-  GLUE5_TRY(*out = ((u64(*)(void*, u64))f->func)(f->module_instance, arg));
+  GLUE5_TRY(*out = ((u64(*)(void*, u64))f->func)(env->instance, arg));
 }
 
 /* Emscripten's longjmp: back to the innermost invoke_* frame. */

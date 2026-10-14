@@ -141,8 +141,9 @@ pub fn install(imports: Imports, hooks: Hooks) {
 
 /// Host functions the game can call through function pointers (e.g. from
 /// vtables the host builds in wasm memory): each is an `unsafe extern "C"`
-/// function taking the thread's `*mut Env` first, then the call's arguments,
-/// given as its address. Call once, before creating any instance.
+/// function taking the calling thread's instance first (an opaque pointer,
+/// not its `Env`: all threads share one function table), then the call's
+/// arguments, given as its address. Call once, before creating any instance.
 pub fn set_host_functions(fns: &'static [usize]) {
     let count = u32::try_from(fns.len()).expect("host functions");
     unsafe { glue5_set_host_functions(fns.as_ptr().cast(), count) }
