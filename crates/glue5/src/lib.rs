@@ -42,6 +42,9 @@ pub fn main() -> i32 {
     let report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         report(info);
+        if glue5_runtime::exit::is_panic_recoverable() {
+            return;
+        }
         let thread = std::thread::current();
         let what = info.payload_as_str().unwrap_or("panic");
         glue5_runtime::exit::fail(format!("its {} thread stopped ({what})", thread.name().unwrap_or("unnamed")));

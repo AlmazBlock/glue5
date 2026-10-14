@@ -128,6 +128,8 @@ impl Fsr {
                     let thread = std::thread::Builder::new()
                         .name("gpu fsr".into())
                         .spawn(move || {
+                            // Failing, it leaves the bicubic filter.
+                            glue5_runtime::exit::panic_recoverable();
                             let t = Instant::now();
                             let made = Made::new(&device, key)?;
                             log::info!(

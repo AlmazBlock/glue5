@@ -7,6 +7,7 @@
 //!
 //! And the way it ends without asking: a thread of its failing ([`failed`]).
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
@@ -40,6 +41,21 @@ static FAILURE: OnceLock<String> = OnceLock::new();
 /// stops: the host should say so and end.
 pub fn failed() -> Option<&'static str> {
     FAILURE.get().map(String::as_str)
+}
+
+thread_local! {
+    static RECOVERABLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks this thread as one the game does without if it panics: whoever
+/// joins it goes on without its result (FSR made in the background, ...).
+pub fn panic_recoverable() {
+    RECOVERABLE.set(true);
+}
+
+/// Whether this thread's panic leaves the game running ([`panic_recoverable`]).
+pub fn is_panic_recoverable() -> bool {
+    RECOVERABLE.get()
 }
 
 /// Records why the game has stopped (the first reason: what follows may be
