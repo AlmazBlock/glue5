@@ -101,8 +101,18 @@ pub unsafe extern "C" fn wasm_module_int_js(env: *mut Env, name: u64, default: u
     let value = match std::env::var(name.to_ascii_uppercase()).ok().and_then(|v| v.parse().ok()) {
         Some(v) => v,
         None if name == "gameResourceMB" && low => default.min(768),
-        // Online, the network's threads run (bit 2).
-        None if name == "keepThreads" && rt().config.online.is_some() => default | 2,
+        // The engine skips some threads, unless their bit is set here.
+        None if name == "keepThreads" => {
+            // The videos' thread (bit 4, `AsyncBink`). TVs and some
+            // cutscenes queue their video for it and wait, with no time
+            // limit, until it has tried to open it; without the thread
+            // nothing answered, and the queue (32 requests) filled up. It
+            // fails at once (the build has no Bink, the data no videos)
+            // and marks the video as failed, as the engine expects.
+            let videos = default | 4;
+            // Online, the network's threads run (bit 2).
+            if rt().config.online.is_some() { videos | 2 } else { videos }
+        }
         None => default,
     };
     // Phones, and low memory anywhere: the resource heap's budget is its
