@@ -7,6 +7,7 @@
 
 mod codegen;
 mod compile;
+mod formats;
 mod mangle;
 mod module;
 mod ordering;
@@ -113,6 +114,7 @@ fn run() -> Result<()> {
     apply_hooks(&hooks, &sources, &mut texts)?;
     ordering::apply(&sources, &mut texts)?;
     page_map::apply(&sources, &mut texts)?;
+    formats::apply(&sources, &mut texts)?;
     for (source, text) in sources.iter_mut().zip(texts) {
         if let Some(text) = text {
             let patched = source.with_extension("hooked.c");

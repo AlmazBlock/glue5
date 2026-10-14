@@ -69,6 +69,14 @@ generated C (`build/ordering.rs`, checked against the exact text); a
 worker on a Pixel 8a otherwise read a stale pair now and then, and the
 engine's bounds checks trapped.
 
+Two more fixes are made the same way. Some resources of this game data are
+placed in more pages than their page map has room for; the extra entries
+overwrote what follows the map (the Vinewood Hills fences then stopped the
+game with "Invalid fixup"). Such a resource gets a page map in the heap
+(`build/page_map.rs`; `-nodefrag` keeps resources from being moved). And
+the engine's messages that print sizes with MSVC's `%Iu` use `%zu`
+(`build/formats.rs`): the game's libc stopped at them.
+
 SDL3 handles windows, input, gamepads, audio and dialogs. Other dependencies
 include wgpu, naga, egui, parking_lot_core for wasm futexes, bcdec_rs for BC
 decoding, jiff for the system's time zone, png and serde_json. Project code
