@@ -249,7 +249,7 @@ impl Presentation {
     }
 
     /// How long each frame stays on screen at least.
-    #[cfg(target_vendor = "apple")]
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
     fn frame_time(&self) -> Option<Duration> {
         let fps = self.0.frame_rate.load(Ordering::Relaxed);
         (fps > 0).then(|| Duration::from_secs_f64(1.0 / fps as f64))
