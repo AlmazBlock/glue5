@@ -78,8 +78,10 @@ The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes,
 a fixed memory base, a hook where traps occur and, on Windows, longjmp
 without unwinding and inline floating-point classification. The wgpu-core
 patches clear usage scopes and drop command buffers' trackers by their
-members, reuse those trackers, stop pipelines from retaining shader modules and let a device
-poll wait for the GPU without holding the device's resource lock,
+members, reuse those trackers, stop pipelines from retaining shader modules, let a device
+poll wait for the GPU without holding the device's resource lock, and
+record a pass's barriers at the end of the command buffer before it
+instead of in one of their own (one raw command buffer per pass, not two),
 reducing CPU work during pass encoding, memory use and stalls between
 threads. The wgpu-hal patches make occlusion queries count samples on Metal
 and Vulkan, as D3D11's do (the game measures the sun's visibility with
@@ -88,8 +90,11 @@ the command buffers their last use needed (on Mali each holds ~0.4 MB of
 host memory), and make a Metal command buffer only when a command needs it
 (wgpu-core's barrier buffer before each pass is empty on Metal, and Metal
 charges per command buffer: 30 % of the process's CPU time went to Metal's
-own threads on an iPhone 16 Pro, 23 % after). We would like to submit these
-changes upstream.
+own threads on an iPhone 16 Pro, 23 % after), and let a command buffer be
+suspended and resumed (for wgpu-core's one per pass). With one command
+buffer per pass, the game's benchmark ran 5 % faster on a Pixel 8a, 15 %
+in the scenes where memory runs short, and its encoding took 12-14 ms a
+frame instead of 17-23. We would like to submit these changes upstream.
 
 ## Game files are never in the app
 
