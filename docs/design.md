@@ -79,7 +79,7 @@ On Windows, mimalloc is the allocator: the renderer and wgpu allocate and
 free many blocks every frame, and the system heap is slower at it (with it
 the game's benchmark ran 4-7 % slower).
 
-We patch wasm2c, wgpu-core and wgpu-hal. The patch files live in
+We patch wasm2c, wgpu, wgpu-core, wgpu-hal and sp-fidelity. The patch files live in
 `patches/` and `mise run setup` applies them to pinned sources. Cargo
 cannot apply patch files directly to a dependency.
 
@@ -109,7 +109,10 @@ buffer per pass, the game's benchmark ran 5 % faster on a Pixel 8a, 15 %
 in the scenes where memory runs short, and its encoding took 12-14 ms a
 frame instead of 17-23; on an iPhone 16 Pro (with the Metal command buffers
 made when needed) it ran 5 % faster, 63.1 and 60.8 fps against 60.0 and
-57.8, submitting 28 % shorter. We would like to submit these changes upstream.
+57.8, submitting 28 % shorter. The sp-fidelity patch passes FSR 2's
+accumulate pass whole variables where it passed a function pointers into a
+struct, which SPIR-V (Vulkan) does not take and naga's SPIR-V writer panics
+on. We would like to submit these changes upstream.
 
 ## Game files are never in the app
 

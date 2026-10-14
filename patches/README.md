@@ -9,6 +9,7 @@ sources.
 | `wgpu/` | wgpu from crates.io, the version and checksum in `.mise/tasks/setup` (`crates`) | `third_party/wgpu` (ignored by git), used through `[patch.crates-io]` in the workspace manifest |
 | `wgpu-core/` | wgpu-core from crates.io, likewise | `third_party/wgpu-core`, likewise |
 | `wgpu-hal/` | wgpu-hal from crates.io, likewise | `third_party/wgpu-hal`, likewise |
+| `sp-fidelity/` | sp-fidelity (FSR 2) from crates.io, likewise | `third_party/sp-fidelity`, likewise |
 
 Each patch message explains the change and its reason. To update an
 upstream dependency, change the submodule commit or `crates` in

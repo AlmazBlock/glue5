@@ -52,8 +52,8 @@ See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
 | `platform/android` | The Gradle project around it: manifest, the activity (SDL's, subclassed), the adaptive icon. |
 | `platform/macos` | Extra bundle metadata; cargo-packager configuration lives in `crates/glue5/Cargo.toml`. |
 | `.mise` | [mise]: the toolchain (`config.toml`) and the developer tasks (`tasks/`): setup, desktop, iOS and Android. |
-| `patches` | Our patches to wasm2c, wgpu-core and wgpu-hal, applied by `mise run setup` ([README](patches/README.md)). |
-| `third_party/wabt` | wasm2c's sources, pinned (a submodule). `third_party/wgpu`, `third_party/wgpu-core` and `third_party/wgpu-hal`, the patched wgpu crates, are made by setup and not in git. |
+| `patches` | Our patches to wasm2c, wgpu, wgpu-core, wgpu-hal and sp-fidelity, applied by `mise run setup` ([README](patches/README.md)). |
+| `third_party/wabt` | wasm2c's sources, pinned (a submodule). `third_party/wgpu`, `third_party/wgpu-core`, `third_party/wgpu-hal` and `third_party/sp-fidelity`, the patched crates, are made by setup and not in git. |
 
 Symlink your game directory
 (`b/<build>/game.wasm`, `b/<build>/shaders/`, `data/`) to `./game`, or point
