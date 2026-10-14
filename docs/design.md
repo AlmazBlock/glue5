@@ -386,6 +386,28 @@ the frames on screen for the game's work of one, for half a frame more of
 latency. The HUD goes over the generated frame as over the others (the
 newer frame's).
 
+It works on an iPhone 16 Pro (iOS 27): the generated frame lies halfway
+between its neighbours (as far from each), without double edges, and frames
+stay 16.7 and 33 ms on screen in turn at a game rate of 30. But it costs
+more than it gives there. At a render scale of 0.6 (1574x724 to 2622x1206)
+and 30 frames a second, the upscalers' GPU time a frame was:
+
+| | Upscaling GPU | Game |
+|---|---|---|
+| Bicubic | - | 30 fps |
+| MetalFX spatial | 4.6 ms | 30 fps |
+| MetalFX Temporal | 7-11 ms | 30 fps |
+| MetalFX Temporal + frame generation | 27-40 ms | 15-20 fps |
+| the same, output 1956x900 | 16 ms | 23 fps |
+| the same, output 1574x724 (no upscaling) | 16 ms | 24 fps |
+
+The interpolator alone takes about 12 ms at 1574x724 and 20 ms at the
+screen's size; the GPU it takes from the game lowers the game's rate more
+than the generated frames add. Giving it the temporal scaler (its
+descriptor's `scaler`) changes nothing. It pays only where the GPU has that
+much to spare each frame: a game held back by the CPU, or a lower render
+scale.
+
 ## Frame pacing
 
 A display faster than the game shows each frame at the first refresh
