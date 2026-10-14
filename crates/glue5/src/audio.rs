@@ -8,7 +8,17 @@ use sdl3::audio::{AudioCallback, AudioFormat, AudioSpec, AudioStream, AudioStrea
 
 /// Playing while alive.
 pub struct Audio {
-    _stream: AudioStreamWithCallback<Pull>,
+    stream: AudioStreamWithCallback<Pull>,
+}
+
+impl Drop for Audio {
+    fn drop(&mut self) {
+        // sdl3 frees the callback's state before it destroys the stream, and
+        // SDL's audio thread can call it in between: at exit, a memset into
+        // the freed buffer. Pausing takes the device's lock, so it waits for
+        // a callback in progress, and no other comes.
+        let _ = self.stream.pause();
+    }
 }
 
 pub fn start(subsystem: &sdl3::AudioSubsystem, out: AudioOut) -> Result<Audio> {
@@ -26,7 +36,7 @@ pub fn start(subsystem: &sdl3::AudioSubsystem, out: AudioOut) -> Result<Audio> {
     let stream = subsystem.open_playback_stream(&spec, pull).map_err(|e| anyhow!("SDL audio: {e}"))?;
     stream.resume().map_err(|e| anyhow!("SDL audio: {e}"))?;
     log::info!("audio: {SAMPLE_RATE} Hz stereo ({})", subsystem.current_audio_driver());
-    Ok(Audio { _stream: stream })
+    Ok(Audio { stream })
 }
 
 /// SDL's audio thread asks for samples; they come straight from the ring.
