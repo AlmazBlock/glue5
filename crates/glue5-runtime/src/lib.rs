@@ -12,6 +12,7 @@ mod device_reset;
 mod dht;
 pub mod exit;
 pub mod game_settings;
+mod gamer_tags;
 mod gamelog;
 pub mod gpu;
 mod imports;
@@ -255,6 +256,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     readback::hooks(&mut hooks);
     audio_update::hooks(&mut hooks);
     script_assets::hooks(&mut hooks);
+    gamer_tags::hooks(&mut hooks);
     scenario::hooks(&mut hooks);
     tour::hooks(&mut hooks);
     upscale::hooks(&mut hooks);

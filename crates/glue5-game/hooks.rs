@@ -22,6 +22,7 @@ pub const HOOKS: &[&[(&str, &str)]] = &[
     include!("hooks/readback.rs"),
     include!("hooks/audio_update.rs"),
     include!("hooks/script_assets.rs"),
+    include!("hooks/gamer_tags.rs"),
     include!("hooks/scenario.rs"),
     include!("hooks/tour.rs"),
     include!("hooks/online.rs"),
