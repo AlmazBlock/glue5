@@ -17,7 +17,7 @@ pub const HOOKS: &[&[(&str, &str)]] = &[
     include!("hooks/exit.rs"),
     include!("hooks/memory.rs"),
     include!("hooks/skin.rs"),
-    include!("hooks/msaa.rs"),
+    include!("hooks/shader_settings.rs"),
     include!("hooks/device_reset.rs"),
     include!("hooks/readback.rs"),
     include!("hooks/audio_update.rs"),

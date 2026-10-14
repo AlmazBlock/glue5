@@ -30,8 +30,8 @@ cargo build -r --example headless
 exe=target/release/examples/headless
 
 # The levels, as settings.xml values: between them every value of each
-# setting. Shader quality starts at High (1): at Normal the engine stops at
-# its first frames (the game's shaders lack its variants). Density and
+# setting. Shader quality starts at High (1): Normal runs as High (the
+# game's shaders lack its variants, see crates/glue5-runtime/src/shader_settings.rs). Density and
 # distance stay as they are: more of the same pipelines, gigabytes more
 # memory.
 switches="FXAA_Enabled Lighting_FogVolumes DoF Shadow_ParticleShadows Shadow_LongShadows UltraShadows_Enabled"

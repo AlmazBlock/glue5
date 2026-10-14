@@ -503,6 +503,11 @@ prompts, aim assist and menu behaviour:
   itself on DirectX 10 (`-DX10`); hooks on `CSettingsManager::Load` and
   `RequestNewSettings` do the same for the settings loaded and those the
   menu asks for. Reflection MSAA (water) works and is left as chosen.
+- Shader quality Normal runs as High. Normal loads the effects from
+  `win32_40_lq`, older than the engine: its `postfx` lacks
+  `DistortionParams`, which the engine requires (it stops a few seconds
+  in), and few of its programs have a translation. The same hooks raise
+  it to High (`shader_settings.rs`).
 - The low-memory profile defaults on for phones and tablets with less than
   8 GB of RAM. It uses smaller pools and lowers texture quality, LOD,
   density, variety and shadows to the WASM build's low preset. The normal
