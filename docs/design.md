@@ -75,8 +75,10 @@ We patch wasm2c, wgpu-core and wgpu-hal. The patch files live in
 cannot apply patch files directly to a dependency.
 
 The wasm2c patches add wait/notify and SIMD on shared memory, trusted modes,
-a fixed memory base, a hook where traps occur and, on Windows, longjmp
-without unwinding and inline floating-point classification. The wgpu-core
+a fixed memory base, a hook where traps occur, indirect calls that pass
+the caller's instance (so every thread's instance shares one function
+table, 2.9 MB a thread otherwise) and, on Windows, longjmp without
+unwinding and inline floating-point classification. The wgpu-core
 patches clear usage scopes and drop command buffers' trackers by their
 members, reuse those trackers, stop pipelines from retaining shader modules, let a device
 poll wait for the GPU without holding the device's resource lock, and
@@ -91,7 +93,9 @@ host memory), and make a Metal command buffer only when a command needs it
 (wgpu-core's barrier buffer before each pass is empty on Metal, and Metal
 charges per command buffer: 30 % of the process's CPU time went to Metal's
 own threads on an iPhone 16 Pro, 23 % after), and let a command buffer be
-suspended and resumed (for wgpu-core's one per pass). With one command
+suspended and resumed (for wgpu-core's one per pass), and make a Vulkan
+command pool give its memory back every 16th reset (~110 MB of Mali driver
+memory on a Pixel 8a). With one command
 buffer per pass, the game's benchmark ran 5 % faster on a Pixel 8a, 15 %
 in the scenes where memory runs short, and its encoding took 12-14 ms a
 frame instead of 17-23; on an iPhone 16 Pro (with the Metal command buffers
@@ -506,8 +510,11 @@ prompts, aim assist and menu behaviour:
   graphics preset to `settings.xml` once; later changes use the game's menu.
 
   The resource heap is capped at its starting size (`gameResourceMB`,
-  768 MiB). The PC build grows it by 256 MiB whenever the streaming engine
-  asks how much memory is left. This can retain resources from areas the
+  768 MiB in low memory), on phones also without low memory (the game's
+  own size). The PC build grows it by 256 MiB whenever the streaming engine
+  asks how much memory is left, and the streaming engine keeps it full: in
+  the game's benchmark it went from 1.3 to 2.6 GiB, and 8 GB phones with
+  low memory off were killed before its end. This can retain resources from areas the
   player has left and exhaust available memory on phones. Capping the heap
   makes the streaming engine evict resources when it fills, as on consoles.
   Setting it too low also causes problems: at 512 MiB, the prologue never
@@ -517,6 +524,18 @@ prompts, aim assist and menu behaviour:
   for restarts requested from within a frame. The app then exits or, on
   desktop, relaunches. The engine's restart-pending flag distinguishes the
   two cases; its settings menu sets that flag after saving.
+
+- Memory on phones, low memory off, the game's benchmark (14 October
+  2026): an iPhone 13 Pro takes 2.9 GB, an iPhone 16 Pro 3.8 GB, of which
+  ~1.5-1.8 GB the engine's memory (its resource heap, mostly), ~0.9-1.5 GB
+  Metal's, ~0.5 GB Metal's own CPU-side memory and ~0.3 GB malloc. The
+  engine keeps its vertex and index data after the GPU has its copy
+  (~300 MB on the 13 Pro; it reads them on the CPU), not its textures'.
+  Saved on our side: the shader text kept compressed and one function
+  table for all threads (malloc 557 MB instead of 768 on a Mac, ~80 MB on
+  a Pixel 8a), small vertex and index buffers in shared GPU buffers on
+  Apple GPUs (60-100 MB on the iPhones: each Metal buffer costs memory of
+  its own however small it is), Vulkan command pools giving memory back.
 
 ## Future work
 
