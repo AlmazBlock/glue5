@@ -105,8 +105,11 @@ pub unsafe extern "C" fn wasm_module_int_js(env: *mut Env, name: u64, default: u
         None if name == "keepThreads" && rt().config.online.is_some() => default | 2,
         None => default,
     };
-    // Low memory: the resource heap's budget is its starting size.
-    if name == "gameResourceMB" && low {
+    // Phones, and low memory anywhere: the resource heap's budget is its
+    // starting size. Unbudgeted, the streaming engine keeps it full and it
+    // grows by 256 MiB each time: past 2.5 GiB in the game's benchmark.
+    let phone = cfg!(any(target_os = "ios", target_os = "android"));
+    if name == "gameResourceMB" && (low || phone) {
         crate::memory::budget_resource_heap(value);
     }
     value
