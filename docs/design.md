@@ -60,6 +60,15 @@ startup, so the generated C does not depend on Rust symbols or static
 library link order. Exports return traps as values, and hooks replace game
 functions by name. The Rust crate exposes the FFI bindings.
 
+The game is x86 code, where a core's stores reach the others in order;
+on ARM they need not, and wasm's plain accesses to shared memory promise
+no order either. Where the game publishes data with plain stores (the
+physics' collision pairs: an entry, then the list's count, read by worker
+threads meanwhile), the build script makes those accesses atomic in the
+generated C (`build/ordering.rs`, checked against the exact text); a
+worker on a Pixel 8a otherwise read a stale pair now and then, and the
+engine's bounds checks trapped.
+
 SDL3 handles windows, input, gamepads, audio and dialogs. Other dependencies
 include wgpu, naga, egui, parking_lot_core for wasm futexes, bcdec_rs for BC
 decoding, jiff for the system's time zone, png and serde_json. Project code

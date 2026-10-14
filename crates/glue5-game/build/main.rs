@@ -9,6 +9,7 @@ mod codegen;
 mod compile;
 mod mangle;
 mod module;
+mod ordering;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -107,7 +108,16 @@ fn run() -> Result<()> {
     let module = module::parse(&wasm)?;
     let hooks = codegen::resolve_hooks(&module, &HOOKS.concat())?;
     let mut sources: Vec<PathBuf> = (0..OUTPUTS).map(|i| gen_dir.join(format!("game_{i}.c"))).collect();
-    apply_hooks(&hooks, &mut sources)?;
+    let mut texts: Vec<Option<String>> = vec![None; sources.len()];
+    apply_hooks(&hooks, &sources, &mut texts)?;
+    ordering::apply(&sources, &mut texts)?;
+    for (source, text) in sources.iter_mut().zip(texts) {
+        if let Some(text) = text {
+            let patched = source.with_extension("hooked.c");
+            write_if_changed(&patched, &text)?;
+            *source = patched;
+        }
+    }
     write_if_changed(&gen_dir.join("glue.c"), &codegen::glue_c(&module, &hooks)?)?;
     fs::write(out.join("bindings.rs"), codegen::bindings_rs(&module, &hooks))?;
 
@@ -208,16 +218,16 @@ fn find_wasm(game_dir: &Path) -> Result<(String, PathBuf)> {
     }
 }
 
-/// Renames each hooked function's definition to `<symbol>_orig` in a copy of
-/// its file (`game_N.hooked.c`), which replaces the original in `sources`.
-fn apply_hooks(hooks: &[codegen::Hook], sources: &mut [PathBuf]) -> Result<()> {
+/// Renames each hooked function's definition to `<symbol>_orig` in its
+/// file's text (`texts`, written as `game_N.hooked.c`, which replaces the
+/// original in the build).
+fn apply_hooks(hooks: &[codegen::Hook], sources: &[PathBuf], texts: &mut [Option<String>]) -> Result<()> {
     let mut pending: Vec<&codegen::Hook> = hooks.iter().collect();
-    for source in sources.iter_mut() {
+    for (source, patched) in sources.iter().zip(texts.iter_mut()) {
         if pending.is_empty() {
             break;
         }
-        let text = fs::read_to_string(&*source)?;
-        let mut patched = None::<String>;
+        let text = fs::read_to_string(source)?;
         pending.retain(|hook| {
             let needle = format!(" {}(w2c_game* instance", hook.symbol);
             let current = patched.as_deref().unwrap_or(&text);
@@ -240,14 +250,9 @@ fn apply_hooks(hooks: &[codegen::Hook], sources: &mut [PathBuf]) -> Result<()> {
                 &format!(" {}_orig(", hook.symbol),
                 1,
             );
-            patched = Some(format!("{}{}{}", &current[..line_start], line, &current[line_end..]));
+            *patched = Some(format!("{}{}{}", &current[..line_start], line, &current[line_end..]));
             false
         });
-        if let Some(patched) = patched {
-            let hooked = source.with_extension("hooked.c");
-            write_if_changed(&hooked, &patched)?;
-            *source = hooked;
-        }
     }
     if let Some(hook) = pending.first() {
         bail!("hook `{}`: definition of {} not found in the wasm2c output", hook.field, hook.symbol);
