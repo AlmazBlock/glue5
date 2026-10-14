@@ -34,14 +34,14 @@ devices() {
         --columns Identifier --columns udid --filter "$1" | awk 'length($1) >= 25 { print $1, $2 }'
 }
 
-# A connected device (identifier, UDID or name; default the only one
+# A reachable device, connected or just paired (identifier, UDID or name; default the only one
 # connected): sets $device (its CoreDevice identifier) and $udid.
 pick_device() {
     local found
-    found=$(devices "State == 'connected'")
+    found=$(devices "State != 'unavailable'")
     if [ -n "${1:-}" ]; then
         found=$(awk -v d="$1" '$1 == d || $2 == d' <<<"$found")
-        [ -n "$found" ] || found=$(devices "State == 'connected' AND Name == '$1'")
+        [ -n "$found" ] || found=$(devices "State != 'unavailable' AND Name == '$1'")
     fi
     case $(grep -c . <<<"$found" || true) in
     1) read -r device udid <<<"$found" ;;
