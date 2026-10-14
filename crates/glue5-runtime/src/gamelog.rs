@@ -7,7 +7,9 @@
 //! Printing synchronously from engine threads stalled the engine behind a
 //! slow terminal: loading looked stuck.
 
+use std::collections::HashMap;
 use std::fs::File;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -72,12 +74,18 @@ fn run(rx: Receiver<Vec<u8>>, file: File, to_stdout: bool) {
     let mut stdout = to_stdout.then(io::stdout);
     #[cfg(target_os = "android")]
     let mut stdout = to_stdout.then(Logcat::default);
+    let mut repeats = Repeats::default();
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(bytes) => {
                 if let Some(why) = fatal_error(&bytes) {
                     crate::exit::fail(why);
                 }
+                let bytes = match repeats.check(&bytes) {
+                    Repeat::Write => bytes,
+                    Repeat::Count(n) => format!("[glue5] {n} times so far: {}", String::from_utf8_lossy(&bytes)).into(),
+                    Repeat::Skip => continue,
+                };
                 let _ = file.write_all(&bytes);
                 if let Some(out) = &mut stdout {
                     let _ = out.write_all(&bytes);
@@ -99,6 +107,45 @@ fn run(rx: Receiver<Vec<u8>>, file: File, to_stdout: bool) {
         }
     }
     let _ = file.flush();
+}
+
+/// Lines the engine prints over and over (online, some messages come every
+/// frame: millions of lines, a log of hundreds of MB) are written the first
+/// [`Repeats::KEEP`] times, then only counted, the count written at each
+/// power of two.
+#[derive(Default)]
+struct Repeats(HashMap<u64, u64>);
+
+enum Repeat {
+    Write,
+    Count(u64),
+    Skip,
+}
+
+impl Repeats {
+    const KEEP: u64 = 10;
+    /// Distinct lines remembered (lines with addresses or times in them are
+    /// all distinct): past this the counts start over.
+    const LINES: usize = 50_000;
+
+    fn check(&mut self, bytes: &[u8]) -> Repeat {
+        if self.0.len() >= Self::LINES {
+            self.0.clear();
+        }
+        let n = self.0.entry(hash(bytes)).or_default();
+        *n += 1;
+        match *n {
+            n if n <= Self::KEEP => Repeat::Write,
+            n if n.is_power_of_two() => Repeat::Count(n),
+            _ => Repeat::Skip,
+        }
+    }
+}
+
+fn hash(bytes: &[u8]) -> u64 {
+    let mut h = DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
 }
 
 /// Engine output to the log, line by line.
@@ -134,5 +181,19 @@ mod tests {
             Some("the engine failed: <HDD Reader> Short read on /game/x.rpf - got -1")
         );
         assert_eq!(fatal_error(b"Error: something else\n"), None);
+    }
+
+    #[test]
+    fn repeated_lines_are_counted() {
+        let mut repeats = Repeats::default();
+        let written: Vec<u64> = (1..=40)
+            .filter_map(|n| match repeats.check(b"Error: again\n") {
+                Repeat::Write => Some(n),
+                Repeat::Count(c) => Some(1000 + c),
+                Repeat::Skip => None,
+            })
+            .collect();
+        assert_eq!(written, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1016, 1032]);
+        assert!(matches!(repeats.check(b"Error: other\n"), Repeat::Write));
     }
 }
