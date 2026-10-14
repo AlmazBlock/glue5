@@ -30,6 +30,7 @@ mod profile;
 mod recycle;
 mod scene;
 mod shader;
+mod slabs;
 mod submit;
 mod uniforms;
 #[cfg(test)]
@@ -377,6 +378,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
     let profiler = profile.then(|| profile::Profiler::new(&device, &queue));
     let uploads = uploads::Uploads::new(device.clone());
     let recycler = recycle::Recycler::default();
+    let slabs = slabs::Slabs::new(device.clone(), recycler.finished.clone());
     Ok(exec::Gpu {
         submitter: submit::Submitter::start(
             device.clone(),
@@ -432,6 +434,7 @@ fn init(ring: GpuRing, settings: Settings, screen: Option<Screen>) -> Result<exe
         blits: Default::default(),
         computes: Default::default(),
         next_buffer_uid: 0,
+        slabs,
         recycler,
         decoder: None,
         decodes: Vec::new(),

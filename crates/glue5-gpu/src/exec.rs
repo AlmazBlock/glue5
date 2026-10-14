@@ -225,6 +225,7 @@ pub struct Gpu {
     pub computes: Arc<crate::ops::Computes>,
     pub next_buffer_uid: u32,
     pub recycler: crate::recycle::Recycler,
+    pub slabs: crate::slabs::Slabs,
     /// BC textures decoded on the CPU, by threads of their own (made when
     /// the first one comes): copied in at a flush once decoded.
     pub decoder: Option<Pool>,
@@ -754,7 +755,13 @@ impl Gpu {
         let needs_gpu = bind & (format::BIND_VERTEX | format::BIND_INDEX | format::BIND_SRV | format::BIND_UAV) != 0
             || misc & format::MISC_DRAWINDIRECT_ARGS != 0;
         let bytes = (size as u64).next_multiple_of(4).max(4);
-        let gpu = needs_gpu.then(|| self.new_gpu_buffer(bytes, usage));
+        let (mut gpu, mut slot) = (None, None);
+        if needs_gpu && crate::slabs::Slabs::takes(bytes, usage) {
+            let (s, g) = self.slabs.alloc(bytes);
+            (gpu, slot) = (Some(g), Some(s));
+        } else if needs_gpu {
+            gpu = Some(self.new_gpu_buffer(bytes, usage));
+        }
         self.next_buffer_uid += 1;
         self.objs.insert(
             id,
@@ -762,6 +769,8 @@ impl Gpu {
                 size: size as u64,
                 stride,
                 gpu,
+                base: slot.map_or(0, |s| s.offset),
+                slot,
                 bytes,
                 uid: self.next_buffer_uid,
                 usage,
@@ -808,13 +817,24 @@ impl Gpu {
                 // contents; a new allocation takes the new ones.
                 let (bytes, usage) = (b.bytes, b.usage);
                 let old = b.gpu.take();
-                let fresh = self.new_gpu_buffer(bytes, usage);
-                if let Some(old) = old {
-                    self.recycler.keep_buffer(self.epoch, old);
-                }
+                let (fresh, slot) = match b.slot.take() {
+                    Some(old) => {
+                        self.slabs.free(self.epoch, old);
+                        let (slot, g) = self.slabs.alloc(bytes);
+                        (g, Some(slot))
+                    }
+                    None => {
+                        if let Some(old) = old {
+                            self.recycler.keep_buffer(self.epoch, old);
+                        }
+                        (self.new_gpu_buffer(bytes, usage), None)
+                    }
+                };
                 self.next_buffer_uid += 1;
                 let b = self.objs.buf_mut(id).unwrap();
                 b.gpu = Some(fresh);
+                b.base = slot.map_or(0, |s| s.offset);
+                b.slot = slot;
                 b.uid = self.next_buffer_uid;
                 b.used.set(0);
             } else {
@@ -832,9 +852,9 @@ impl Gpu {
                 return;
             }
         }
-        let gpu = b.gpu.clone().unwrap();
+        let (gpu, base) = (b.gpu.clone().unwrap(), b.base);
         b.uploaded.set(self.epoch);
-        self.uploads.buffer(&gpu, offset, &data[..len]);
+        self.uploads.buffer(&gpu, base + offset, &data[..len]);
     }
 
     fn upload_texture(&mut self, c: &Command) {
@@ -1062,11 +1082,11 @@ impl Gpu {
                 Some(key) => self.recycler.keep_texture(self.epoch, key, t.tex, t.bytes),
                 None => self.graveyard.push(Grave::Texture(t.tex)),
             },
-            Some(Obj::Buffer(b)) => {
-                if let Some(g) = b.gpu {
-                    self.recycler.keep_buffer(self.epoch, g);
-                }
-            }
+            Some(Obj::Buffer(b)) => match (b.slot, b.gpu) {
+                (Some(slot), _) => self.slabs.free(self.epoch, slot),
+                (None, Some(g)) => self.recycler.keep_buffer(self.epoch, g),
+                (None, None) => {}
+            },
             _ => {}
         }
     }
@@ -1168,9 +1188,11 @@ impl Gpu {
             }
         }
         let memory = format!(
-            "textures {} MiB, buffers {} MiB, constants {} MiB; {} reused",
+            "textures {} MiB, buffers {} MiB (small ones {} MiB in {} MiB of slabs), constants {} MiB; {} reused",
             textures >> 20,
             buffers >> 20,
+            self.slabs.used >> 20,
+            self.slabs.bytes() >> 20,
             self.uniforms.bytes_allocated() >> 20,
             std::mem::take(&mut self.recycler.reused)
         );

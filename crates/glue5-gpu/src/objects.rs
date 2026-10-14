@@ -99,6 +99,10 @@ pub struct Buf {
     /// The GPU buffer (vertex, index, structured, indirect args); constant
     /// buffers live in `shadow` only.
     pub gpu: Option<wgpu::Buffer>,
+    /// Where in `gpu` the buffer starts: small vertex and index buffers
+    /// share GPU buffers (`slot`, see slabs.rs).
+    pub base: u64,
+    pub slot: Option<crate::slabs::Slot>,
     /// Size of `gpu` (4-byte multiple).
     pub bytes: u64,
     /// Identity of the current GPU allocation (a full overwrite while in use

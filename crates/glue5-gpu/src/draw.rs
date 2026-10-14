@@ -575,7 +575,7 @@ impl Gpu {
                                 if offset != 0 && offset.is_multiple_of(align) && offset < buf.bytes {
                                     let size = (count != 0 && count != u32::MAX)
                                         .then(|| (count as u64 * stride).min(buf.bytes - offset));
-                                    Res::Buffer(buf.gpu.clone().unwrap(), offset, size)
+                                    Res::Buffer(buf.gpu.clone().unwrap(), buf.base + offset, size.or(buf.slot.map(|_| buf.bytes - offset)))
                                 } else {
                                     if offset != 0 {
                                         crate::log_once(&format!("bufoff{}", prog.label), || {
@@ -585,7 +585,7 @@ impl Gpu {
                                             )
                                         });
                                     }
-                                    Res::Buffer(buf.gpu.clone().unwrap(), 0, None)
+                                    Res::Buffer(buf.gpu.clone().unwrap(), buf.base, buf.slot.map(|_| buf.bytes))
                                 }
                             }
                         }
@@ -979,7 +979,7 @@ impl Gpu {
                     let offset = (v.offset as i64 + shift).max(0).min(b.bytes as i64) as u64;
                     avail[slot as usize] = b.bytes - offset;
                     b.used.set(epoch);
-                    vbs.push((slot, Some((g.clone(), b.uid)), offset));
+                    vbs.push((slot, Some((g.clone(), b.uid)), b.base + offset));
                 }
                 None => {
                     avail[slot as usize] = ZERO_VB;
@@ -998,7 +998,7 @@ impl Gpu {
             let size = if fmt == format::INDEX_U16 { 2 } else { 4 };
             index_max = (b.bytes.saturating_sub(offset as u64) / size).saturating_sub(start as u64);
             b.used.set(epoch);
-            index = Some((g.clone(), b.uid, format, offset as u64));
+            index = Some((g.clone(), b.uid, format, b.base + offset as u64));
         }
         if kind >= 4 && !self.caps.indirect {
             return self.skip("indirect draw (unsupported by the device)");
@@ -1007,7 +1007,7 @@ impl Gpu {
             match self.objs.buf(c.w(1)).and_then(|b| b.gpu.as_ref().map(|g| (b, g))) {
                 Some((b, g)) => {
                     b.used.set(epoch);
-                    Some((g.clone(), c.w(2) as u64))
+                    Some((g.clone(), b.base + c.w(2) as u64))
                 }
                 None => return self.skip("indirect draw without arguments"),
             }

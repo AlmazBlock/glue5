@@ -417,6 +417,25 @@ impl Gpu {
 
     // ---- copies ------------------------------------------------------------------------
 
+    /// A buffer copy; two buffers in the same slab (see slabs.rs) go through
+    /// a temporary buffer, as a copy within one buffer is not allowed.
+    fn copy_buffer(&mut self, src: &wgpu::Buffer, from: u64, dst: &wgpu::Buffer, to: u64, size: u64) {
+        if src != dst {
+            self.encoder().copy_buffer_to_buffer(src, from, dst, to, size);
+            return;
+        }
+        let temp = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("copy within a slab"),
+            size,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let encoder = self.encoder();
+        encoder.copy_buffer_to_buffer(src, from, &temp, 0, size);
+        encoder.copy_buffer_to_buffer(&temp, 0, dst, to, size);
+        self.graveyard.push(crate::submit::Grave::Buffer(temp));
+    }
+
     pub fn copy_region(&mut self, c: &Command) {
         let (dst, dst_sub, dx, dy, dz, src, src_sub, has_box) =
             (c.w(0), c.w(1), c.w(2), c.w(3), c.w(4), c.w(5), c.w(6), c.w(7) != 0);
@@ -433,7 +452,8 @@ impl Gpu {
             s.used.set(epoch);
             d.used.set(epoch);
             if size > 0 && from % 4 == 0 && dx % 4 == 0 {
-                self.encoder().copy_buffer_to_buffer(&sg, from, &dg, dx as u64, size);
+                let (from, to) = (s.base + from, d.base + dx as u64);
+                self.copy_buffer(&sg, from, &dg, to, size);
             }
             return;
         }
@@ -541,10 +561,10 @@ impl Gpu {
         let epoch = self.epoch;
         if let (Some(s), Some(d)) = (self.objs.buf(src), self.objs.buf(dst)) {
             if let (Some(sg), Some(dg)) = (s.gpu.clone(), d.gpu.clone()) {
-                let size = s.bytes.min(d.bytes);
+                let (size, from, to) = (s.bytes.min(d.bytes), s.base, d.base);
                 s.used.set(epoch);
                 d.used.set(epoch);
-                self.encoder().copy_buffer_to_buffer(&sg, 0, &dg, 0, size);
+                self.copy_buffer(&sg, from, &dg, to, size);
             }
             return;
         }
@@ -715,14 +735,15 @@ impl Gpu {
         if is_buffer {
             let Some(b) = self.objs.buf(res) else { return };
             let Some(g) = b.gpu.clone() else { return };
+            let (base, bytes) = (b.base, b.bytes);
             b.used.set(epoch);
             if zero {
-                self.encoder().clear_buffer(&g, 0, None);
+                self.encoder().clear_buffer(&g, base, Some(bytes));
             } else {
                 // Written before the commands recorded so far: submit them first.
                 self.flush("uav clear");
-                let words: Vec<u32> = (0..g.size() / 4).map(|i| values[i as usize & 3]).collect();
-                self.uploads.buffer(&g, 0, bytemuck::cast_slice(&words));
+                let words: Vec<u32> = (0..bytes / 4).map(|i| values[i as usize & 3]).collect();
+                self.uploads.buffer(&g, base, bytemuck::cast_slice(&words));
             }
             return;
         }
@@ -835,7 +856,7 @@ impl Gpu {
         let Some(res) = self.objs.uav(uav).filter(|v| v.is_buffer).map(|v| v.res) else {
             return;
         };
-        let Some(dg) = self.objs.buf(dst).and_then(|b| b.gpu.clone()) else {
+        let Some((dg, base)) = self.objs.buf(dst).and_then(|b| b.gpu.clone().map(|g| (g, b.base))) else {
             return;
         };
         if self.objs.buf(res).is_none() || !offset.is_multiple_of(4) {
@@ -843,7 +864,7 @@ impl Gpu {
         }
         let counter = self.counter_buffer(res);
         self.objs.buf(dst).unwrap().used.set(self.epoch);
-        self.encoder().copy_buffer_to_buffer(&counter, 0, &dg, offset as u64, 4);
+        self.encoder().copy_buffer_to_buffer(&counter, 0, &dg, base + offset as u64, 4);
     }
 
     // ---- readbacks ---------------------------------------------------------------------------
@@ -859,7 +880,7 @@ impl Gpu {
         let epoch = self.epoch;
         let done = |flag: u64| Work::Store { at: flag, value: 0 };
         if is_buffer {
-            let Some((g, bytes)) = self.objs.buf(src).and_then(|b| b.gpu.clone().map(|g| (g, b.bytes))) else {
+            let Some((g, bytes, base)) = self.objs.buf(src).and_then(|b| b.gpu.clone().map(|g| (g, b.bytes, b.base))) else {
                 if flag != 0 {
                     self.works.push(done(flag));
                 }
@@ -870,7 +891,7 @@ impl Gpu {
                 if has_box { (bx[3] - bx[0]) as u64 } else { (size as u64).min(bytes) }.min(bytes.saturating_sub(from));
             let staging = self.staging.get(&self.device, len.next_multiple_of(4).max(4));
             self.objs.buf(src).unwrap().used.set(epoch);
-            self.encoder().copy_buffer_to_buffer(&g, from & !3, &staging, 0, len.next_multiple_of(4).max(4));
+            self.encoder().copy_buffer_to_buffer(&g, base + (from & !3), &staging, 0, len.next_multiple_of(4).max(4));
             self.maps.push((
                 staging,
                 Box::new(move |s| Work::Readback { staging: s, copy: Copy::Bytes { to, len: len as usize }, flag }),
