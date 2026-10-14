@@ -10,5 +10,8 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- GTA Online: players on the same network find each other there. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Glue 5 finds GTA Online players on your network.</string>
 </dict>
 </plist>

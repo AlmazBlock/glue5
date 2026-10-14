@@ -287,18 +287,18 @@ pub(crate) unsafe extern "C" fn photo_to_jpeg(
 /// engine counts the ROS credentials as valid and then waits for Rockstar's
 /// cloud tunables, which never come. The other conditions stand: the network
 /// memory free (the store's data, see `populate_store_data`; no story save
-/// queued) and the session idle.
+/// queued) and the session idle. Then the lobby's players are waited for
+/// (`P2p::may_enter`).
 pub(crate) unsafe extern "C" fn can_enter_multiplayer(env: *mut Env, session: u64) -> u32 {
-    let can = unsafe { orig::can_enter_multiplayer(env, session) };
-    if can != 0 {
-        return can;
-    }
     const STATE: u64 = 99916;
     const STORE: u64 = 29309000; // populated, in progress
     const SAVE_QUEUE: u64 = 23275800;
     let m = unsafe { Mem::of(env) };
-    let store_ready = m.u8(STORE) & 1 != 0 && m.u8(STORE + 1) == 0;
-    (store_ready && m.u32(SAVE_QUEUE) == 0 && m.u32(session + STATE) == 0) as u32
+    let can = unsafe { orig::can_enter_multiplayer(env, session) } != 0 || {
+        let store_ready = m.u8(STORE) & 1 != 0 && m.u8(STORE + 1) == 0;
+        store_ready && m.u32(SAVE_QUEUE) == 0 && m.u32(session + STATE) == 0
+    };
+    (can && crate::p2p::get().is_none_or(|p| p.may_enter())) as u32
 }
 
 /// Changes to the game's scripts (bytecode), made as each program loads:

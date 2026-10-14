@@ -158,6 +158,12 @@ impl Dht {
         }
     }
 
+    /// Whether this player was announced and the lobby's players asked
+    /// for again since: the ones announced by then are known.
+    pub fn settled(&self) -> bool {
+        matches!((self.announced, self.refreshed), (Some(a), Some(r)) if r > a)
+    }
+
     /// The closest nodes that answered.
     fn closest(&self) -> impl Iterator<Item = (&Id, &Node)> {
         self.nodes.iter().filter(|(_, n)| n.responded).take(CLOSEST)

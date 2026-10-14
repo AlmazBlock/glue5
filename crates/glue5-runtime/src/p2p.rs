@@ -7,7 +7,11 @@
 //! whoever knows its code.
 //!
 //! Players find each other
-//! - on the same network or machine, by broadcasting to the lobby ports;
+//! - on the same machine, at the lobby ports;
+//! - on the same network, by broadcasting to them and by greeting the
+//!   network's addresses one by one (iOS lets broadcasts through only with
+//!   an entitlement Apple must grant; NATs seldom carry datagrams from one
+//!   of their own players to another's public address);
 //! - on the Internet, through the BitTorrent DHT (dht.rs), which gives each
 //!   the others' public addresses (the ones their NATs opened).
 //!
@@ -15,11 +19,16 @@
 //! datagrams through ("hole punching"); each new player is introduced to
 //! the others by the first player it reaches, and while two players cannot
 //! reach each other directly, that player relays between them.
+//!
+//! The game looks for a session only for a moment (about a second) and
+//! hosts one when it finds none, so it waits for the others first
+//! (`may_enter`): until the lobby's players are known, and while another
+//! player who started at the same time goes first and hosts.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -36,8 +45,11 @@ const MAGIC: [u8; 3] = [b'G', b'5', 1];
 const HELLO: u8 = 1;
 const PEERS: u8 = 2;
 const DATA: u8 = 3;
-/// HELLO: please answer.
+/// HELLO flags: please answer; the player is about to look for a session;
+/// it went looking (and is in one, or hosts it).
 const ASK: u8 = 1;
+const WAITING: u8 = 2;
+const PLAYING: u8 = 4;
 /// How often players greet each other (keeping the NATs' mappings open),
 /// and when a silent one is gone.
 const KEEPALIVE: Duration = Duration::from_secs(2);
@@ -46,6 +58,14 @@ const GONE: Duration = Duration::from_secs(20);
 const PUNCH: Duration = Duration::from_secs(30);
 /// How often the players reached are introduced to each other again.
 const INTRODUCE: Duration = Duration::from_secs(8);
+/// How often the local network's addresses are greeted.
+const SWEEP: Duration = Duration::from_secs(5);
+/// Before looking for a session: how long the DHT may take to find the
+/// lobby's players (from the start), how long a player who went first
+/// takes to host, and how long to wait at most.
+const DISCOVERY: Duration = Duration::from_secs(40);
+const HOSTING: Duration = Duration::from_secs(6);
+const PATIENCE: Duration = Duration::from_secs(30);
 
 struct Peer {
     vip: u32,
@@ -56,11 +76,15 @@ struct Peer {
     introduced: Instant,
     /// Who introduced it: the relay while it cannot be reached directly.
     via: Option<SocketAddrV4>,
+    /// Its WAITING and PLAYING flags, and since when it plays (seen).
+    flags: u8,
+    playing: Option<Instant>,
 }
 
 impl Peer {
     fn new(vip: u32, now: Instant) -> Peer {
-        Peer { vip, addr: None, heard: now.checked_sub(GONE).unwrap_or(now), introduced: now, via: None }
+        let heard = now.checked_sub(GONE).unwrap_or(now);
+        Peer { vip, addr: None, heard, introduced: now, via: None, flags: 0, playing: None }
     }
 
     fn direct(&self, now: Instant) -> bool {
@@ -99,6 +123,10 @@ pub struct P2p {
     vip: AtomicU32,
     /// The engine took the address: it cannot change any more.
     vip_taken: AtomicBool,
+    /// This player's WAITING and PLAYING flags, and since when it waits.
+    flags: AtomicU8,
+    started: Instant,
+    waiting: OnceLock<Instant>,
     state: Mutex<State>,
 }
 
@@ -134,6 +162,9 @@ pub fn start(lobby: &str, deliver: Deliver) -> std::io::Result<&'static P2p> {
         lobby: key[..8].try_into().unwrap(),
         vip: AtomicU32::new(0),
         vip_taken: AtomicBool::new(false),
+        flags: AtomicU8::new(0),
+        started: Instant::now(),
+        waiting: OnceLock::new(),
         state: Mutex::new(State {
             peers: HashMap::new(),
             trying: HashMap::new(),
@@ -172,11 +203,51 @@ fn is_broadcast(ip: u32) -> bool {
     ip == u32::MAX || (ip & 0xffff_0000 == NET && ip & 0xff == 0xff)
 }
 
+/// This device's address on its local network (the one its Internet
+/// traffic leaves from), when the network is a private one. Connecting a
+/// UDP socket sends nothing.
+fn lan_address() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match socket.local_addr().ok()? {
+        SocketAddr::V4(a) if a.ip().is_private() => Some(*a.ip()),
+        _ => None,
+    }
+}
+
 impl P2p {
     /// This player's address on the virtual LAN; the engine takes it.
     pub fn local_ip(&self) -> u32 {
         self.vip_taken.store(true, Ordering::Relaxed);
         self.vip.load(Ordering::Relaxed)
+    }
+
+    /// Whether the engine may look for a session now (it asks until it
+    /// may): once the DHT had the time to find the lobby's players, and
+    /// none of those waiting with it goes first (the lowest id) or has just
+    /// gone, so that it hosts and the others join it.
+    pub fn may_enter(&self) -> bool {
+        if self.flags.load(Ordering::Relaxed) & PLAYING != 0 {
+            return true;
+        }
+        let now = Instant::now();
+        let since = *self.waiting.get_or_init(|| {
+            self.flags.store(WAITING, Ordering::Relaxed);
+            log::info!("p2p: waiting for the lobby's players");
+            now
+        });
+        let state = self.state.lock().unwrap();
+        let discovered = state.dht.settled() || now - self.started > DISCOVERY;
+        let first = state.peers.iter().filter(|(_, p)| p.direct(now)).all(|(id, p)| {
+            let ahead = p.flags & WAITING != 0 && *id < self.id;
+            !ahead && p.playing.is_none_or(|t| now - t > HOSTING)
+        });
+        let go = discovered && first || now - since > PATIENCE;
+        if go {
+            self.flags.store(PLAYING, Ordering::Relaxed);
+            log::info!("p2p: looking for a session, {} players known", state.peers.len());
+        }
+        go
     }
 
     /// Sends an engine datagram (from `src_port`) to a player's address, or
@@ -224,7 +295,7 @@ impl P2p {
         d.extend_from_slice(&self.lobby);
         d.extend_from_slice(&self.id.to_be_bytes());
         d.extend_from_slice(&self.vip.load(Ordering::Relaxed).to_be_bytes());
-        d.push(flags);
+        d.push(flags | self.flags.load(Ordering::Relaxed));
         let _ = self.socket.send_to(&d, to);
     }
 
@@ -249,6 +320,7 @@ impl P2p {
         let mut buf = [0u8; 2048];
         let mut ticked = Instant::now() - KEEPALIVE;
         let mut dht_ticked = ticked;
+        let mut swept = ticked - SWEEP;
         loop {
             match self.socket.recv_from(&mut buf) {
                 Ok((len, SocketAddr::V4(from))) => self.receive(from, &buf[..len], deliver),
@@ -267,6 +339,10 @@ impl P2p {
             if now - ticked > KEEPALIVE {
                 ticked = now;
                 self.tick(now);
+            }
+            if now - swept > SWEEP {
+                swept = now;
+                self.sweep();
             }
         }
     }
@@ -300,10 +376,13 @@ impl P2p {
     }
 
     fn tick(&self, now: Instant) {
-        // Players on this network or machine.
-        for port in PORTS.filter(|&p| p != self.port) {
+        // Players on this machine or network (the ones on other machines
+        // mostly at the first port, as this one).
+        for port in PORTS {
             self.hello(SocketAddrV4::new(Ipv4Addr::BROADCAST, port), ASK);
-            self.hello(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port), ASK);
+            if port != self.port {
+                self.hello(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port), ASK);
+            }
         }
         let mut state = self.state.lock().unwrap();
         state.peers.retain(|id, p| {
@@ -332,6 +411,20 @@ impl P2p {
             for (id, _, addr) in &reached {
                 let others: Vec<_> = reached.iter().filter(|(i, ..)| i != id).copied().collect();
                 self.peers(*addr, &others);
+            }
+        }
+    }
+
+    /// Greets the local network's addresses (its /24) at the first lobby
+    /// port, where broadcasts do not get through; the players there are
+    /// introduced to the others by the one reached.
+    fn sweep(&self) {
+        let Some(own) = lan_address() else { return };
+        let [a, b, c, _] = own.octets();
+        for d in 1..255 {
+            let ip = Ipv4Addr::new(a, b, c, d);
+            if ip != own {
+                self.hello(SocketAddrV4::new(ip, PORTS.start), ASK);
             }
         }
     }
@@ -404,6 +497,7 @@ impl P2p {
             return;
         }
         let known = state.peers.contains_key(&id);
+        let heard_before = state.peers.get(&id).is_some_and(|p| p.addr.is_some());
         // Two players with one address: the one whose address the engine
         // has not taken yet takes another.
         if vip == self.vip.load(Ordering::Relaxed) {
@@ -421,6 +515,12 @@ impl P2p {
             peer.addr = Some(from);
         }
         peer.heard = now;
+        // A player already playing when first heard has had its time.
+        if flags & PLAYING != 0 && peer.playing.is_none() {
+            let long_ago = now.checked_sub(HOSTING).unwrap_or(now);
+            peer.playing = Some(if heard_before { now } else { long_ago });
+        }
+        peer.flags = flags & (WAITING | PLAYING);
         if !known {
             log::info!("p2p: player {id:016x} ({}) at {from}", Ipv4Addr::from(vip));
             // Introductions: the newcomer to everyone, everyone to it.
