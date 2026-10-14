@@ -705,7 +705,9 @@ impl Output {
         let _ = device;
         #[cfg(target_vendor = "apple")]
         let metalfx = crate::metalfx::MetalFx::new(device);
-        let mut upscalers = 1 << Upscaler::Bicubic as u8 | 1 << Upscaler::Fsr as u8;
+        // (FSR not on Apple GPUs: see fsr.rs.)
+        let mut upscalers =
+            1 << Upscaler::Bicubic as u8 | (!cfg!(target_vendor = "apple") as u8) << Upscaler::Fsr as u8;
         #[cfg(target_vendor = "apple")]
         {
             use crate::metalfx::Kind;

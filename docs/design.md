@@ -282,7 +282,7 @@ The present step scales the back buffer with one of four upscalers (Settings
 | Bicubic (Catmull-Rom) | everywhere | the finished frame |
 | MetalFX (spatial) | Apple GPUs | the finished frame |
 | MetalFX Temporal | Apple GPUs | the scene from several frames, jittered |
-| FSR 3 (AMD, through wgpu-ffx) | any GPU | the same as MetalFX Temporal |
+| FSR 3 (AMD, through wgpu-ffx) | GPUs other than Apple's | the same as MetalFX Temporal |
 
 Upscalers run on the submit thread, on the same queue, after the game's
 commands and before the present pass, which draws their result 1:1. MetalFX
@@ -344,7 +344,12 @@ FSR comes from the wgpu-ffx crate (FSR 3's upscaler as wgpu compute passes,
 SPIR-V), prepared by `mise run setup` with two patches: wgpu 30, and shaders
 naga and Metal accept (no `Coherent` on storage images; four-channel instead
 of two-channel half-float storage images, which Metal cannot read and write).
-wgpu-ffx has no frame generation.
+wgpu-ffx has no frame generation. Its passes compile on a thread of their
+own when FSR is first chosen (seconds; frames use the bicubic path
+meanwhile). It works on Metal, but is not offered there: from 1280x720 to
+2560x1440 on an M1 Pro it takes 16 ms a frame, 10 of them in its
+accumulation pass as naga translates it, against 4.5 ms for MetalFX's
+temporal scaler.
 
 ### Frame generation
 

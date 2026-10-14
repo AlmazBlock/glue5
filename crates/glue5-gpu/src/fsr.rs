@@ -3,6 +3,10 @@
 //! and motion, jittered; see scene.rs), on the submit thread before the
 //! present pass, which puts the HUD back over its image. Its compute
 //! passes are SPIR-V, which wgpu translates where the backend is not Vulkan.
+//!
+//! Not offered on Apple GPUs: MetalFX's temporal scaler does the same there
+//! for a quarter of the time (2560x1440 from 1280x720 on an M1 Pro: 4.5 ms
+//! against 16, 10 of them FSR's accumulation pass as naga translates it).
 
 use std::time::Instant;
 
@@ -28,6 +32,9 @@ pub struct Fsr {
     /// Made when first used (it compiles its passes), for the depth
     /// direction it was made with.
     context: Option<(FsrContext, bool)>,
+    /// A context being made (compiling its passes takes seconds: frames
+    /// take the bicubic filter meanwhile), for that depth direction.
+    making: Option<(bool, std::thread::JoinHandle<Option<FsrContext>>)>,
     /// The context could not be made: bicubic instead.
     failed: bool,
     sized: Option<Sized>,
@@ -62,20 +69,32 @@ impl Fsr {
         }
         let reversed = scene.camera.reversed;
         if self.context.as_ref().is_none_or(|(_, r)| *r != reversed) {
-            let mut flags = FsrContextFlags::empty();
-            if reversed {
-                flags |= FsrContextFlags::DEPTH_INVERTED;
+            match self.making.take() {
+                Some((r, thread)) if r == reversed && thread.is_finished() => match thread.join().ok().flatten() {
+                    Some(context) => {
+                        log::info!("gpu: FSR 3 upscaler ready");
+                        self.context = Some((context, reversed));
+                        self.sized = None;
+                    }
+                    None => {
+                        self.failed = true;
+                        return None;
+                    }
+                },
+                Some((r, thread)) if r == reversed => {
+                    self.making = Some((r, thread));
+                    return None;
+                }
+                _ => {
+                    let device = device.clone();
+                    let thread = std::thread::Builder::new()
+                        .name("gpu fsr".into())
+                        .spawn(move || make_context(device, reversed))
+                        .expect("spawning the FSR thread");
+                    self.making = Some((reversed, thread));
+                    return None;
+                }
             }
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let context = FsrContext::new(FsrContextInfo { device: device.clone(), flags });
-            if let Some(e) = pollster::block_on(scope.pop()) {
-                log::warn!("gpu: FSR does not work on this GPU, bicubic instead: {e}");
-                self.failed = true;
-                return None;
-            }
-            log::info!("gpu: FSR 3 upscaler ready");
-            self.context = Some((context, reversed));
-            self.sized = None;
         }
         let render = (src.width, src.height);
         let key = (render.0, render.1, size.0, size.1);
@@ -133,6 +152,23 @@ impl Fsr {
     }
 }
 
+/// FSR's passes, compiled; none if they do not work on this GPU.
+fn make_context(device: wgpu::Device, reversed: bool) -> Option<FsrContext> {
+    let mut flags = FsrContextFlags::empty();
+    if reversed {
+        flags |= FsrContextFlags::DEPTH_INVERTED;
+    }
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let context = FsrContext::new(FsrContextInfo { device: device.clone(), flags });
+    match pollster::block_on(scope.pop()) {
+        Some(e) => {
+            log::warn!("gpu: FSR does not work on this GPU, bicubic instead: {e}");
+            None
+        }
+        None => Some(context),
+    }
+}
+
 impl Sized {
     fn new(
         device: &wgpu::Device,
@@ -150,7 +186,9 @@ impl Sized {
                 dimension: wgpu::TextureDimension::D2,
                 format,
                 // (Copied out by the tests.)
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             })
         };
