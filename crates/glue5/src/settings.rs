@@ -74,7 +74,7 @@ pub enum Upscaling {
     /// MetalFX's temporal upscaler (Apple).
     #[serde(rename = "metalfx-temporal")]
     MetalFxTemporal,
-    /// AMD's FSR 3 upscaler (temporal, any GPU).
+    /// AMD's FSR 2 upscaler (temporal, on GPUs with the features it needs).
     Fsr,
 }
 

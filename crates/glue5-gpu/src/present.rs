@@ -104,7 +104,7 @@ pub enum Upscaler {
     /// sub-pixel offsets, the HUD put back over it (Apple GPUs that have
     /// it; bicubic elsewhere).
     MetalFxTemporal = 2,
-    /// AMD's FSR 3 upscaler (temporal, as MetalFX's), on any GPU.
+    /// AMD's FSR 2 upscaler (temporal, as MetalFX's), on GPUs with the features it needs.
     Fsr = 3,
 }
 
@@ -780,14 +780,11 @@ impl Output {
         offscreen: Option<Offscreen>,
         overlay: crate::Overlay,
     ) -> Output {
-        #[cfg(not(target_vendor = "apple"))]
-        let _ = device;
         #[cfg(target_vendor = "apple")]
         let metalfx = crate::metalfx::MetalFx::new(device);
-        // (FSR not on Apple GPUs: see fsr.rs.)
         #[cfg_attr(not(target_vendor = "apple"), allow(unused_mut))]
         let mut upscalers =
-            1 << Upscaler::Bicubic as u8 | (!cfg!(target_vendor = "apple") as u8) << Upscaler::Fsr as u8;
+            1 << Upscaler::Bicubic as u8 | (crate::fsr::Fsr::supported(device) as u8) << Upscaler::Fsr as u8;
         #[cfg(target_vendor = "apple")]
         {
             use crate::metalfx::Kind;
@@ -945,7 +942,7 @@ impl Output {
     /// The frame scaled to the window by the upscaler set, when it is not
     /// the bicubic filter and possible now: its commands, and the images to
     /// show (1:1, see [`Output::compose`]).
-    pub(crate) fn upscale(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, src: &Present) -> Option<Upscaled> {
+    pub(crate) fn upscale(&mut self, device: &wgpu::Device, src: &Present) -> Option<Upscaled> {
         let now = Instant::now();
         // The time between the engine's frames (frame generation shows one
         // between each two).
@@ -959,25 +956,19 @@ impl Output {
             // At most what they are made for; the present pass scales the rest.
             size = temporal_size((src.width, src.height), size);
         }
-        let mut up = self.upscale_into(device, queue, src, size)?;
+        let mut up = self.upscale_into(device, src, size)?;
         up.commands = timed(device, std::mem::take(&mut up.commands));
         Some(up)
     }
 
-    fn upscale_into(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        src: &Present,
-        size: (u32, u32),
-    ) -> Option<Upscaled> {
+    fn upscale_into(&mut self, device: &wgpu::Device, src: &Present, size: (u32, u32)) -> Option<Upscaled> {
         if self.presentation.upscaler() != Upscaler::Fsr {
             self.fsr.release();
         }
         match self.presentation.upscaler() {
             Upscaler::Fsr if size.0 >= src.width => {
                 let (sharpness, dt) = (self.presentation.sharpness(), self.frame_interval.as_secs_f32());
-                let up = self.fsr.upscale(device, queue, src, size, sharpness, dt);
+                let up = self.fsr.upscale(device, src, size, sharpness, dt);
                 // (MetalFX's effects freed.)
                 drop(self.metal_upscale(device, src, size, true));
                 up

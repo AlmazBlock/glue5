@@ -14,8 +14,9 @@ arrayvec = "0.7"
 bcdec_rs = "0.2"
 ctt-etcpak = "0.6"
 bytemuck = "1"
-# AMD FSR 3 upscaler (wgpu-ffx, built for our wgpu: see third_party/).
-wgpu-ffx = { path = "../../third_party/wgpu-ffx" }
+# AMD FSR 2 upscaler, ported to Rust and WGSL, with a wgpu backend.
+sp-fidelity = "0.2"
+sp-fidelity-wgpu = "0.2"
 egui.workspace = true
 egui-wgpu.workspace = true
 png = "0.18"

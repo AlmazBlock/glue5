@@ -256,7 +256,7 @@ fn upscale_fsr_converges_with_the_jitter() {
     let mut errors = Vec::new();
     for jittered in [false, true] {
         let mut fsr = crate::fsr::Fsr::default();
-        errors.push(bench.error(jittered, |p| fsr.upscale(&bench.device, &bench.queue, p, OUTPUT, 0.0, 1.0 / 60.0)));
+        errors.push(bench.error(jittered, |p| fsr.upscale(&bench.device, p, OUTPUT, 0.0, 1.0 / 60.0)));
     }
     println!("FSR: error {:.5} still, {:.5} jittered", errors[0], errors[1]);
     assert!(errors[1] < errors[0] * 0.5, "{errors:?}");
@@ -324,7 +324,7 @@ fn upscale_cost() {
     };
     for input in [(1280, 720), (960, 540)] {
         let mut fsr = crate::fsr::Fsr::default();
-        let ms = frames(input, &mut |p| fsr.upscale(&bench.device, &bench.queue, p, (2560, 1440), 0.5, 1.0 / 60.0));
+        let ms = frames(input, &mut |p| fsr.upscale(&bench.device, p, (2560, 1440), 0.5, 1.0 / 60.0));
         println!("FSR {input:?} -> 2560x1440: {ms:.2} ms");
         #[cfg(target_vendor = "apple")]
         {

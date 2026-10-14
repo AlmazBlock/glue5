@@ -182,7 +182,7 @@ fn run(
         // previous and this one first.
         let mut frames = Vec::new();
         if let (Some(p), Some(out)) = (&batch.present, output.as_mut()) {
-            let (scaled, between) = match out.upscale(&device, &queue, p) {
+            let (scaled, between) = match out.upscale(&device, p) {
                 Some(up) => {
                     buffers.extend(up.commands);
                     (Some(up.image), up.between.map(crate::present::Scaled::Scene))

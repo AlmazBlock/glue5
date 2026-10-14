@@ -282,7 +282,7 @@ The present step scales the back buffer with one of four upscalers (Settings
 | Bicubic (Catmull-Rom) | everywhere | the finished frame |
 | MetalFX (spatial) | Apple GPUs | the finished frame |
 | MetalFX Temporal | Apple GPUs | the scene from several frames, jittered |
-| FSR 3 (AMD, through wgpu-ffx) | GPUs other than Apple's | the same as MetalFX Temporal |
+| FSR 2 (AMD, through sp-fidelity) | GPUs with the features it needs | the same as MetalFX Temporal |
 
 Upscalers run on the submit thread, on the same queue, after the game's
 commands and before the present pass, which draws their result 1:1. MetalFX
@@ -295,7 +295,7 @@ framework requires macOS 13; the iOS requirement remains iOS 16.
 
 What they cost grows with the window's pixels, not the scene's. From
 1280x720 to 2560x1440 on an M1 Pro (`upscale_cost` in `upscale_tests.rs`):
-MetalFX spatial about 2 ms a frame, MetalFX Temporal 4.3, FSR 16. On Apple
+MetalFX spatial about 2 ms a frame, MetalFX Temporal 3-4.3, FSR 5.5-6. On Apple
 GPUs the statistics show the upscalers' GPU time a frame (`upscaling ms
 GPU`), measured between two empty command buffers around their commands
 (wgpu-core gives each pass a command buffer of its own).
@@ -341,7 +341,7 @@ jittered projection (`glue5-gpu/src/scene.rs`).
   measured: `upscale_tests.rs` draws a known pattern jittered, upscales 48
   frames through the real paths and compares them with the pattern
   supersampled. Jittered, MetalFX's error drops from 0.0095 to 0.0022 and
-  FSR's from 0.0078 to 0.0024; with the opposite sign MetalFX's doubles.
+  FSR's from 0.0083 to 0.0010; with the opposite sign MetalFX's doubles.
 
 Temporal upscalers scale by 3x at most: MetalFX's temporal scaler takes no
 more (it crashed at 4x), and FSR is made for that much. Below a third of
@@ -360,16 +360,20 @@ filter, added to the upscaled scene. Where there is no HUD that adds
 nothing; under a translucent panel the scene stays sharp. The HUD itself
 does not enter the upscalers' history, so it leaves no trails.
 
-FSR comes from the wgpu-ffx crate (FSR 3's upscaler as wgpu compute passes,
-SPIR-V), prepared by `mise run setup` with two patches: wgpu 30, and shaders
-naga and Metal accept (no `Coherent` on storage images; four-channel instead
-of two-channel half-float storage images, which Metal cannot read and write).
-wgpu-ffx has no frame generation. Its passes compile on a thread of their
-own when FSR is first chosen (seconds; frames use the bicubic path
-meanwhile). It works on Metal, but is not offered there: from 1280x720 to
-2560x1440 on an M1 Pro it takes 16 ms a frame, 10 of them in its
-accumulation pass as naga translates it, against 4.5 ms for MetalFX's
-temporal scaler.
+FSR comes from sp-fidelity: the FidelityFX SDK's FSR 2.3 ported to Rust
+and WGSL, with a wgpu backend (`glue5-gpu/src/fsr.rs`). It needs device
+features the renderer asks for where the GPU has them (subgroups, texture
+atomics, 16-bit normalized formats, half floats for its FP16 passes), and
+is offered only where it has them all. Making it compiles its passes (5 s
+on an M1 Pro), on a thread of its own; frames use the bicubic path
+meanwhile. Its accumulation pass is most of its time (3.8 of 5.4 ms of
+passes, 1280x720 to 2560x1440 on an M1 Pro). It has no frame generation.
+
+Before it FSR was AMD's FSR 3 upscaler through the wgpu-ffx crate, SPIR-V
+passes translated by naga. It needed patches to run on Metal at all, took
+16 ms a frame on the M1 Pro (10 in its accumulation pass), and its
+accumulation pass read the wrong motion vectors (wgpu-ffx's open pull
+request #28: trails in motion).
 
 ### Frame generation
 

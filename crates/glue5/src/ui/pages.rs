@@ -625,7 +625,7 @@ fn settings_items(
                             Upscaling::Bicubic => "Bicubic",
                             Upscaling::MetalFx => "MetalFX",
                             Upscaling::MetalFxTemporal => "MetalFX Temporal",
-                            Upscaling::Fsr => "FSR 3",
+                            Upscaling::Fsr => "FSR 2",
                         };
                         (u, name)
                     })

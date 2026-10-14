@@ -9,7 +9,6 @@ sources.
 | `wgpu/` | wgpu from crates.io, the version and checksum in `.mise/tasks/setup` (`crates`) | `third_party/wgpu` (ignored by git), used through `[patch.crates-io]` in the workspace manifest |
 | `wgpu-core/` | wgpu-core from crates.io, likewise | `third_party/wgpu-core`, likewise |
 | `wgpu-hal/` | wgpu-hal from crates.io, likewise | `third_party/wgpu-hal`, likewise |
-| `wgpu-ffx/` | wgpu-ffx (AMD's FSR 3 upscaler for wgpu) from crates.io, likewise | `third_party/wgpu-ffx`, a path dependency of `glue5-gpu` |
 
 Each patch message explains the change and its reason. To update an
 upstream dependency, change the submodule commit or `crates` in

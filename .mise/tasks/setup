@@ -12,7 +12,6 @@ crates=(
     "wgpu 30.0.1 527ccdf43dd5b2e8676eed9984ce00e2bbb0a1b85b70c1969dcb6cd2eb55ab9e"
     "wgpu-core 30.0.1 14c018fce9b6270aa203c2fdd56f3cce996713534bd757e4ea58c8560b121f14"
     "wgpu-hal 30.0.1 b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
-    "wgpu-ffx 0.1.0 4a5d4fec8a3ed04c3113f186faf0e8c69b17ad34ba2106fb36a20c58b80ff07d"
 )
 
 # Where the tools live; glue5-game/build.rs looks in the same place.

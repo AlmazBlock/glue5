@@ -149,8 +149,11 @@ pub(crate) const WANTED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPR
     .union(wgpu::Features::ADDRESS_MODE_CLAMP_TO_BORDER)
     .union(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
     .union(wgpu::Features::PIPELINE_CACHE)
-    // FSR (wgpu-ffx) clears its textures.
-    .union(wgpu::Features::CLEAR_TEXTURE);
+    // FSR (sp-fidelity): its luminance pyramid's subgroup operations, the
+    // reconstructed depth's texture atomics, half-float passes where there are.
+    .union(wgpu::Features::SUBGROUP)
+    .union(wgpu::Features::TEXTURE_ATOMIC)
+    .union(wgpu::Features::SHADER_F16);
 
 fn pipeline_cache_name(info: &wgpu::AdapterInfo) -> String {
     format!("pipelines.{:?}.{:x}.{:x}.bin", info.backend, info.vendor, info.device).to_lowercase()
