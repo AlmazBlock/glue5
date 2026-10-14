@@ -4,7 +4,7 @@
 //! |---|---|
 //! | `/game/…` | the game's `data/` directory, read-only, case-insensitive |
 //! | `/userdata/…` | the per-user directory (saves, settings) |
-//! | `/dev/null`, `/dev/urandom`, `/dev/random` | the host's |
+//! | `/dev/null`, `/dev/urandom`, `/dev/random` | none: emulated (Windows has no `/dev`; the engine's network crypto reads `/dev/urandom`) |
 //! | anything else | a scratch tree under the user directory |
 //!
 //! Errors are WASI errno values, which is what Emscripten's libc expects.
@@ -70,7 +70,21 @@ enum Node {
     Stderr,
     File(File),
     Dir(PathBuf),
+    Null,
+    Random,
 }
+
+/// The device at an engine path.
+fn device(path: &str) -> Option<Node> {
+    match path {
+        "/dev/null" => Some(Node::Null),
+        "/dev/urandom" | "/dev/random" => Some(Node::Random),
+        _ => None,
+    }
+}
+
+const DEVICE_STAT: Stat =
+    Stat { dev: 1, ino: 0, mode: S_IFCHR | 0o666, size: 0, atime: UNIX_EPOCH, mtime: UNIX_EPOCH, ctime: UNIX_EPOCH };
 
 struct Open {
     node: Node,
@@ -148,9 +162,6 @@ impl Vfs {
         {
             return Ok(Host { path: self.user.join(rel.trim_start_matches('/')), read_only: false });
         }
-        if matches!(path.as_str(), "/dev/null" | "/dev/urandom" | "/dev/random") {
-            return Ok(Host { path: PathBuf::from(&path), read_only: false });
-        }
         Ok(Host { path: self.scratch.join(path.trim_start_matches('/')), read_only: false })
     }
 
@@ -164,6 +175,9 @@ impl Vfs {
     }
 
     pub fn open(&self, path: &str, flags: u32) -> Result<i32, Errno> {
+        if let Some(node) = device(&normalize(path)) {
+            return self.add(node, path, flags);
+        }
         let host = self.resolve(path)?;
         let write = flags & oflag::ACCMODE != 0 || flags & (oflag::CREAT | oflag::TRUNC) != 0;
         if write && host.read_only {
@@ -197,6 +211,11 @@ impl Vfs {
                 Node::File(file)
             }
         };
+        self.add(node, path, flags)
+    }
+
+    /// Gives an opened node the lowest free descriptor.
+    fn add(&self, node: Node, path: &str, flags: u32) -> Result<i32, Errno> {
         let open = Arc::new(Open { node, path: normalize(path), flags, dir: Mutex::default(), pos: Mutex::default() });
         let mut fds = self.fds.lock().unwrap();
         let fd = match fds.iter().skip(3).position(Option::is_none) {
@@ -241,7 +260,8 @@ impl Vfs {
                     Ok(n)
                 }
             },
-            Node::Stdin => Ok(0),
+            Node::Stdin | Node::Null => Ok(0),
+            Node::Random => getrandom::fill(buf).map(|()| buf.len()).map_err(|_| errno::IO),
             Node::Dir(_) => Err(errno::ISDIR),
             Node::Stdout | Node::Stderr => Err(errno::BADF),
         }
@@ -271,6 +291,7 @@ impl Vfs {
                 crate::gamelog::write(buf);
                 Ok(buf.len())
             }
+            Node::Null | Node::Random => Ok(buf.len()),
             Node::Dir(_) => Err(errno::ISDIR),
             Node::Stdin => Err(errno::BADF),
         }
@@ -302,6 +323,7 @@ impl Vfs {
                 }
                 Ok((dir.next * DIRENT_SIZE) as u64)
             }
+            Node::Null | Node::Random => Ok(0),
             _ => Err(errno::SPIPE),
         }
     }
@@ -326,19 +348,14 @@ impl Vfs {
         match &open.node {
             Node::File(f) => Ok(stat_of(&f.metadata().map_err(io_errno)?)),
             Node::Dir(p) => Ok(stat_of(&fs::metadata(p).map_err(io_errno)?)),
-            _ => Ok(Stat {
-                dev: 1,
-                ino: fd as u64,
-                mode: S_IFCHR | 0o666,
-                size: 0,
-                atime: UNIX_EPOCH,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
-            }),
+            _ => Ok(Stat { ino: fd as u64, ..DEVICE_STAT }),
         }
     }
 
     pub fn stat(&self, path: &str, follow: bool) -> Result<Stat, Errno> {
+        if device(&normalize(path)).is_some() {
+            return Ok(DEVICE_STAT);
+        }
         let host = self.resolve(path)?;
         let meta = if follow { fs::metadata(&host.path) } else { fs::symlink_metadata(&host.path) };
         Ok(stat_of(&meta.map_err(io_errno)?))
@@ -526,4 +543,20 @@ fn normalizes() {
     assert_eq!(normalize("/game/./x64//audio/../data"), "/game/x64/data");
     assert_eq!(normalize("\\game\\x64"), "/game/x64");
     assert_eq!(normalize("/.."), "/");
+}
+
+#[test]
+fn devices() {
+    let dir = std::env::temp_dir().join(format!("glue5-vfs-devices-{}", std::process::id()));
+    fs::create_dir_all(dir.join("game")).unwrap();
+    let vfs = Vfs::new(dir.join("game"), dir.join("user")).unwrap();
+    let mut buf = [0u8; 64];
+    let fd = vfs.open("/dev/urandom", 0).unwrap();
+    assert_eq!(vfs.read(fd, &mut buf, None), Ok(64));
+    assert_ne!(buf, [0; 64]);
+    let fd = vfs.open("/dev/null", oflag::RDWR).unwrap();
+    assert_eq!(vfs.write(fd, b"x", None), Ok(1));
+    assert_eq!(vfs.read(fd, &mut buf, None), Ok(0));
+    assert_eq!(vfs.stat("/dev/random", true).unwrap().mode, S_IFCHR | 0o666);
+    let _ = fs::remove_dir_all(dir);
 }
