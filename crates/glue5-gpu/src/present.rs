@@ -785,6 +785,7 @@ impl Output {
         #[cfg(target_vendor = "apple")]
         let metalfx = crate::metalfx::MetalFx::new(device);
         // (FSR not on Apple GPUs: see fsr.rs.)
+        #[cfg_attr(not(target_vendor = "apple"), allow(unused_mut))]
         let mut upscalers =
             1 << Upscaler::Bicubic as u8 | (!cfg!(target_vendor = "apple") as u8) << Upscaler::Fsr as u8;
         #[cfg(target_vendor = "apple")]

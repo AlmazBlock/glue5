@@ -51,6 +51,8 @@ pub struct Camera {
     pub far: f32,
     /// Vertical field of view, in degrees.
     pub fov_y: f32,
+    /// (Width over height: for MetalFX's frame interpolation.)
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
     pub aspect: f32,
     /// Depth 1 at the near plane, 0 at the far one.
     pub reversed: bool,
