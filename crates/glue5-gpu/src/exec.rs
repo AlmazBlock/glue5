@@ -1249,8 +1249,21 @@ impl Gpu {
         let (used, available) = glue5_runtime::memory::footprint();
         if let Some(used) = used {
             let more = available.map_or(String::new(), |a| format!(", {} MiB more allowed", a >> 20));
-            log::info!("memory: process footprint {} MiB{more}", used >> 20);
+            log::info!("memory: process footprint {} MiB{more}{}", used >> 20, self.gpu_memory());
         }
+    }
+
+    /// What Metal has allocated for the device, all resources included.
+    #[cfg(target_vendor = "apple")]
+    fn gpu_memory(&self) -> String {
+        use objc2_metal::MTLDevice;
+        unsafe { self.device.as_hal::<wgpu::hal::api::Metal>() }
+            .map_or(String::new(), |d| format!(", Metal {} MiB", d.raw_device().currentAllocatedSize() >> 20))
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    fn gpu_memory(&self) -> String {
+        String::new()
     }
 
     /// The passes timed since the last submit, resolved into this one.
