@@ -196,7 +196,7 @@ impl Compiler {
             let key = format!("{interpolation:?}|{remap:?}|{hud_mask}");
             let hud_text = if hud_mask {
                 Some(
-                    shader::with_hud_coordinates(&vs.text)
+                    shader::with_hud_coordinates(&vs.text.get())
                         .ok_or_else(|| anyhow::anyhow!("unexpected HUD mask vertices"))?,
                 )
             } else {

@@ -137,7 +137,7 @@ pub struct Program {
     pub stage: Stage,
     pub label: String,
     /// The WGSL as compiled (constant buffers packed).
-    pub text: String,
+    pub text: Wgsl,
     /// Modules made from it, kept while in use (see [`Modules`]); shared by
     /// the copies of a program with the same text.
     pub modules: Arc<Modules>,
@@ -401,7 +401,7 @@ impl Library {
             hud_mask: false,
             mask: OnceLock::new(),
             copies: Mutex::default(),
-            text,
+            text: Wgsl::new(&text),
         };
         program.layout = program.make_layout(device);
         Ok(program)
@@ -480,9 +480,8 @@ impl Program {
                 let module = create_module(device, "minimap mask", &text).ok()?;
                 let mut p = self.copy();
                 p.hud_mask = true;
-                p.text = text;
                 p.pack = pack;
-                p.bindings = stage_bindings(&p.text, p.stage);
+                p.bindings = stage_bindings(&text, p.stage);
                 p.textures = p
                     .bindings
                     .iter()
@@ -490,10 +489,11 @@ impl Program {
                     .filter(|(_, b)| matches!(b.kind, Kind::Texture { .. }))
                     .map(|(i, _)| i)
                     .collect();
-                p.pairs = sampling_pairs(&p.text);
-                p.locations = ps_input_locations(&p.text);
-                p.interpolation = interpolations(&p.text);
-                p.outputs = fragment_outputs(&p.text);
+                p.pairs = sampling_pairs(&text);
+                p.locations = ps_input_locations(&text);
+                p.interpolation = interpolations(&text);
+                p.outputs = fragment_outputs(&text);
+                p.text = Wgsl::new(&text);
                 p.modules = Arc::new(Modules::with(module));
                 p.layout = p.make_layout(device);
                 Some(Arc::new(p))
@@ -556,7 +556,7 @@ impl Program {
         p.unfiltered = unfiltered | depth;
         if depth != 0 {
             let module =
-                with_depth_reads(&self.text, depth).ok_or_else(|| anyhow::anyhow!("not rewritable")).and_then(|text| {
+                with_depth_reads(&self.text.get(), depth).ok_or_else(|| anyhow::anyhow!("not rewritable")).and_then(|text| {
                     create_module(device, &format!("{} [depth reads]", self.label), &text).map(|m| (text, m))
                 });
             match module {
@@ -569,7 +569,7 @@ impl Program {
                         .filter(|(_, b)| matches!(b.kind, Kind::Texture { .. }))
                         .map(|(i, _)| i)
                         .collect();
-                    p.text = text;
+                    p.text = Wgsl::new(&text);
                     p.modules = Arc::new(Modules::with(module));
                     p.depth = depth;
                 }
@@ -592,7 +592,7 @@ impl Program {
     /// The program's module (made again if released while idle).
     pub fn module(&self, device: &wgpu::Device) -> Option<wgpu::ShaderModule> {
         self.modules.get_or_make("", || {
-            create_module(device, &self.label, &self.text).map_err(|e| log::warn!("gpu: {}: {e:#}", self.label)).ok()
+            create_module(device, &self.label, &self.text.get()).map_err(|e| log::warn!("gpu: {}: {e:#}", self.label)).ok()
         })
     }
 
@@ -604,7 +604,7 @@ impl Program {
         make: impl FnOnce(&str) -> String,
     ) -> Option<wgpu::ShaderModule> {
         self.modules.get_or_make(key, || {
-            let text = make(&self.text);
+            let text = make(&self.text.get());
             let label = format!("{} [{key}]", self.label);
             create_module(device, &label, &text).map_err(|e| log::warn!("gpu: variant {label}: {e:#}")).ok()
         })
@@ -620,6 +620,24 @@ impl Program {
         if let Some(Some(p)) = self.mask.get() {
             p.take_idle_modules(idle, max, out);
         }
+    }
+}
+
+/// A program's WGSL, compressed (LZ4) and shared by its copies. It is
+/// needed again only to make a module released while idle, or a variant;
+/// whole, the game's thousands of programs (often 50-130 KB each) took
+/// about 150 MB.
+#[derive(Clone)]
+pub struct Wgsl(Arc<[u8]>);
+
+impl Wgsl {
+    pub fn new(text: &str) -> Wgsl {
+        Wgsl(lz4_flex::compress_prepend_size(text.as_bytes()).into())
+    }
+
+    pub fn get(&self) -> String {
+        let bytes = lz4_flex::decompress_size_prepended(&self.0).expect("compressed by Wgsl::new");
+        String::from_utf8(bytes).expect("compressed from a str")
     }
 }
 
@@ -1380,7 +1398,7 @@ fn main(@location(1u) v1 : vec4<f32>, @location(5u) v5 : vec4<f32>) -> @location
         let ps = library.prepare(&gpu.device, 0x5c5d5123dfb3dd00, Stage::Pixel).unwrap();
         assert_eq!(vs.locations, [1, 2, 3, 4]);
         assert_eq!(ps.locations, [1, 2, 3]);
-        assert!(!ps.text.contains("@location(5u)"));
+        assert!(!ps.text.get().contains("@location(5u)"));
         let recipe = Recipe::from_json(&serde_json::json!({
             "vs": "6e3b688101fd34ef", "ps": "5c5d5123dfb3dd00",
             "sig": [[1, 0, 0], [2, 0, 1], [3, 0, 2]],

@@ -61,7 +61,7 @@ fn build_compute(
     let program = if subs.is_empty() {
         cs.clone()
     } else {
-        match cs.with_text(device, &shader::with_storage_formats(&cs.text, subs), "uav formats") {
+        match cs.with_text(device, &shader::with_storage_formats(&cs.text.get(), subs), "uav formats") {
             Ok(p) => Arc::new(p),
             Err(e) => {
                 log::warn!("gpu: {}: {e:#}", cs.label);
@@ -1064,7 +1064,7 @@ impl Program {
     pub fn with_text(&self, device: &wgpu::Device, text: &str, what: &str) -> anyhow::Result<Program> {
         let module = shader::create_module(device, &format!("{} [{what}]", self.label), text)?;
         let mut p = self.copy();
-        p.text = text.to_owned();
+        p.text = shader::Wgsl::new(text);
         p.modules = Arc::new(shader::Modules::with(module));
         p.bindings = shader::stage_bindings(text, self.stage);
         p.layout = None;

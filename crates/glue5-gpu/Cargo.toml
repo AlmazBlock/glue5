@@ -14,6 +14,8 @@ arrayvec = "0.7"
 bcdec_rs = "0.2"
 ctt-etcpak = "0.6"
 bytemuck = "1"
+# Shader text kept compressed (see shader::Wgsl).
+lz4_flex = "0.11"
 # AMD FSR 2 upscaler, ported to Rust and WGSL, with a wgpu backend.
 sp-fidelity = "0.2"
 sp-fidelity-wgpu = "0.2"
