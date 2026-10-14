@@ -10,6 +10,7 @@ mod compile;
 mod mangle;
 mod module;
 mod ordering;
+mod page_map;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -111,6 +112,7 @@ fn run() -> Result<()> {
     let mut texts: Vec<Option<String>> = vec![None; sources.len()];
     apply_hooks(&hooks, &sources, &mut texts)?;
     ordering::apply(&sources, &mut texts)?;
+    page_map::apply(&sources, &mut texts)?;
     for (source, text) in sources.iter_mut().zip(texts) {
         if let Some(text) = text {
             let patched = source.with_extension("hooked.c");

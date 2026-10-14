@@ -130,6 +130,10 @@ impl Config {
         args.push(format!("-height={}", self.height));
         args.push("-forceResolution".into());
         args.extend(["-Script_all=warning", "-replay_all=warning", "-fastscriptcore"].map(String::from));
+        // Resources stay where they were placed: some have their page map
+        // outside them (glue5-game's build/page_map.rs), which a move would
+        // look for inside them. The engine does not move them here anyway.
+        args.push("-nodefrag".into());
         // This build is a BankRelease one: its debug pad took the first pad to
         // send input, and START and Back with it (START never opened the
         // pause menu, and after it the pad's other buttons went to the debug
