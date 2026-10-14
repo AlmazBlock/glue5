@@ -94,7 +94,9 @@ own threads on an iPhone 16 Pro, 23 % after), and let a command buffer be
 suspended and resumed (for wgpu-core's one per pass). With one command
 buffer per pass, the game's benchmark ran 5 % faster on a Pixel 8a, 15 %
 in the scenes where memory runs short, and its encoding took 12-14 ms a
-frame instead of 17-23. We would like to submit these changes upstream.
+frame instead of 17-23; on an iPhone 16 Pro (with the Metal command buffers
+made when needed) it ran 5 % faster, 63.1 and 60.8 fps against 60.0 and
+57.8, submitting 28 % shorter. We would like to submit these changes upstream.
 
 ## Game files are never in the app
 
