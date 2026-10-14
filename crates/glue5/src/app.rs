@@ -577,6 +577,7 @@ impl App {
                 max_fps: s.max_fps,
                 online: (self.mode == Mode::Online)
                     .then(|| glue5_runtime::Online { name: s.online_name.trim().into(), lobby: s.lobby() }),
+                language: preferred_language(),
             },
             glue5_gpu::backend(gpu_settings, Some(screen)),
         )?;
@@ -763,6 +764,27 @@ fn wait_event(events: &mut sdl3::EventPump, timeout: Duration) -> Option<Event> 
 fn window_refresh_rate(window: &sdl3::video::Window) -> f32 {
     let rate = window.get_display().ok().and_then(|d| d.get_mode().ok()).map_or(0.0, |m| m.refresh_rate);
     if rate > 0.0 { rate } else { 60.0 }
+}
+
+/// The system's preferred language as a tag like `it-IT`, for the game
+/// (phones have no `$LANG`).
+fn preferred_language() -> Option<String> {
+    use std::ffi::CStr;
+    let mut count = 0;
+    let locales = unsafe { sdl3::sys::locale::SDL_GetPreferredLocales(&mut count) };
+    if locales.is_null() {
+        return None;
+    }
+    let first = unsafe { (count > 0).then(|| &**locales) };
+    let tag = first.filter(|l| !l.language.is_null()).map(|l| {
+        let language = unsafe { CStr::from_ptr(l.language) }.to_string_lossy();
+        match l.country.is_null() {
+            true => language.into_owned(),
+            false => format!("{language}-{}", unsafe { CStr::from_ptr(l.country) }.to_string_lossy()),
+        }
+    });
+    unsafe { sdl3::sys::stdinc::SDL_free(locales.cast()) };
+    tag
 }
 
 fn upscaler(settings: &Settings) -> Upscaler {

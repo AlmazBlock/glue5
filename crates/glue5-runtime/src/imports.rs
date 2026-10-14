@@ -242,9 +242,10 @@ fn em_asm_args(m: Mem, mut sig: u64, mut buf: u64) -> Vec<u64> {
 }
 
 fn language() -> String {
-    std::env::var("LANG")
-        .ok()
-        .and_then(|l| l.split('.').next().map(|l| l.replace('_', "-")))
+    rt().config
+        .language
+        .clone()
+        .or_else(|| std::env::var("LANG").ok().and_then(|l| l.split('.').next().map(|l| l.replace('_', "-"))))
         .filter(|l| !l.is_empty() && l != "C" && l != "POSIX")
         .unwrap_or_else(|| "en-US".into())
 }

@@ -195,6 +195,7 @@ fn main() -> Result<()> {
             max_fps: args.fps,
             benchmark: args.benchmark,
             online: args.online.map(|name| glue5_runtime::Online { name, lobby: args.lobby }),
+            language: None,
         },
         gpu,
     )?;

@@ -100,6 +100,9 @@ pub struct Config {
     pub benchmark: bool,
     /// GTA Online in a lobby, instead of story mode or the sandbox.
     pub online: Option<Online>,
+    /// The game's language, as a tag like `it-IT` (the engine matches the
+    /// whole tag, then the language alone). `None`: `$LANG`, else English.
+    pub language: Option<String>,
 }
 
 /// How the game plays online.
