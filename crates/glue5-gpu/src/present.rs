@@ -52,7 +52,7 @@ const COMPOSITE_WGSL: &str = "@group(0) @binding(0) var scene_up: texture_2d<f32
 @group(0) @binding(3) var smp: sampler;
 @fragment fn fs(v: V) -> @location(0) vec4f {
   let hud = bicubic(frame, v.uv) - bicubic(scene, v.uv);
-  let up = textureSampleLevel(scene_up, smp, v.uv, 0.0).rgb;
+  let up = bicubic(scene_up, v.uv);
   return vec4f(clamp(up + hud, vec3f(0.0), vec3f(1.0)), 1.0);
 }";
 
@@ -472,7 +472,6 @@ impl Display {
         };
         Some(Frame { texture, format, image: Image::Drawable(drawable) })
     }
-
 }
 
 /// The present pass's pipelines, for the format they draw into.
@@ -558,7 +557,12 @@ impl Passes {
 
 /// A pipeline drawing a full-screen triangle with `fs` (and the bicubic
 /// filter, see `COMMON_WGSL`) into `format`.
-fn present_pipeline(device: &wgpu::Device, label: &str, fs: &str, format: TextureFormat) -> Option<wgpu::RenderPipeline> {
+fn present_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    fs: &str,
+    format: TextureFormat,
+) -> Option<wgpu::RenderPipeline> {
     let module = crate::shader::create_module(device, label, &format!("{COMMON_WGSL}{fs}")).ok()?;
     Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -639,6 +643,21 @@ pub struct Output {
     frame_interval: Duration,
     #[cfg(target_vendor = "apple")]
     metalfx: crate::metalfx::MetalFx,
+}
+
+/// The most a temporal upscaler scales by (MetalFX's temporal scaler and
+/// FSR are made for 3x at most: past it MetalFX's crashes, and both lack
+/// the samples to fill the pixels steadily).
+pub(crate) const TEMPORAL_SCALE: f32 = 3.0;
+
+/// The size a temporal upscaler makes of `input` for a window rect of
+/// `size`: `size`, or less, `TEMPORAL_SCALE` times the input at most.
+fn temporal_size(input: (u32, u32), size: (u32, u32)) -> (u32, u32) {
+    let k = (TEMPORAL_SCALE * input.0 as f32 / size.0 as f32).min(TEMPORAL_SCALE * input.1 as f32 / size.1 as f32);
+    if k >= 1.0 {
+        return size;
+    }
+    ((size.0 as f32 * k).round() as u32, (size.1 as f32 * k).round() as u32)
 }
 
 /// What an upscaler made of a frame.
@@ -740,7 +759,6 @@ impl Output {
         let fps = self.presentation.0.frame_rate.load(Ordering::Relaxed);
         Duration::from_secs_f64(1.0 / if fps > 0 { fps } else { 60 } as f64)
     }
-
 
     /// The next frame to draw into (none while the window has no area or
     /// its surface is being replaced).
@@ -875,7 +893,21 @@ impl Output {
             self.frame_interval = if self.frame_interval.is_zero() { dt } else { (self.frame_interval * 7 + dt) / 8 };
         }
         let rect = fit((src.width, src.height), self.presentation.size());
-        let size = (rect.2, rect.3);
+        let mut size = (rect.2, rect.3);
+        if self.presentation.upscaler().is_temporal() {
+            // At most what they are made for; the present pass scales the rest.
+            size = temporal_size((src.width, src.height), size);
+        }
+        self.upscale_into(device, queue, src, size)
+    }
+
+    fn upscale_into(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        src: &Present,
+        size: (u32, u32),
+    ) -> Option<Upscaled> {
         if self.presentation.upscaler() != Upscaler::Fsr {
             self.fsr.release();
         }
@@ -892,7 +924,13 @@ impl Output {
     }
 
     #[cfg(target_vendor = "apple")]
-    fn metal_upscale(&mut self, device: &wgpu::Device, src: &Present, size: (u32, u32), none: bool) -> Option<Upscaled> {
+    fn metal_upscale(
+        &mut self,
+        device: &wgpu::Device,
+        src: &Present,
+        size: (u32, u32),
+        none: bool,
+    ) -> Option<Upscaled> {
         use crate::metalfx::Kind;
         let kind = match self.presentation.upscaler() {
             _ if none => None,
@@ -994,7 +1032,12 @@ impl Gpu {
         // upscaler wants them.
         let wanted = self.presentation.as_ref().is_some_and(Presentation::wants_scene);
         let size = self.objs.tex(id).map(|t| (t.width, t.height));
-        self.scene.next_frame(wanted, id, size);
+        // How much the upscaler scales: the window's height over the scene's.
+        let scale = match (&self.presentation, size) {
+            (Some(p), Some((_, h))) => (p.size().1 as f32 / h.max(1) as f32).clamp(1.0, TEMPORAL_SCALE),
+            _ => 1.0,
+        };
+        self.scene.next_frame(wanted, id, size, scale);
         self.stats.presents += 1;
         if self.last_stats.elapsed() >= Duration::from_secs(10) {
             self.total_presents += self.stats.presents;
@@ -1113,6 +1156,13 @@ pub fn write_png(path: &Path, data: &[u8], width: u32, height: u32, bpr: u32, fo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn temporal_sizes() {
+        assert_eq!(super::temporal_size((1280, 720), (2560, 1440)), (2560, 1440));
+        assert_eq!(super::temporal_size((640, 360), (2560, 1440)), (1920, 1080));
+        assert_eq!(super::temporal_size((1280, 720), (1280, 720)), (1280, 720));
+    }
+
     #[test]
     fn present_shaders_validate() {
         for fs in [super::PRESENT_WGSL, super::COMPOSITE_WGSL] {

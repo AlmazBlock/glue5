@@ -6,7 +6,7 @@
 //! told, which this pins down. Needs a GPU, so ignored by default:
 //! `cargo test -r -p glue5-gpu -- --ignored upscale`.
 
-use crate::scene::{Camera, PHASES, SceneInputs, halton};
+use crate::scene::{Camera, SceneInputs, halton, phases};
 use crate::submit::Present;
 
 const INPUT: (u32, u32) = (640, 360);
@@ -183,7 +183,10 @@ impl Bench {
                 view: &motion.create_view(&Default::default()),
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth.create_view(&Default::default()),
@@ -194,7 +197,7 @@ impl Bench {
         }));
         self.queue.submit([encoder.finish()]);
         (0..FRAMES).map(move |i| {
-            let phase = i % PHASES + 1;
+            let phase = i % phases(2.0) + 1;
             let jitter = if jittered { [halton(phase, 2) - 0.5, halton(phase, 3) - 0.5] } else { [0.0; 2] };
             self.draw(&color, jitter, 1);
             let camera = Camera { near: 0.15, far: 1000.0, fov_y: 60.0, aspect: 16.0 / 9.0, reversed: true };
@@ -220,11 +223,7 @@ impl Bench {
     fn error(&self, jittered: bool, mut upscale: impl FnMut(&Present) -> Option<crate::present::Upscaled>) -> f32 {
         let mut last = None;
         for frame in self.frames(jittered) {
-            // (Effects are made once their sizes have held a moment.)
-            let up = upscale(&frame).or_else(|| {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                upscale(&frame)
-            });
+            let up = ready(&mut upscale, &frame);
             let up = up.expect("upscaled");
             self.queue.submit(up.commands);
             let crate::present::Scaled::Scene(view) = up.image else { panic!("not the scene") };
@@ -233,6 +232,21 @@ impl Bench {
         let out = self.read(&last.unwrap());
         out.iter().zip(&self.truth).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() / out.len() as f32
     }
+}
+
+/// What `upscale` makes of `frame`, once it has made its effects (they
+/// wait for their sizes to hold a moment, FSR compiles on a thread).
+fn ready(
+    upscale: &mut dyn FnMut(&Present) -> Option<crate::present::Upscaled>,
+    frame: &Present,
+) -> Option<crate::present::Upscaled> {
+    for _ in 0..200 {
+        if let Some(up) = upscale(frame) {
+            return Some(up);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    None
 }
 
 #[test]

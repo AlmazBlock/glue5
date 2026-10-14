@@ -313,7 +313,14 @@ impl Slot {
                 self.failed = Some(key);
                 return None;
             };
-            log::info!("gpu: MetalFX {:?} {}x{} -> {}x{}", key.kind, key.input.0, key.input.1, key.output.0, key.output.1);
+            log::info!(
+                "gpu: MetalFX {:?} {}x{} -> {}x{}",
+                key.kind,
+                key.input.0,
+                key.input.1,
+                key.output.0,
+                key.output.1
+            );
             self.made = Some(made);
             commands.push(clear);
         }
@@ -386,7 +393,8 @@ fn make(
     // What MetalFX needs of its outputs (render target, shader writes); the
     // present pass samples them, the interpolator reads them.
     // (Copied out by the tests.)
-    let mut usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+    let mut usage =
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
     if needs.contains(MTLTextureUsage::ShaderWrite) {
         usage |= wgpu::TextureUsages::STORAGE_BINDING;
     }
@@ -431,4 +439,3 @@ fn color_texture(texture: &wgpu::Texture) -> Option<Retained<ProtocolObject<dyn 
     };
     raw.newTextureViewWithPixelFormat(plain)
 }
-

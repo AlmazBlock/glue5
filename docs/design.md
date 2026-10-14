@@ -323,7 +323,9 @@ jittered projection (`glue5-gpu/src/scene.rs`).
   people moving on their own get the camera's motion; the upscalers' own
   checks catch most of it. A camera jump of more than 8 m or 45° resets the
   history.
-- **Jitter.** A Halton (2, 3) sequence of 32 offsets within a pixel. It is
+- **Jitter.** A Halton (2, 3) sequence of offsets within a pixel, 8 × the
+  scale² long (8 at 1x, 32 at 2x, 64 at 3x, as FSR does), so each output
+  pixel gets samples all over its share of an input pixel. It is
   added to gWorldViewProj in the copy of each draw's constants for draws
   into scene-sized targets whose matrix is a perspective one. Full-screen
   passes (orthographic) stay where they are: lighting and post-processing
@@ -333,6 +335,17 @@ jittered projection (`glue5-gpu/src/scene.rs`).
   frames through the real paths and compares them with the pattern
   supersampled. Jittered, MetalFX's error drops from 0.0095 to 0.0022 and
   FSR's from 0.0078 to 0.0024; with the opposite sign MetalFX's doubles.
+
+Temporal upscalers scale by 3x at most: MetalFX's temporal scaler takes no
+more (it crashed at 4x), and FSR is made for that much. Below a third of
+the window (the render scale goes down to 25 %), they make 3x the scene and
+the present pass's bicubic filter scales the rest.
+
+The history goes on from frame to frame while each has its scene. It did
+not at first: the renderer looked for the previous frame's scene after the
+present had taken it, so every frame restarted the history (and gave the
+upscalers no motion). They showed each frame alone, jittered: at a 25 %
+render scale the scene shook by up to two pixels of the window.
 
 The HUD goes back over the upscaled scene as what it changed in the back
 buffer: the final back buffer minus the scene copy, both through the bicubic

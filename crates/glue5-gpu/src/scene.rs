@@ -59,8 +59,15 @@ pub struct Camera {
 /// A 4x4 matrix as the engine stores it: rows, for row vectors (v · M).
 type Mat = [[f64; 4]; 4];
 
-/// Jitter phases before the sequence repeats.
-pub(crate) const PHASES: u32 = 32;
+/// Jitter phases before the sequence repeats, at 1x: eight per output
+/// pixel's share of an input pixel (8 * scale², as FSR does), so each one
+/// gets samples all over it before the history fades.
+pub(crate) const PHASES: u32 = 8;
+
+/// The jitter phases for an upscaler scaling by `scale`.
+pub(crate) fn phases(scale: f32) -> u32 {
+    ((PHASES as f32 * scale * scale).ceil() as u32).clamp(PHASES, 8 * PHASES)
+}
 
 /// The camera moved this far (m) or turned this much (cosine) between two
 /// frames: a cut, nothing to accumulate.
@@ -137,11 +144,14 @@ pub struct Scene {
     pipeline: Option<(wgpu::RenderPipeline, wgpu::Buffer)>,
     /// Drawn this frame, for its present.
     pub done: Option<SceneInputs>,
+    /// This frame had its scene drawn (`done` is taken by its present).
+    drawn: bool,
 }
 
 impl Scene {
-    /// A frame starts (after a present): its jitter, if wanted.
-    pub fn next_frame(&mut self, wanted: bool, back_buffer: u32, size: Option<(u32, u32)>) {
+    /// A frame starts (after a present): its jitter, if wanted, for an
+    /// upscaler scaling by `scale`.
+    pub fn next_frame(&mut self, wanted: bool, back_buffer: u32, size: Option<(u32, u32)>, scale: f32) {
         if !wanted {
             self.prev = None;
             self.targets = None;
@@ -150,14 +160,16 @@ impl Scene {
         self.back_buffer = back_buffer;
         // A frame without a scene (a menu over everything) or of another
         // size breaks the history.
-        if self.size != size || self.done.is_none() {
+        if self.size != size || !self.drawn {
             self.prev = None;
         }
+        self.drawn = false;
         self.size = size;
         self.view = None;
         self.done = None;
-        self.phase = (self.phase + 1) % PHASES;
-        self.jitter = if wanted { [halton(self.phase + 1, 2) - 0.5, halton(self.phase + 1, 3) - 0.5] } else { [0.0; 2] };
+        self.phase = (self.phase + 1) % phases(scale);
+        self.jitter =
+            if wanted { [halton(self.phase + 1, 2) - 0.5, halton(self.phase + 1, 3) - 0.5] } else { [0.0; 2] };
     }
 
     /// This frame's camera is still to be found.
@@ -179,9 +191,8 @@ impl Scene {
         if self.view.is_some() || matrices.len() < 64 {
             return;
         }
-        let m = |i: usize| -> Mat {
-            std::array::from_fn(|r| std::array::from_fn(|c| matrices[i * 16 + r * 4 + c] as f64))
-        };
+        let m =
+            |i: usize| -> Mat { std::array::from_fn(|r| std::array::from_fn(|c| matrices[i * 16 + r * 4 + c] as f64)) };
         let (world, world_view, wvp, view_inverse) = (m(0), m(1), m(2), m(3));
         if !perspective(&wvp) {
             return;
@@ -222,7 +233,8 @@ impl Gpu {
         }
         let (Some(size), Some(view)) = (sc.size, sc.view) else { return };
         let (bb, depth_id) = (sc.back_buffer, sc.depth_target);
-        let Some(color_src) = self.objs.tex(bb).filter(|t| (t.width, t.height) == size).map(|t| (t.tex.clone(), t.format))
+        let Some(color_src) =
+            self.objs.tex(bb).filter(|t| (t.width, t.height) == size).map(|t| (t.tex.clone(), t.format))
         else {
             return;
         };
@@ -275,6 +287,7 @@ impl Gpu {
         let (depth_view, motion_view, color) = (t.depth_view.clone(), t.motion_view.clone(), t.color.clone());
         sc.prev = Some(view);
         sc.done = Some(inputs);
+        sc.drawn = true;
         self.uploads.buffer(&uniforms, 0, bytemuck::cast_slice(&data));
         let src = depth_src.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2),
@@ -302,7 +315,10 @@ impl Gpu {
                 view: &motion_view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth_view,
@@ -335,9 +351,10 @@ impl Targets {
         // The colour as stored (an sRGB back buffer holds it encoded, as
         // the upscalers and the present pass want it).
         let color = make("scene colour", format.remove_srgb_suffix(), wgpu::TextureUsages::COPY_DST);
-        let depth = make("scene depth", wgpu::TextureFormat::Depth32Float, wgpu::TextureUsages::RENDER_ATTACHMENT);
         let motion = make("scene motion", wgpu::TextureFormat::Rg16Float, wgpu::TextureUsages::RENDER_ATTACHMENT);
-        let (depth_view, motion_view) = (depth.create_view(&Default::default()), motion.create_view(&Default::default()));
+        let depth = make("scene depth", wgpu::TextureFormat::Depth32Float, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let (depth_view, motion_view) =
+            (depth.create_view(&Default::default()), motion.create_view(&Default::default()));
         Targets { size, format, color, depth, motion, depth_view, motion_view }
     }
 }
@@ -479,10 +496,12 @@ mod tests {
     fn halton_in_unit_interval() {
         assert_eq!(halton(1, 2), 0.5);
         assert!((halton(2, 3) - 2.0 / 3.0).abs() < 1e-6);
-        assert!((1..=PHASES).all(|i| (0.0..1.0).contains(&halton(i, 3))));
+        assert!((1..=phases(3.0)).all(|i| (0.0..1.0).contains(&halton(i, 3))));
+        assert_eq!((phases(1.0), phases(2.0), phases(3.0)), (8, 32, 64));
     }
 
     #[test]
+    #[allow(clippy::excessive_precision)]
     fn camera_from_the_engine_constants() {
         // gWorld, gWorldView, gWorldViewProj, gViewInverse of a draw (logged in the sandbox).
         #[rustfmt::skip]
@@ -500,6 +519,26 @@ mod tests {
         assert!((v.camera.near - 0.15).abs() < 0.01, "{:?}", v.camera);
         assert!((v.camera.fov_y - 10.0).abs() < 0.1, "{:?}", v.camera);
         assert_eq!(s.depth_target, 7);
+    }
+
+    /// The history goes on from frame to frame while each has its scene
+    /// (its present takes `done`), and breaks after one without.
+    #[test]
+    fn history_across_frames() {
+        let mut s = Scene::default();
+        s.next_frame(true, 1, Some((64, 36)), 2.0);
+        s.prev = Some(View {
+            view_proj: [[0.0; 4]; 4],
+            position: [0.0; 3],
+            forward: [0.0, 0.0, -1.0],
+            camera: Camera::default(),
+        });
+        s.drawn = true;
+        s.done.take();
+        s.next_frame(true, 1, Some((64, 36)), 2.0);
+        assert!(s.prev.is_some(), "kept after a frame with its scene");
+        s.next_frame(true, 1, Some((64, 36)), 2.0);
+        assert!(s.prev.is_none(), "broken after a frame without");
     }
 
     #[test]
