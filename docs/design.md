@@ -104,8 +104,9 @@ instead of in one of their own (one raw command buffer per pass, not two),
 reducing CPU work during pass encoding, memory use and stalls between
 threads. The wgpu-hal patches make occlusion queries count samples on Metal
 and Vulkan, as D3D11's do (the game measures the sun's visibility with
-them), make the depth bias a pass's state, and keep Vulkan command pools to
-the command buffers their last use needed (on Mali each holds ~0.4 MB of
+them), and reset them on Metal before reuse (a slot no draw wrote kept an
+older query's count: the lens flare showed through walls), make the depth
+bias a pass's state, and keep Vulkan command pools to the command buffers their last use needed (on Mali each holds ~0.4 MB of
 host memory), and make a Metal command buffer only when a command needs it
 (wgpu-core's barrier buffer before each pass is empty on Metal, and Metal
 charges per command buffer: 30 % of the process's CPU time went to Metal's
