@@ -194,6 +194,20 @@ pub(crate) unsafe extern "C" fn ros_privilege(_env: *mut Env, _creds: u64, id: u
     (id < 32 && PRIVILEGES >> id & 1 != 0) as u32
 }
 
+/// Hook for `rage::rlRosCredentials::HasPrivilegeEndDate(rlRosPrivilegeId,
+/// bool*, unsigned long*)`: no privilege ends. Without credentials the
+/// engine answers the same after an error line, and CNetwork asks every
+/// frame.
+pub(crate) unsafe extern "C" fn ros_privilege_end_date(
+    _env: *mut Env,
+    _creds: u64,
+    _id: u32,
+    _ends: u64,
+    _date: u64,
+) -> u32 {
+    0
+}
+
 /// The profile setting that says the story's prologue is done, which GTA
 /// Online asks for.
 const PROLOGUE_COMPLETE: u32 = 903;
@@ -391,6 +405,7 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.bail_on_multiplayer = Some(bail_on_multiplayer);
     hooks.rl_pc_initialized = Some(rl_pc_initialized);
     hooks.ros_privilege = Some(ros_privilege);
+    hooks.ros_privilege_end_date = Some(ros_privilege_end_date);
     hooks.profile_setting_int = Some(profile_setting_int);
     hooks.bad_pack_order = Some(bad_pack_order);
     hooks.savemigration_mp_enabled = Some(savemigration_mp_enabled);

@@ -13,6 +13,7 @@
     // network features, the mugshot photo.
     ("bail_on_multiplayer", "CLiveManager::BailOnMultiplayer(eBailReason, int)"),
     ("ros_privilege", "rage::rlRosCredentials::HasPrivilege(rage::rlRosPrivilegeId) const"),
+    ("ros_privilege_end_date", "rage::rlRosCredentials::HasPrivilegeEndDate(rage::rlRosPrivilegeId, bool*, unsigned long*) const"),
     ("profile_setting_int", "CProfileSettings::GetInt(CProfileSettings::ProfileSettingId)"),
     ("can_access_network_features", "CNetwork::CanAccessNetworkFeatures(eNetworkAccessArea, eNetworkAccessCode*)"),
     ("can_enter_multiplayer", "CNetworkSession::CanEnterMultiplayer()"),
