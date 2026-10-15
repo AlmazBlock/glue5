@@ -101,6 +101,8 @@ pub(crate) struct Mark {
     passes: u64,
     epoch: u64,
     busy: Duration,
+    /// When a frame was last taken.
+    at: Option<Instant>,
     /// When the memory was last added up.
     memory_at: Option<Instant>,
 }
@@ -113,13 +115,16 @@ impl Mark {
     pub(crate) fn frame(&mut self, ms: f32, draws: u64, passes: u64, busy: Duration, epoch: u64) -> bool {
         let mut live = LIVE.lock().unwrap();
         push(&mut live.frame_ms, ms);
-        // The statistics' counters restart at each log.
-        if draws < self.draws || passes < self.passes || busy < self.busy {
-            self.reset();
+        // The statistics' counters restart at each log, and nothing was
+        // taken while the overlay was off: what they hold then is not this
+        // frame's, so it only becomes the base (the last figures stay).
+        let fresh = self.at.is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+        self.at = Some(Instant::now());
+        if fresh && draws >= self.draws && passes >= self.passes && busy >= self.busy {
+            push(&mut live.render_ms, (busy - self.busy).as_secs_f32() * 1000.0);
+            let submits = epoch.saturating_sub(self.epoch);
+            live.counts = ((draws - self.draws) as u32, (passes - self.passes) as u32, submits as u32);
         }
-        push(&mut live.render_ms, (busy - self.busy).as_secs_f32() * 1000.0);
-        let submits = if self.epoch == 0 { 0 } else { epoch.saturating_sub(self.epoch) };
-        live.counts = ((draws - self.draws) as u32, (passes - self.passes) as u32, submits as u32);
         (self.draws, self.passes, self.busy, self.epoch) = (draws, passes, busy, epoch);
         let due = self.memory_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
         if due {
@@ -131,6 +136,7 @@ impl Mark {
     /// Starts over (the statistics' counters were reset).
     pub(crate) fn reset(&mut self) {
         (self.draws, self.passes, self.busy) = (0, 0, Duration::ZERO);
+        self.at = None;
     }
 }
 
