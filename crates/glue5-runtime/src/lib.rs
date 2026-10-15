@@ -8,6 +8,7 @@
 pub mod audio;
 mod audio_update;
 mod cloud;
+pub mod cpu;
 mod device_reset;
 mod dht;
 pub mod exit;
