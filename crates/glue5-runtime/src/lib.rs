@@ -256,6 +256,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     let mut hooks = glue5_game::Hooks::default();
     input::hooks(&mut hooks);
     exit::hooks(&mut hooks);
+    gamelog::hooks(&mut hooks);
     memory::hooks(&mut hooks);
     skin::hooks(&mut hooks);
     shader_settings::hooks(&mut hooks);

@@ -18,6 +18,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync
 use std::thread;
 use std::time::Duration;
 
+use glue5_game::{Env, orig};
+
 /// Queued writes before new ones are dropped (the writer only falls this far
 /// behind on a terminal that cannot keep up).
 const QUEUE: usize = 1 << 16;
@@ -166,6 +168,23 @@ impl Write for Logcat {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Hook for `rage::netLogImpl::Flush(bool)`. The network's logs go to their
+/// files from a spool thread, one of the network's threads, which the
+/// engine skips out of GTA Online (imports.rs, `keepThreads`). A flush that
+/// waits for it (`wait`) waited forever once a log had queued a buffer, and
+/// the session's shutdown flushes so: loading a save or starting a new game
+/// from the pause menu hung there. Without the thread nothing waits.
+pub(crate) unsafe extern "C" fn net_log_flush(env: *mut Env, log: u64, _wait: u32) {
+    unsafe { orig::net_log_flush(env, log, 0) }
+}
+
+/// This module's hooks.
+pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    if crate::rt().config.online.is_none() {
+        hooks.net_log_flush = Some(net_log_flush);
     }
 }
 
