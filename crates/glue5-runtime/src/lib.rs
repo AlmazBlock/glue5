@@ -19,6 +19,7 @@ mod imports;
 pub mod input;
 pub mod memory;
 mod online;
+mod overlay;
 mod p2p;
 pub mod qos;
 mod readback;

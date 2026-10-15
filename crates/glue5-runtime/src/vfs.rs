@@ -154,7 +154,7 @@ impl Vfs {
             }
             let real = self.game_index.get(&rel.to_ascii_lowercase()).map_or(rel, String::as_str);
             let real = self.game.join(real);
-            let path = crate::online::game_file_overlay(rel, &real, &self.scratch).unwrap_or(real);
+            let path = crate::overlay::game_file(rel, &real, &self.scratch).unwrap_or(real);
             return Ok(Host { path, read_only: true });
         }
         if let Some(rel) = path.strip_prefix("/userdata")

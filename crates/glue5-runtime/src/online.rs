@@ -14,7 +14,7 @@
 //! services would pass, passed here.
 
 use std::ffi::c_void;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use glue5_game::{Env, orig};
 
@@ -349,42 +349,11 @@ pub(crate) unsafe extern "C" fn script_program_loaded(env: *mut Env, this: u64, 
     program
 }
 
-/// Game files changed for GTA Online without Rockstar's services: where
-/// the file at `rel` (under the game's `data/`) is one, the changed copy
-/// (made once, in `scratch`). Same length as the original: the engine may
-/// size its reads from the game's manifest.
-pub(crate) fn game_file_overlay(
-    rel: &str,
-    real: &std::path::Path,
-    scratch: &std::path::Path,
-) -> Option<std::path::PathBuf> {
-    crate::rt().config.online.as_ref()?;
-    type Patch = fn(String) -> Option<String>;
-    const OVERLAYS: [(&str, Patch); 1] = [("common/data/gameconfig.xml", more_broadcast_data)];
-    static MADE: Mutex<Vec<(&str, Option<std::path::PathBuf>)>> = Mutex::new(Vec::new());
-    let (name, patch) = OVERLAYS.iter().find(|(name, _)| rel.eq_ignore_ascii_case(name))?;
-    let mut made = MADE.lock().unwrap();
-    if let Some((_, path)) = made.iter().find(|(n, _)| n == name) {
-        return path.clone();
-    }
-    let path = (|| {
-        let text = std::fs::read_to_string(real).ok()?;
-        let patched = patch(text.clone()).filter(|p| p.len() == text.len())?;
-        let path = scratch.join("online").join(real.file_name()?);
-        std::fs::create_dir_all(path.parent()?).ok()?;
-        std::fs::write(&path, patched).ok()?;
-        log::info!("online: {rel} changed");
-        Some(path)
-    })();
-    made.push((name, path.clone()));
-    path
-}
-
 /// gameconfig.xml: the scripts are a later version than the game data, and
 /// freemode registers more large player broadcast data blocks than it
 /// provides (the engine quits when they run out): the two largest sizes get
 /// more instances.
-fn more_broadcast_data(text: String) -> Option<String> {
+pub(crate) fn more_broadcast_data(text: String) -> Option<String> {
     let start = text.find("<PlayerBroadcastData>")?;
     let end = start + text[start..].find("</PlayerBroadcastData>")?;
     let mut block = text[start..end].to_string();
