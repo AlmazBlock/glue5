@@ -8,4 +8,8 @@
     // counts as loaded. The hash names the dictionary in the store.
     ("script_txd_loaded", "graphics_commands::HasStreamedTxdLoaded(char const*)"),
     ("hash_string", "rage::atHashStringNamespaceSupport::ComputeHash(rage::atHashStringNamespaces, char const*)"),
+    // REQUEST_SCRIPT and HAS_SCRIPT_LOADED: scripts for places the game
+    // data lacks are never loaded.
+    ("script_request", "script_commands::RequestScript(char const*)"),
+    ("script_loaded", "script_commands::HasScriptLoaded(char const*)"),
 ]

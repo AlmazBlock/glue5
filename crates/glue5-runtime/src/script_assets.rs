@@ -17,12 +17,42 @@
 //!
 //! Either counts as loaded for the scripts here: they go on without those
 //! sounds or textures.
+//!
+//! Whole places are missing too: GTA Online's "simple interiors" (the
+//! casino, bunkers, hangars, nightclubs, the arcade...), DLC from 2016 on.
+//! Freemode starts `AM_MP_SMPL_INTERIOR_EXT` near each one's entrance, and
+//! walking in takes the player's control for the entry scene, which never
+//! ends: the casino's waits for its door (a model this data lacks) to be
+//! created, and the interior behind it does not exist either. That script
+//! never loads here, so the entrances do nothing.
 
 use std::cell::Cell;
 
 use glue5_game::{Env, orig};
 
 use crate::memory::Mem;
+
+/// Scripts for places this game data lacks (see above).
+const MISSING_PLACES: &[&str] = &["AM_MP_SMPL_INTERIOR_EXT"];
+
+fn for_missing_place(m: Mem, name: u64) -> bool {
+    let name = m.str(name);
+    MISSING_PLACES.iter().any(|s| s.eq_ignore_ascii_case(&name))
+}
+
+/// Hook for `script_commands::RequestScript(char const*)`: REQUEST_SCRIPT.
+pub(crate) unsafe extern "C" fn script_request(env: *mut Env, name: u64) {
+    if !for_missing_place(unsafe { Mem::of(env) }, name) {
+        unsafe { orig::script_request(env, name) };
+    }
+}
+
+/// Hook for `script_commands::HasScriptLoaded(char const*)`:
+/// HAS_SCRIPT_LOADED, never for those scripts (freemode asks again while
+/// the player is near an entrance).
+pub(crate) unsafe extern "C" fn script_loaded(env: *mut Env, name: u64) -> u32 {
+    if for_missing_place(unsafe { Mem::of(env) }, name) { 0 } else { unsafe { orig::script_loaded(env, name) } }
+}
 
 /// `audWaveSlot`'s loading status: loaded, loading, failed.
 const LOADED: u32 = 0;
@@ -88,4 +118,6 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.script_bank_request = Some(bank_request);
     hooks.bank_loading_status = Some(bank_loading_status);
     hooks.script_txd_loaded = Some(txd_loaded);
+    hooks.script_request = Some(script_request);
+    hooks.script_loaded = Some(script_loaded);
 }
