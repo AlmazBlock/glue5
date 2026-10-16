@@ -62,6 +62,11 @@ pub fn run() -> Result<()> {
     sdl3::hint::set("SDL_VIDEO_METAL_AUTO_RESIZE_DRAWABLE", "0");
     let user_dir = paths::user_dir()?;
     let mut settings = Settings::load(&user_dir);
+    if settings.online_name.trim().is_empty() {
+        settings.online_name = settings::default_online_name();
+    }
+    // Friends see the player from the start page on.
+    glue5_runtime::friends::start(&user_dir, settings.online_name.trim());
     // Before the GPU opens; turned on later, it shows from the next launch.
     let metal_hud = cfg!(target_vendor = "apple") && settings.overlay == PerfOverlay::MetalHud;
     if metal_hud {
@@ -162,6 +167,8 @@ pub fn run() -> Result<()> {
         play_requested: false,
         mode,
         benchmark: last_benchmark,
+        join: None,
+        friend_name: String::new(),
         capture_since: None,
         mouse_used: !MOBILE,
         game: None,
@@ -264,6 +271,11 @@ struct App {
     mode: Mode,
     /// The last benchmark's results.
     benchmark: Option<benchmark::Results>,
+    /// GTA Online starts in a friend's lobby (its name) rather than the
+    /// player's.
+    join: Option<String>,
+    /// The name friends were last told.
+    friend_name: String,
     /// Since when the pointer should be captured (see `pointer`).
     capture_since: Option<Instant>,
     /// A mouse has been used in the game: phones capture it only then.
@@ -498,6 +510,8 @@ impl App {
                 preparing: self.play_requested.then(|| self.screen.as_ref().and_then(Screen::progress)).flatten(),
                 mode: self.mode,
                 benchmark: self.benchmark.as_ref(),
+                online: self.game.is_some() && self.mode == Mode::Online,
+                friend_requests: glue5_runtime::friends::snapshot().requests.len(),
             };
             // The settings button: on touch screens always, so that it stays
             // with a controller in use or the touch controls off.
@@ -525,6 +539,21 @@ impl App {
                 Action::ChooseGame => self.folder = Some(FolderPick::start(&self.window)),
                 Action::FindGame => self.find_game(None),
                 Action::ResetGraphics => self.reset_graphics(),
+                Action::JoinFriend { key, lobby } => {
+                    if self.game.is_none() {
+                        // GTA Online in the friend's lobby, then into its
+                        // session.
+                        self.join = Some(lobby);
+                        glue5_runtime::friends::follow(&key);
+                        self.mode = Mode::Online;
+                        self.settings.sandbox = false;
+                        self.settings.online = true;
+                        self.play()?;
+                    } else if self.mode == Mode::Online {
+                        glue5_runtime::friends::follow(&key);
+                        self.ui.back();
+                    }
+                }
             }
         }
         if self.play_requested {
@@ -544,6 +573,11 @@ impl App {
             if page_before == Some(Page::Settings) {
                 self.settings.save(&self.user_dir);
             }
+        }
+        // The name friends see follows the player's.
+        if self.friend_name != self.settings.online_name {
+            self.friend_name.clone_from(&self.settings.online_name);
+            glue5_runtime::friends::set_name(self.friend_name.trim());
         }
 
         // Text input only while the game wants text: on touch devices it
@@ -663,8 +697,10 @@ impl App {
                 benchmark: self.mode == Mode::Benchmark,
                 low_memory: s.low_memory,
                 max_fps: s.max_fps,
-                online: (self.mode == Mode::Online)
-                    .then(|| glue5_runtime::Online { name: s.online_name.trim().into(), lobby: s.lobby() }),
+                online: (self.mode == Mode::Online).then(|| glue5_runtime::Online {
+                    name: s.online_name.trim().into(),
+                    lobby: self.join.take().unwrap_or_else(|| s.lobby()),
+                }),
                 language: preferred_language(),
             },
             glue5_gpu::backend(gpu_settings, Some(screen)),

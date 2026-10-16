@@ -22,11 +22,13 @@ use sdl3::video::Window;
 use crate::settings::{PerfOverlay, Settings};
 
 mod credits;
+mod friends;
 mod pages;
 mod perf;
 mod theme;
 mod widgets;
 use credits::credits_page;
+use friends::{FriendsPage, friends_page};
 use pages::{settings_page, start_page};
 
 use crate::touch::Touch;
@@ -39,6 +41,8 @@ pub enum Page {
     Settings,
     /// Who made what the application is built on, and their licenses.
     Credits,
+    /// The player's friend code, requests, friends.
+    Friends,
 }
 
 /// How the game starts.
@@ -63,6 +67,8 @@ pub enum Action {
     FindGame,
     /// The game's graphics settings back to the engine's defaults.
     ResetGraphics,
+    /// Join a friend (by its key) playing GTA Online in `lobby`.
+    JoinFriend { key: String, lobby: String },
 }
 
 /// Navigation from a controller.
@@ -116,6 +122,10 @@ pub struct Status<'a> {
     pub mode: Mode,
     /// The last benchmark's results.
     pub benchmark: Option<&'a crate::benchmark::Results>,
+    /// The game running is GTA Online.
+    pub online: bool,
+    /// Friends asking to be friends, waiting for an answer.
+    pub friend_requests: usize,
 }
 
 /// The settings button over the game: from the safe area's top right
@@ -145,8 +155,10 @@ pub struct Ui {
     page: Option<Page>,
     /// Where the settings go back to: the start page before the game.
     home: Option<Page>,
-    /// Where the credits go back to: the page they were opened from.
+    /// Where the credits and the friends go back to: the page they were
+    /// opened from.
     behind: Option<Page>,
+    friends: FriendsPage,
     /// The last submission drew something (an empty one clears it).
     drawn: bool,
     note: Option<String>,
@@ -180,6 +192,7 @@ impl Ui {
             page: Some(Page::Start),
             home: Some(Page::Start),
             behind: Some(Page::Start),
+            friends: FriendsPage::default(),
             drawn: false,
             note: None,
             scale_edit: None,
@@ -225,13 +238,13 @@ impl Ui {
                 self.repaint();
             }
             Some(Page::Settings) => self.show(self.home),
-            Some(Page::Credits) => self.show(self.behind),
+            Some(Page::Credits | Page::Friends) => self.show(self.behind),
             _ => {}
         }
     }
 
     fn show(&mut self, page: Option<Page>) {
-        if page == Some(Page::Credits) && self.page != page {
+        if matches!(page, Some(Page::Credits | Page::Friends)) && self.page != page {
             self.behind = self.page;
         }
         self.page = page;
@@ -469,6 +482,10 @@ impl Ui {
                 back = settings_page(&ctx, settings, status, note, tab, scale_edit, &mut actions, &mut go);
             }
             Some(Page::Credits) => back = credits_page(&ctx),
+            Some(Page::Friends) => {
+                let game = friends::Context { started: status.started.is_some(), online: status.online };
+                back = friends_page(&ctx, &mut self.friends, game, &mut actions);
+            }
             None => {}
         }
         let mut output = ctx.end_pass();

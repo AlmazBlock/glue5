@@ -116,6 +116,14 @@ pub(super) fn start_page(
                 if icon_button(ui, "★", "Credits", labels).clicked() {
                     *go = Some(Some(Page::Credits));
                 }
+                // Asked to be friends: how many, on the button.
+                let friends = match status.friend_requests {
+                    0 => "Friends".to_owned(),
+                    n => format!("Friends ({n})"),
+                };
+                if icon_button(ui, "♡", &friends, labels || status.friend_requests > 0).clicked() {
+                    *go = Some(Some(Page::Friends));
+                }
                 if icon_button(ui, "⚙", "Settings", labels).clicked() {
                     *go = Some(Some(Page::Settings));
                 }
@@ -774,6 +782,16 @@ fn settings_items(
                     }
                 });
             }
+            let asking = match status.friend_requests {
+                0 => "Your code, your friends, joining them".to_owned(),
+                1 => "Someone asks to be your friend".to_owned(),
+                n => format!("{n} players ask to be your friends"),
+            };
+            setting(ui, "Friends", Control::Action, Some(&asking), |ui| {
+                if action_button(ui, "Open").clicked() {
+                    *go = Some(Some(Page::Friends));
+                }
+            });
             let version = concat!("Glue 5 ", env!("CARGO_PKG_VERSION"), " and the projects it builds on");
             setting(ui, "Credits", Control::Action, Some(version), |ui| {
                 if action_button(ui, "View").clicked() {
@@ -811,6 +829,8 @@ mod tests {
             preparing: None,
             mode: Mode::Story,
             benchmark: None,
+            online: false,
+            friend_requests: 0,
         }
     }
 
@@ -820,7 +840,7 @@ mod tests {
         theme::install(&ctx);
         ctx.begin_pass(Default::default());
         ctx.end_pass().textures_delta.clear();
-        assert!(ctx.fonts_mut(|f| f.has_glyphs(&egui::FontId::proportional(14.0), "⚙🗁🗙★›")));
+        assert!(ctx.fonts_mut(|f| f.has_glyphs(&egui::FontId::proportional(14.0), "⚙🗁🗙★♡›")));
     }
 
     #[test]
@@ -1028,6 +1048,27 @@ mod tests {
                 .clear();
             }
             let window = ctx.memory(|m| m.area_rect(Id::new("credits-window"))).unwrap();
+            assert!(ctx.content_rect().contains_rect(window), "{size:?}: {window:?}");
+        }
+    }
+
+    #[test]
+    fn friends_fit_the_safe_area() {
+        for size in [vec2(1440.0, 900.0), vec2(390.0, 844.0), vec2(844.0, 390.0), vec2(320.0, 480.0)] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut page = crate::ui::FriendsPage::default();
+            for _ in 0..4 {
+                let raw =
+                    egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), ..Default::default() };
+                ctx.run_ui(raw, |root| {
+                    let game = crate::ui::friends::Context { started: false, online: false };
+                    assert!(!crate::ui::friends_page(root.ctx(), &mut page, game, &mut Vec::new()));
+                })
+                .textures_delta
+                .clear();
+            }
+            let window = ctx.memory(|m| m.area_rect(Id::new("friends-window"))).unwrap();
             assert!(ctx.content_rect().contains_rect(window), "{size:?}: {window:?}");
         }
     }

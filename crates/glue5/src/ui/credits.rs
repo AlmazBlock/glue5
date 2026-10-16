@@ -22,6 +22,7 @@ const PROJECTS: &[(&str, &str, &str, &str)] = &[
     ),
     ("etcpak", "Textures for GPUs without BC", "BSD-3-Clause", "https://github.com/wolfpld/etcpak"),
     ("bcdec_rs", "Texture decoding", "MIT", "https://github.com/ScanMountGoat/image_dds"),
+    ("snow", "The Noise protocol: friends' encrypted channel", "Apache-2.0 / MIT", "https://github.com/mcginty/snow"),
     #[cfg(target_vendor = "apple")]
     ("objc2", "Apple's frameworks from Rust", "MIT", "https://github.com/madsmtm/objc2"),
     #[cfg(windows)]
@@ -72,8 +73,8 @@ pub(super) fn credits_page(ctx: &egui::Context) -> bool {
         text(
             ui,
             "With the libraries these use, each under its own license (MIT, Apache-2.0, BSD, Zlib, \
-             Unicode, …). GTA Online's players find each other through the BitTorrent DHT, kept by \
-             the people who run it.",
+             Unicode, …). GTA Online's players and friends find each other through the BitTorrent DHT, \
+             kept by the people who run it.",
         );
     })
 }

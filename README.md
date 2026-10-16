@@ -244,6 +244,30 @@ whoever enters the same one. The name other players see is in the same tab.
 - Characters are kept in the user directory, `cloud/` (`cloud.rs`, with the
   stats the game's data lacks: `stats.rs`); the gamer id in `online-id`.
 
+### Friends
+
+Friends (♡ on the start page, or Settings › Game › Friends) see when the
+other plays, join each other in GTA Online and invite each other from the
+game's own menus, still with no server of ours (`friends/`).
+
+- Each player has a key pair made on the device and a friend code
+  (16 characters, 75 random bits and a check character) to give out.
+  Asking with a code reaches its owner, who says yes or no; a new code
+  retires the old one. The key, the code and the friends are in
+  `friends.json` in the user directory (readable by the player only).
+- Friends meet on the DHT and the local network under a key only the two
+  of them can compute (from their keys' Diffie-Hellman secret, changing
+  every 6 hours), then talk over a Noise channel (`IK`, or `XXpsk0` with a
+  code; ChaCha20-Poly1305, BLAKE2s, X25519, by `snow`): a player answers
+  no one else, and what friends say to each other cannot be read or forged
+  by anyone else. A friend sees the player's Internet address, as a player
+  of the same lobby does.
+- In the game, the friends are the pause menu's; their invites (to a
+  session, to a job) and answers travel over the channel, accepted only
+  from that friend; "Join" on a friend's card, or on the app's Friends
+  page, takes the player into the friend's lobby (introduced by it) and
+  session.
+
 ## Renderer
 
 The engine emits D3D11-style commands into a ring in wasm memory (the browser
