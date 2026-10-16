@@ -941,6 +941,14 @@ impl App {
             old.stop();
             old.root().to_owned()
         });
+        // At start, where an earlier run left it: the download setting
+        // changed while the game ran, which the stream never follows.
+        let old = old.or_else(|| {
+            [Some(paths::stream_copy(&self.user_dir)), paths::download_dir(&self.user_dir)]
+                .into_iter()
+                .flatten()
+                .find(|dir| *dir != root && dir.join(glue5_stream::cache::CATALOG).is_file())
+        });
         if let Some(old) = old.filter(|old| *old != root && old.exists() && !root.exists()) {
             if let Some(parent) = root.parent() {
                 let _ = std::fs::create_dir_all(parent);
