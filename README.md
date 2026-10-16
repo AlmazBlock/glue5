@@ -147,6 +147,9 @@ The game is looked for in `game/` beside the AppImage, as beside the Mac app.
 | iOS: only check that the app builds | `mise run ios:build` |
 | iOS: launch the installed app again, with its console | `mise run ios:run [device]` |
 | iOS: copy the game into the app's Documents/game | `mise run ios:game [device]` |
+| Apple TV: build, sign, install, launch on the paired Apple TV | `mise run tvos [device]` |
+| Apple TV: only check that the app builds | `mise run tvos:build` |
+| Apple TV: launch the installed app again, with its console | `mise run tvos:run [device]` |
 | Android: build, install, launch on the connected device with its log | `mise run android [device]` |
 | Android: only build the APK | `mise run android:build` |
 | Android: launch the installed app again, with its log | `mise run android:run [device]` |
@@ -155,7 +158,10 @@ The game is looked for in `game/` beside the AppImage, as beside the Mac app.
 `mise tasks` lists them all. iOS signing uses the team in `GLUE5_TEAM`:
 put it in `.mise/config.local.toml` (ignored by git) under `[env]`. With several
 phones connected, pass the device (name, identifier or UDID); for Android,
-its serial number (`adb devices`).
+its serial number (`adb devices`). The Apple TV tasks sign the same way; they
+need Xcode's tvOS platform (Xcode › Settings › Components) and an Apple TV
+paired with Xcode (on the TV: Settings › Remotes and Devices › Remote App and
+Devices).
 
 ### macOS packaging
 
@@ -188,8 +194,8 @@ activate it; the plist alone does not guarantee activation. See Apple's
 ### Runtime options
 
 The app and headless runner accept these environment variables.
-`mise run ios` and `ios:run` forward `RUST_LOG` and `GLUE5_*` variables
-to the device; so do `mise run android` and `android:run` (as the launch
+`mise run ios` and `ios:run` (and the `tvos` ones) forward `RUST_LOG` and
+`GLUE5_*` variables to the device; so do `mise run android` and `android:run` (as the launch
 intent's extras).
 
 | Variable | Effect |
@@ -336,7 +342,8 @@ On desktop, the default is `game` next to the executable or in the
 repository. On iOS, it is `Documents/game`, populated with
 `mise run ios:game`, Finder > device > Files, or the Files app. On Android,
 it is `Android/data/local.glue5/files/game`, populated with
-`mise run android:game`.
+`mise run android:game`. The Apple TV has no game folder: it keeps only
+caches the system may empty, so the game always streams there.
 
 The files can also stream from another computer instead (Settings › Game
 › Game files › Server, or Play from a computer on the start page): the app

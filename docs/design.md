@@ -13,6 +13,7 @@ way the operating system starts a process:
 |---|---|---|
 | macOS, Linux, Windows | the `glue5` binary | `cargo build` |
 | iOS | `platform/ios/main.c` calls `glue5_main`, which hands the process to SDL (`SDL_RunApp`) | an Xcode project generated from `platform/ios/project.yml` by xcodegen links the crate as a static library (`mise run ios`) |
+| tvOS (Apple TV) | the same `main.c` and `glue5_main` | likewise, from `platform/tvos/project.yml`, the crate built for `aarch64-apple-tvos` (`mise run tvos`) |
 | Android (next) | SDL's Java activity loads the library and calls `SDL_main` | Gradle project with SDL's activity, the library built with the NDK |
 
 Platform-specific Rust code uses `cfg`s for details such as default folders
