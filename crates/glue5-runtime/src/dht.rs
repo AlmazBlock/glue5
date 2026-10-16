@@ -1,7 +1,8 @@
-//! Finding the other players of a lobby on the Internet, with no server of
-//! ours: the BitTorrent DHT (BEP 5), millions of public nodes that keep, for
-//! a 20-byte key, the addresses announced under it. A lobby is a key; each
-//! player announces itself under it and asks for the others.
+//! Finding other players on the Internet, with no server of ours: the
+//! BitTorrent DHT (BEP 5), millions of public nodes that keep, for a 20-byte
+//! key, the addresses announced under it. A lobby is a key; each player
+//! announces itself under it and asks for the others. Friends meet the same
+//! way, under keys only the two of them can work out (friends/).
 //!
 //! The DHT runs over the game's own UDP socket, and announces with the
 //! port the nodes see (`implied_port`): the address it hands out is the
@@ -9,8 +10,9 @@
 //! to.
 //!
 //! The client stays small: it never answers queries (it says so, BEP 43's
-//! read-only flag) and keeps no routing table, only the nodes of one lookup
-//! (the nodes closest to the lobby's key, which hold its announces).
+//! read-only flag) and keeps no routing table, only the nodes of each
+//! lookup (the nodes closest to its key, which hold its announces); a new
+//! lookup starts from the nodes the others know.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
@@ -23,16 +25,19 @@ const BOOTSTRAP: &[&str] = &[
     "router.utorrent.com:6881",
     "dht.libtorrent.org:25401",
 ];
-/// Queries in flight at most, and how long one may take.
+/// Queries in flight at most, per lookup and in all, and how long one may
+/// take.
 const PARALLEL: usize = 8;
+const IN_FLIGHT: usize = 48;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The nodes a lookup ends on (and announces to).
 const CLOSEST: usize = 8;
 /// Nodes kept as candidates.
 const CANDIDATES: usize = 64;
-/// How often the closest nodes are asked again for new players (and told
-/// about this one): announces expire after about 30 minutes.
-const REFRESH: Duration = Duration::from_secs(20);
+/// Nodes another lookup's start borrows.
+const SEEDS: usize = 16;
+/// How often a lookup announces itself: announces expire after about 30
+/// minutes.
 const ANNOUNCE: Duration = Duration::from_secs(120);
 /// A lookup starts over after this (the closest nodes change), or sooner
 /// when no node answered.
@@ -48,25 +53,46 @@ struct Node {
     token: Option<Vec<u8>>,
 }
 
-pub struct Dht {
-    id: Id,
-    key: Id,
-    port: u16,
+/// What a lookup is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Options {
+    /// Whether this player announces itself under the key (or only looks).
+    pub announce: bool,
+    /// How often the closest nodes are asked again for new players.
+    pub refresh: Duration,
+}
+
+struct Lookup {
+    options: Options,
     /// By distance to the key.
     nodes: BTreeMap<Id, Node>,
-    /// Queries in flight: transaction id -> node (by distance), sent at.
-    pending: HashMap<u16, (Id, Instant)>,
-    next_tid: u16,
     started: Option<Instant>,
     refreshed: Option<Instant>,
     announced: Option<Instant>,
 }
 
-/// What the socket should send, and the players found.
+impl Lookup {
+    /// The closest nodes that answered.
+    fn closest(&self) -> impl Iterator<Item = (&Id, &Node)> {
+        self.nodes.iter().filter(|(_, n)| n.responded).take(CLOSEST)
+    }
+}
+
+pub struct Dht {
+    id: Id,
+    port: u16,
+    lookups: HashMap<Id, Lookup>,
+    /// Queries in flight: transaction id -> lookup key, node (by distance),
+    /// sent at.
+    pending: HashMap<u16, (Id, Id, Instant)>,
+    next_tid: u16,
+}
+
+/// What the socket should send, and the players found (under which key).
 #[derive(Default)]
 pub struct Output {
     pub send: Vec<(SocketAddrV4, Vec<u8>)>,
-    pub peers: Vec<SocketAddrV4>,
+    pub peers: Vec<(Id, SocketAddrV4)>,
 }
 
 fn distance(a: &Id, b: &Id) -> Id {
@@ -74,19 +100,9 @@ fn distance(a: &Id, b: &Id) -> Id {
 }
 
 impl Dht {
-    /// A client looking for `key`'s players, announcing `port`.
-    pub fn new(id: Id, key: Id, port: u16) -> Dht {
-        Dht {
-            id,
-            key,
-            port,
-            nodes: BTreeMap::new(),
-            pending: HashMap::new(),
-            next_tid: 0,
-            started: None,
-            refreshed: None,
-            announced: None,
-        }
+    /// A client announcing `port`, with no lookup yet.
+    pub fn new(id: Id, port: u16) -> Dht {
+        Dht { id, port, lookups: HashMap::new(), pending: HashMap::new(), next_tid: 0 }
     }
 
     /// Whether a datagram is the DHT's (a bencoded dictionary).
@@ -94,47 +110,73 @@ impl Dht {
         data.first() == Some(&b'd')
     }
 
-    /// Advances the lookup; call it a few times a second.
+    /// Looks for `key`'s players from now on (again with other options).
+    pub fn add(&mut self, key: Id, options: Options) {
+        let lookup = self.lookups.entry(key).or_insert_with(|| Lookup {
+            options,
+            nodes: BTreeMap::new(),
+            started: None,
+            refreshed: None,
+            announced: None,
+        });
+        lookup.options = options;
+    }
+
+    pub fn remove(&mut self, key: &Id) {
+        self.lookups.remove(key);
+        self.pending.retain(|_, (k, ..)| k != key);
+    }
+
+    /// Advances the lookups; call it a few times a second.
     pub fn tick(&mut self, now: Instant, out: &mut Output) {
-        self.pending.retain(|_, (_, at)| now - *at < QUERY_TIMEOUT);
-        let restart = self.started.is_none_or(|s| {
+        self.pending.retain(|_, (.., at)| now - *at < QUERY_TIMEOUT);
+        let keys: Vec<Id> = self.lookups.keys().copied().collect();
+        for key in keys {
+            self.tick_lookup(key, now, out);
+        }
+    }
+
+    fn tick_lookup(&mut self, key: Id, now: Instant, out: &mut Output) {
+        let Some(lookup) = self.lookups.get(&key) else { return };
+        let restart = lookup.started.is_none_or(|s| {
             let age = now - s;
-            age > RESTART || (age > RETRY && !self.nodes.values().any(|n| n.responded))
+            age > RESTART || (age > RETRY && !lookup.nodes.values().any(|n| n.responded))
         });
         if restart {
-            self.start(now, out);
-            return;
+            self.start(key, now);
         }
         // The lookup: the closest nodes not asked yet.
-        let busy = self.pending.len();
-        let ask: Vec<Id> = self
-            .nodes
-            .iter()
-            .take(CANDIDATES)
-            .filter(|(_, n)| !n.queried)
-            .take(PARALLEL.saturating_sub(busy))
-            .map(|(d, _)| *d)
-            .collect();
+        let busy = self.pending.values().filter(|(k, ..)| *k == key).count();
+        let room = PARALLEL.saturating_sub(busy).min(IN_FLIGHT.saturating_sub(self.pending.len()));
+        let lookup = &self.lookups[&key];
+        let ask: Vec<Id> =
+            lookup.nodes.iter().take(CANDIDATES).filter(|(_, n)| !n.queried).take(room).map(|(d, _)| *d).collect();
         for d in ask {
-            self.get_peers(d, now, out);
+            self.get_peers(key, d, now, out);
         }
         // Done when the closest nodes that answered were all asked: then
         // ask them again now and then, and announce.
-        let settled = self.pending.is_empty() && self.nodes.values().take(CLOSEST).all(|n| n.queried);
+        let lookup = &self.lookups[&key];
+        let asking = self.pending.values().any(|(k, ..)| *k == key);
+        let settled = !asking && lookup.nodes.values().take(CLOSEST).all(|n| n.queried);
         if !settled {
             return;
         }
-        if self.refreshed.is_none_or(|r| now - r > REFRESH) {
-            self.refreshed = Some(now);
-            let closest: Vec<Id> = self.closest().map(|(d, _)| *d).collect();
+        if lookup.refreshed.is_none_or(|r| now - r > lookup.options.refresh) {
+            let closest: Vec<Id> = lookup.closest().map(|(d, _)| *d).collect();
+            self.lookups.get_mut(&key).unwrap().refreshed = Some(now);
             for d in closest {
-                self.get_peers(d, now, out);
+                self.get_peers(key, d, now, out);
             }
         }
-        if self.announced.is_none_or(|a| now - a > ANNOUNCE) && self.closest().any(|(_, n)| n.token.is_some()) {
-            self.announced = Some(now);
+        let lookup = &self.lookups[&key];
+        if lookup.options.announce
+            && lookup.announced.is_none_or(|a| now - a > ANNOUNCE)
+            && lookup.closest().any(|(_, n)| n.token.is_some())
+        {
             let to: Vec<(SocketAddrV4, Vec<u8>)> =
-                self.closest().filter_map(|(_, n)| Some((n.addr, n.token.clone()?))).collect();
+                lookup.closest().filter_map(|(_, n)| Some((n.addr, n.token.clone()?))).collect();
+            self.lookups.get_mut(&key).unwrap().announced = Some(now);
             for (addr, token) in to {
                 let tid = self.tid();
                 let query = dict([
@@ -146,7 +188,7 @@ impl Dht {
                         dict([
                             ("id", B(self.id.to_vec())),
                             ("implied_port", I(1)),
-                            ("info_hash", B(self.key.to_vec())),
+                            ("info_hash", B(key.to_vec())),
                             ("port", I(self.port.into())),
                             ("token", B(token)),
                         ]),
@@ -158,29 +200,38 @@ impl Dht {
         }
     }
 
-    /// Whether this player was announced and the lobby's players asked
+    /// Whether this player was announced under `key` and its players asked
     /// for again since: the ones announced by then are known.
-    pub fn settled(&self) -> bool {
-        matches!((self.announced, self.refreshed), (Some(a), Some(r)) if r > a)
+    pub fn settled(&self, key: &Id) -> bool {
+        self.lookups
+            .get(key)
+            .is_some_and(|l| matches!((l.announced, l.refreshed), (Some(a), Some(r)) if r > a))
     }
 
-    /// The closest nodes that answered.
-    fn closest(&self) -> impl Iterator<Item = (&Id, &Node)> {
-        self.nodes.iter().filter(|(_, n)| n.responded).take(CLOSEST)
-    }
-
-    fn start(&mut self, now: Instant, out: &mut Output) {
-        self.started = Some(now);
-        self.refreshed = None;
-        self.nodes.clear();
-        self.pending.clear();
-        // The bootstrap nodes' ids are unknown: they go in as the farthest.
-        for (i, addr) in bootstrap().into_iter().enumerate() {
+    /// (Re)starts a lookup from the bootstrap nodes and the nodes the other
+    /// lookups found.
+    fn start(&mut self, key: Id, now: Instant) {
+        let seeds: Vec<SocketAddrV4> = self
+            .lookups
+            .iter()
+            .filter(|(k, _)| **k != key)
+            .flat_map(|(_, l)| l.nodes.values().filter(|n| n.responded).map(|n| n.addr))
+            .take(SEEDS)
+            .collect();
+        self.pending.retain(|_, (k, ..)| *k != key);
+        let Some(lookup) = self.lookups.get_mut(&key) else { return };
+        lookup.started = Some(now);
+        lookup.refreshed = None;
+        lookup.nodes.clear();
+        // Nodes whose ids are unknown go in as the farthest.
+        for (i, addr) in bootstrap().into_iter().chain(seeds).enumerate() {
             let mut d = [0xff; 20];
+            d[18] = (i >> 8) as u8;
             d[19] = i as u8;
-            self.nodes.insert(d, Node { addr, queried: false, responded: false, token: None });
+            if lookup.nodes.values().all(|n| n.addr != addr) {
+                lookup.nodes.insert(d, Node { addr, queried: false, responded: false, token: None });
+            }
         }
-        self.tick(now, out);
     }
 
     fn tid(&mut self) -> u16 {
@@ -188,19 +239,19 @@ impl Dht {
         self.next_tid
     }
 
-    fn get_peers(&mut self, d: Id, now: Instant, out: &mut Output) {
+    fn get_peers(&mut self, key: Id, d: Id, now: Instant, out: &mut Output) {
         let tid = self.tid();
-        let Some(node) = self.nodes.get_mut(&d) else { return };
+        let Some(node) = self.lookups.get_mut(&key).and_then(|l| l.nodes.get_mut(&d)) else { return };
         node.queried = true;
         let query = dict([
             ("t", B(tid.to_be_bytes().to_vec())),
             ("y", B(b"q".to_vec())),
             ("q", B(b"get_peers".to_vec())),
-            ("a", dict([("id", B(self.id.to_vec())), ("info_hash", B(self.key.to_vec()))])),
+            ("a", dict([("id", B(self.id.to_vec())), ("info_hash", B(key.to_vec()))])),
             ("ro", I(1)),
         ]);
         out.send.push((node.addr, query.encode()));
-        self.pending.insert(tid, (d, now));
+        self.pending.insert(tid, (key, d, now));
     }
 
     /// A datagram from a DHT node.
@@ -208,44 +259,45 @@ impl Dht {
         let Some(Value::Dict(msg)) = Value::decode(data) else { return };
         let Some(Value::Bytes(t)) = msg.get(&b"t"[..]) else { return };
         let Ok(t) = <[u8; 2]>::try_from(t.as_slice()) else { return };
-        let Some((d, _)) = self.pending.remove(&u16::from_be_bytes(t)) else { return };
+        let Some((key, d, _)) = self.pending.remove(&u16::from_be_bytes(t)) else { return };
         let Some(Value::Dict(r)) = msg.get(&b"r"[..]) else { return };
+        let Some(lookup) = self.lookups.get_mut(&key) else { return };
         // The node, under its real id now.
-        let Some(mut node) = self.nodes.remove(&d) else { return };
+        let Some(mut node) = lookup.nodes.remove(&d) else { return };
         if node.addr != from {
-            self.nodes.insert(d, node);
+            lookup.nodes.insert(d, node);
             return;
         }
         node.responded = true;
         if let Some(Value::Bytes(token)) = r.get(&b"token"[..]) {
             node.token = Some(token.clone());
         }
-        let key = match r.get(&b"id"[..]) {
-            Some(Value::Bytes(id)) if id.len() == 20 => distance(&self.key, id.as_slice().try_into().unwrap()),
+        let at = match r.get(&b"id"[..]) {
+            Some(Value::Bytes(id)) if id.len() == 20 => distance(&key, id.as_slice().try_into().unwrap()),
             _ => d,
         };
-        self.nodes.insert(key, node);
+        lookup.nodes.insert(at, node);
         if let Some(Value::List(values)) = r.get(&b"values"[..]) {
             for v in values {
                 if let Value::Bytes(v) = v
                     && let Some(addr) = compact_addr(v)
                 {
-                    out.peers.push(addr);
+                    out.peers.push((key, addr));
                 }
             }
         }
         if let Some(Value::Bytes(nodes)) = r.get(&b"nodes"[..]) {
             for n in nodes.as_chunks::<26>().0 {
                 let (Ok(id), Some(addr)) = (<Id>::try_from(&n[..20]), compact_addr(&n[20..])) else { continue };
-                let d = distance(&self.key, &id);
-                if !self.nodes.contains_key(&d) && self.nodes.values().all(|n| n.addr != addr) {
-                    self.nodes.insert(d, Node { addr, queried: false, responded: false, token: None });
+                let d = distance(&key, &id);
+                if !lookup.nodes.contains_key(&d) && lookup.nodes.values().all(|n| n.addr != addr) {
+                    lookup.nodes.insert(d, Node { addr, queried: false, responded: false, token: None });
                 }
             }
             // Only the closest candidates matter.
-            while self.nodes.len() > CANDIDATES {
-                let last = *self.nodes.keys().next_back().unwrap();
-                self.nodes.remove(&last);
+            while lookup.nodes.len() > CANDIDATES {
+                let last = *lookup.nodes.keys().next_back().unwrap();
+                lookup.nodes.remove(&last);
             }
         }
     }

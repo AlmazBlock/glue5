@@ -184,6 +184,9 @@ fn main() -> Result<()> {
         log::info!("tour: {} stops, {} s each", stops.len(), stay.as_secs_f64());
         glue5_runtime::tour::start(stops, stay);
     }
+    if let Some(name) = &args.online {
+        glue5_runtime::friends::start(&user_dir, name);
+    }
     let game = glue5_runtime::start(
         glue5_runtime::Config {
             game_dir,
@@ -275,7 +278,32 @@ fn command(line: &str, t: f64, game: &Game, presses: &mut Vec<(f64, u16)>, keys:
             let (w, h) = size.split_once('x').context("size <width>x<height>")?;
             game.input().context("no input yet")?.resize(w.parse()?, h.parse()?);
         }
-        _ => bail!("expected `press <button>`, `key <key>`, `hold <key> <s>`, `text <text>` or `size <w>x<h>`"),
+        ["friends", ..] => friends(&line.split_whitespace().collect::<Vec<_>>()[1..])?,
+        _ => bail!(
+            "expected `press <button>`, `key <key>`, `hold <key> <s>`, `text <text>`, `size <w>x<h>` or \
+             `friends code|ask <code>|accept|list|join <name>|invite <name>`"
+        ),
+    }
+    Ok(())
+}
+
+/// The friends, as the application's page drives them.
+fn friends(words: &[&str]) -> Result<()> {
+    use glue5_runtime::friends;
+    match words {
+        ["code"] => log::info!("friends: code {}", friends::my_code().context("no friends")?),
+        ["ask", code] => friends::ask(code).map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        ["accept"] => friends::snapshot().requests.iter().for_each(|(key, _)| friends::answer(key, true)),
+        ["list"] => log::info!("friends: {:?}", friends::snapshot()),
+        ["join", name] => {
+            let f = friends::snapshot().friends.into_iter().find(|f| f.name == *name).context("no such friend")?;
+            friends::follow(&f.key);
+        }
+        ["invite", name] => {
+            let f = friends::snapshot().friends.into_iter().find(|f| f.name == *name).context("no such friend")?;
+            friends::invite(&f.key);
+        }
+        _ => bail!("friends code|ask <code>|accept|list|join <name>|invite <name>"),
     }
     Ok(())
 }

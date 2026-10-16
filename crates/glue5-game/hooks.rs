@@ -34,6 +34,7 @@ pub const HOOKS: &[&[(&str, &str)]] = &[
     include!("hooks/vnet.rs"),
     include!("hooks/cloud.rs"),
     include!("hooks/jobs.rs"),
+    include!("hooks/friends.rs"),
     include!("hooks/texts.rs"),
     include!("hooks/stats.rs"),
     include!("hooks/upscale.rs"),

@@ -24,8 +24,14 @@
 //! hosts one when it finds none, so it waits for the others first
 //! (`may_enter`): until the lobby's players are known, and while another
 //! player who started at the same time goes first and hosts.
+//!
+//! The socket is the player's from the application's start: friends meet
+//! on it too (friends/), before and besides any lobby. A player can be in
+//! more than one lobby at a time: its game's, and a friend's it was
+//! invited to or joins (`visit_lobby`), whose players the friend
+//! introduces; the virtual LAN spans them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
@@ -38,13 +44,15 @@ use crate::dht::{self, Dht};
 
 /// The lobby ports, also the ports looked at for players on the same
 /// network: several players on one machine take the next free one.
-const PORTS: std::ops::Range<u16> = 47000..47016;
+pub(crate) const PORTS: std::ops::Range<u16> = 47000..47016;
 /// The virtual LAN: 10.77.0.0/16.
 pub const NET: u32 = 10 << 24 | 77 << 16;
-const MAGIC: [u8; 3] = [b'G', b'5', 1];
+pub(crate) const MAGIC: [u8; 3] = [b'G', b'5', 1];
 const HELLO: u8 = 1;
 const PEERS: u8 = 2;
 const DATA: u8 = 3;
+/// Kinds of datagram from here on are the friends' (friends/).
+pub(crate) const FRIENDS: u8 = 10;
 /// HELLO flags: please answer; the player is about to look for a session;
 /// it went looking (and is in one, or hosts it).
 const ASK: u8 = 1;
@@ -66,9 +74,33 @@ const SWEEP: Duration = Duration::from_secs(5);
 const DISCOVERY: Duration = Duration::from_secs(40);
 const HOSTING: Duration = Duration::from_secs(6);
 const PATIENCE: Duration = Duration::from_secs(30);
+/// Lobbies at most at a time: the game's and friends' visited.
+const LOBBIES: usize = 4;
+/// How often a lobby's players are asked for on the DHT.
+const LOBBY_REFRESH: Duration = Duration::from_secs(20);
+
+/// A lobby's id in the players' datagrams, and its key on the DHT.
+pub(crate) type LobbyId = [u8; 8];
+
+struct Lobby {
+    /// What the players typed ("" for everyone's).
+    name: String,
+    id: LobbyId,
+    key: dht::Id,
+    joined: Instant,
+}
+
+impl Lobby {
+    fn new(name: &str, now: Instant) -> Lobby {
+        let key: [u8; 32] = Sha256::digest(format!("glue5 lobby 1 {} {name}", crate::GAME_BUILD)).into();
+        Lobby { name: name.to_owned(), id: key[..8].try_into().unwrap(), key: key[..20].try_into().unwrap(), joined: now }
+    }
+}
 
 struct Peer {
     vip: u32,
+    /// The lobby it was met in.
+    lobby: LobbyId,
     /// Where its datagrams come from, when they do.
     addr: Option<SocketAddrV4>,
     /// When it was last heard from directly, or introduced.
@@ -82,9 +114,9 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(vip: u32, now: Instant) -> Peer {
+    fn new(vip: u32, lobby: LobbyId, now: Instant) -> Peer {
         let heard = now.checked_sub(GONE).unwrap_or(now);
-        Peer { vip, addr: None, heard, introduced: now, via: None, flags: 0, playing: None }
+        Peer { vip, lobby, addr: None, heard, introduced: now, via: None, flags: 0, playing: None }
     }
 
     fn direct(&self, now: Instant) -> bool {
@@ -105,43 +137,47 @@ fn nearness(addr: SocketAddrV4) -> u8 {
 }
 
 struct State {
+    /// The game's lobby first, then the ones visited.
+    lobbies: Vec<Lobby>,
     /// By peer id.
     peers: HashMap<u64, Peer>,
-    /// Addresses tried, not answering yet (since when).
-    trying: HashMap<SocketAddrV4, Instant>,
+    /// Addresses tried, not answering yet: since when, for which lobby.
+    trying: HashMap<SocketAddrV4, (Instant, LobbyId)>,
     /// This player's own addresses (the DHT hands them out too).
-    own: std::collections::HashSet<SocketAddrV4>,
+    own: HashSet<SocketAddrV4>,
     introduced: Instant,
     dht: Dht,
+}
+
+impl State {
+    fn lobby(&self, id: &LobbyId) -> Option<&Lobby> {
+        self.lobbies.iter().find(|l| l.id == *id)
+    }
 }
 
 pub struct P2p {
     socket: UdpSocket,
     port: u16,
     id: u64,
-    lobby: [u8; 8],
     vip: AtomicU32,
     /// The engine took the address: it cannot change any more.
     vip_taken: AtomicBool,
     /// This player's WAITING and PLAYING flags, and since when it waits.
     flags: AtomicU8,
-    started: Instant,
     waiting: OnceLock<Instant>,
     state: Mutex<State>,
 }
 
-/// Datagrams for the engine: from (virtual address, port), to port.
-pub type Deliver = fn(u32, u16, u16, &[u8]);
-
 static P2P: OnceLock<P2p> = OnceLock::new();
 
-fn random() -> u64 {
+pub(crate) fn random() -> u64 {
     std::collections::hash_map::RandomState::new().build_hasher().finish()
 }
 
-/// Joins `lobby` (any text: "public" or a private lobby's code) for this
-/// game build.
-pub fn start(lobby: &str, deliver: Deliver) -> std::io::Result<&'static P2p> {
+/// The player's socket and the thread serving it, started once.
+pub fn start() -> std::io::Result<&'static P2p> {
+    static STARTING: Mutex<()> = Mutex::new(());
+    let _one = STARTING.lock().unwrap();
     if let Some(p2p) = P2P.get() {
         return Ok(p2p);
     }
@@ -152,35 +188,29 @@ pub fn start(lobby: &str, deliver: Deliver) -> std::io::Result<&'static P2p> {
     socket.set_broadcast(true)?;
     socket.set_read_timeout(Some(Duration::from_millis(50)))?;
     let port = socket.local_addr()?.port();
-    let key: [u8; 32] = Sha256::digest(format!("glue5 lobby 1 {} {lobby}", crate::GAME_BUILD)).into();
     let id = random();
     let dht_id: dht::Id = Sha256::digest(id.to_le_bytes()).as_slice()[..20].try_into().unwrap();
     let p2p = P2p {
         socket,
         port,
         id,
-        lobby: key[..8].try_into().unwrap(),
         vip: AtomicU32::new(0),
         vip_taken: AtomicBool::new(false),
         flags: AtomicU8::new(0),
-        started: Instant::now(),
         waiting: OnceLock::new(),
         state: Mutex::new(State {
+            lobbies: Vec::new(),
             peers: HashMap::new(),
             trying: HashMap::new(),
             own: Default::default(),
             introduced: Instant::now(),
-            dht: Dht::new(dht_id, key[..20].try_into().unwrap(), port),
+            dht: Dht::new(dht_id, port),
         }),
     };
     p2p.vip.store(free_vip(&[]), Ordering::Relaxed);
     let p2p = P2P.get_or_init(|| p2p);
-    log::info!(
-        "p2p: lobby {:02x?}, port {port}, address {}",
-        p2p.lobby,
-        Ipv4Addr::from(p2p.vip.load(Ordering::Relaxed))
-    );
-    std::thread::Builder::new().name("p2p".into()).spawn(move || p2p.run(deliver))?;
+    log::info!("p2p: port {port}, address {}", Ipv4Addr::from(p2p.vip.load(Ordering::Relaxed)));
+    std::thread::Builder::new().name("p2p".into()).spawn(move || p2p.run())?;
     Ok(p2p)
 }
 
@@ -206,7 +236,7 @@ fn is_broadcast(ip: u32) -> bool {
 /// This device's address on its local network (the one its Internet
 /// traffic leaves from), when the network is a private one. Connecting a
 /// UDP socket sends nothing.
-fn lan_address() -> Option<Ipv4Addr> {
+pub(crate) fn lan_address() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     socket.connect(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
     match socket.local_addr().ok()? {
@@ -220,6 +250,53 @@ impl P2p {
     pub fn local_ip(&self) -> u32 {
         self.vip_taken.store(true, Ordering::Relaxed);
         self.vip.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Joins the game's lobby: `name` is any text, "" for everyone's or a
+    /// private lobby's code (for this game build).
+    pub fn join_lobby(&self, name: &str) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        if state.lobbies.first().is_some_and(|l| l.name == name) {
+            return;
+        }
+        let lobby = Lobby::new(name, now);
+        log::info!("p2p: lobby {:02x?}", lobby.id);
+        state.dht.add(lobby.key, dht::Options { announce: true, refresh: LOBBY_REFRESH });
+        state.lobbies.retain(|l| l.name != name);
+        state.lobbies.insert(0, lobby);
+    }
+
+    /// Visits a friend's lobby (`name`), the friend at `via` introducing
+    /// its players: the game can then join a session there. The oldest
+    /// lobby visited makes room.
+    pub(crate) fn visit_lobby(&self, name: &str, via: SocketAddrV4) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let lobby = Lobby::new(name, now);
+        let id = lobby.id;
+        if state.lobby(&id).is_none() {
+            log::info!("p2p: visiting lobby {id:02x?} through {via}");
+            if state.lobbies.len() >= LOBBIES {
+                let gone = state.lobbies.remove(1);
+                state.dht.remove(&gone.key);
+                state.peers.retain(|_, p| p.lobby != gone.id);
+            }
+            state.dht.add(lobby.key, dht::Options { announce: true, refresh: LOBBY_REFRESH });
+            state.lobbies.push(lobby);
+        }
+        state.trying.insert(via, (now, id));
+        drop(state);
+        self.hello(via, ASK, &id);
+    }
+
+    /// The lobbies the player is in (their names), the game's first.
+    pub(crate) fn lobbies(&self) -> Vec<String> {
+        self.state.lock().unwrap().lobbies.iter().map(|l| l.name.clone()).collect()
     }
 
     /// Whether the engine may look for a session now (it asks until it
@@ -237,7 +314,8 @@ impl P2p {
             now
         });
         let state = self.state.lock().unwrap();
-        let discovered = state.dht.settled() || now - self.started > DISCOVERY;
+        let Some(lobby) = state.lobbies.first() else { return true };
+        let discovered = state.dht.settled(&lobby.key) || now - lobby.joined > DISCOVERY;
         let first = state.peers.iter().filter(|(_, p)| p.direct(now)).all(|(id, p)| {
             let ahead = p.flags & WAITING != 0 && *id < self.id;
             !ahead && p.playing.is_none_or(|t| now - t > HOSTING)
@@ -282,30 +360,40 @@ impl P2p {
         }
     }
 
+    /// A datagram of the friends' (friends/), as it is.
+    pub(crate) fn send_to(&self, to: SocketAddrV4, d: &[u8]) {
+        let _ = self.socket.send_to(d, to);
+    }
+
+    /// The DHT, for the friends' lookups.
+    pub(crate) fn dht<R>(&self, f: impl FnOnce(&mut Dht) -> R) -> R {
+        f(&mut self.state.lock().unwrap().dht)
+    }
+
     /// Directly while the player answers there, else through who
     /// introduced it.
     fn path(peer: &Peer, now: Instant) -> Option<SocketAddrV4> {
         if peer.direct(now) { peer.addr } else { peer.via.or(peer.addr) }
     }
 
-    fn hello(&self, to: SocketAddrV4, flags: u8) {
+    fn hello(&self, to: SocketAddrV4, flags: u8, lobby: &LobbyId) {
         let mut d = Vec::with_capacity(32);
         d.extend_from_slice(&MAGIC);
         d.push(HELLO);
-        d.extend_from_slice(&self.lobby);
+        d.extend_from_slice(lobby);
         d.extend_from_slice(&self.id.to_be_bytes());
         d.extend_from_slice(&self.vip.load(Ordering::Relaxed).to_be_bytes());
         d.push(flags | self.flags.load(Ordering::Relaxed));
         let _ = self.socket.send_to(&d, to);
     }
 
-    /// Introduces players: `about` to `to`.
-    fn peers(&self, to: SocketAddrV4, about: &[(u64, u32, SocketAddrV4)]) {
+    /// Introduces players of `lobby`: `about` to `to`.
+    fn peers(&self, to: SocketAddrV4, lobby: &LobbyId, about: &[(u64, u32, SocketAddrV4)]) {
         for chunk in about.chunks(32) {
             let mut d = Vec::with_capacity(16 + chunk.len() * 18);
             d.extend_from_slice(&MAGIC);
             d.push(PEERS);
-            d.extend_from_slice(&self.lobby);
+            d.extend_from_slice(lobby);
             for (id, vip, addr) in chunk {
                 d.extend_from_slice(&id.to_be_bytes());
                 d.extend_from_slice(&vip.to_be_bytes());
@@ -316,14 +404,14 @@ impl P2p {
         }
     }
 
-    fn run(&self, deliver: Deliver) {
+    fn run(&self) {
         let mut buf = [0u8; 2048];
         let mut ticked = Instant::now() - KEEPALIVE;
         let mut dht_ticked = ticked;
         let mut swept = ticked - SWEEP;
         loop {
             match self.socket.recv_from(&mut buf) {
-                Ok((len, SocketAddr::V4(from))) => self.receive(from, &buf[..len], deliver),
+                Ok((len, SocketAddr::V4(from))) => self.receive(from, &buf[..len]),
                 Ok(_) => {}
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
                 // ICMP port unreachable, from a player gone (Windows).
@@ -335,6 +423,7 @@ impl P2p {
                 let mut out = dht::Output::default();
                 self.state.lock().unwrap().dht.tick(now, &mut out);
                 self.dht_output(out);
+                crate::friends::tick(self, now);
             }
             if now - ticked > KEEPALIVE {
                 ticked = now;
@@ -356,61 +445,82 @@ impl P2p {
         }
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
-        let new: Vec<SocketAddrV4> = out
-            .peers
-            .into_iter()
-            .filter(|a| {
-                !state.own.contains(a)
-                    && !state.trying.contains_key(a)
-                    && state.peers.values().all(|p| p.addr != Some(*a))
-            })
-            .collect();
-        for addr in &new {
-            log::debug!("p2p: trying {addr}, from the DHT");
-            state.trying.insert(*addr, now);
+        let mut new = Vec::new();
+        let mut friends = Vec::new();
+        for (key, addr) in out.peers {
+            if state.own.contains(&addr) {
+                continue;
+            }
+            let Some(lobby) = state.lobbies.iter().find(|l| l.key == key).map(|l| l.id) else {
+                friends.push((key, addr));
+                continue;
+            };
+            if !state.trying.contains_key(&addr) && state.peers.values().all(|p| p.addr != Some(addr)) {
+                log::debug!("p2p: trying {addr}, from the DHT");
+                state.trying.insert(addr, (now, lobby));
+                new.push((addr, lobby));
+            }
         }
         drop(state);
-        for addr in new {
-            self.hello(addr, ASK);
+        for (addr, lobby) in new {
+            self.hello(addr, ASK, &lobby);
+        }
+        for (key, addr) in friends {
+            crate::friends::found(self, key, addr);
         }
     }
 
     fn tick(&self, now: Instant) {
-        // Players on this machine or network (the ones on other machines
-        // mostly at the first port, as this one).
-        for port in PORTS {
-            self.hello(SocketAddrV4::new(Ipv4Addr::BROADCAST, port), ASK);
-            if port != self.port {
-                self.hello(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port), ASK);
-            }
-        }
         let mut state = self.state.lock().unwrap();
+        let lobbies: Vec<LobbyId> = state.lobbies.iter().map(|l| l.id).collect();
         state.peers.retain(|id, p| {
-            let alive = now - p.heard < GONE || now - p.introduced < GONE;
+            let alive = (now - p.heard < GONE || now - p.introduced < GONE) && lobbies.contains(&p.lobby);
             if !alive {
                 log::info!("p2p: player {id:016x} ({}) gone", Ipv4Addr::from(p.vip));
             }
             alive
         });
-        state.trying.retain(|_, since| now - *since < PUNCH);
-        let greet: Vec<SocketAddrV4> =
-            state.peers.values().filter_map(|p| p.addr).chain(state.trying.keys().copied()).collect();
+        state.trying.retain(|_, (since, lobby)| now - *since < PUNCH && lobbies.contains(lobby));
+        let greet: Vec<(SocketAddrV4, LobbyId)> = state
+            .peers
+            .values()
+            .filter_map(|p| Some((p.addr?, p.lobby)))
+            .chain(state.trying.iter().map(|(a, (_, l))| (*a, *l)))
+            .collect();
         // Introductions again now and then: they keep the players reached
         // only through others, and retry the ones not reached yet.
-        let reached: Vec<(u64, u32, SocketAddrV4)> =
-            state.peers.iter().filter(|(_, p)| p.direct(now)).map(|(i, p)| (*i, p.vip, p.addr.unwrap())).collect();
+        let reached: Vec<(u64, LobbyId, u32, SocketAddrV4)> = state
+            .peers
+            .iter()
+            .filter(|(_, p)| p.direct(now))
+            .map(|(i, p)| (*i, p.lobby, p.vip, p.addr.unwrap()))
+            .collect();
         let introduce = now.duration_since(state.introduced) > INTRODUCE;
         if introduce {
             state.introduced = now;
         }
         drop(state);
-        for addr in greet {
-            self.hello(addr, ASK);
+        // Players on this machine or network (the ones on other machines
+        // mostly at the first port, as this one).
+        for lobby in &lobbies {
+            for port in PORTS {
+                self.hello(SocketAddrV4::new(Ipv4Addr::BROADCAST, port), ASK, lobby);
+                if port != self.port {
+                    self.hello(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port), ASK, lobby);
+                }
+            }
+        }
+        for (addr, lobby) in greet {
+            self.hello(addr, ASK, &lobby);
         }
         if introduce {
-            for (id, _, addr) in &reached {
-                let others: Vec<_> = reached.iter().filter(|(i, ..)| i != id).copied().collect();
-                self.peers(*addr, &others);
+            for (id, lobby, _, addr) in &reached {
+                let others: Vec<_> = reached
+                    .iter()
+                    .filter(|(i, l, ..)| i != id && l == lobby)
+                    .map(|(i, _, vip, a)| (*i, *vip, *a))
+                    .collect();
+                self.peers(*addr, lobby, &others);
             }
         }
     }
@@ -419,17 +529,23 @@ impl P2p {
     /// port, where broadcasts do not get through; the players there are
     /// introduced to the others by the one reached.
     fn sweep(&self) {
+        let lobbies: Vec<LobbyId> = self.state.lock().unwrap().lobbies.iter().map(|l| l.id).collect();
+        if lobbies.is_empty() {
+            return;
+        }
         let Some(own) = lan_address() else { return };
         let [a, b, c, _] = own.octets();
         for d in 1..255 {
             let ip = Ipv4Addr::new(a, b, c, d);
             if ip != own {
-                self.hello(SocketAddrV4::new(ip, PORTS.start), ASK);
+                for lobby in &lobbies {
+                    self.hello(SocketAddrV4::new(ip, PORTS.start), ASK, lobby);
+                }
             }
         }
     }
 
-    fn receive(&self, from: SocketAddrV4, d: &[u8], deliver: Deliver) {
+    fn receive(&self, from: SocketAddrV4, d: &[u8]) {
         if Dht::is_dht(d) {
             let mut out = dht::Output::default();
             self.state.lock().unwrap().dht.receive(from, d, &mut out);
@@ -440,14 +556,20 @@ impl P2p {
             return;
         }
         let kind = d[MAGIC.len()];
+        if kind >= FRIENDS {
+            crate::friends::receive(self, from, kind, &d[MAGIC.len() + 1..]);
+            return;
+        }
         let d = &d[MAGIC.len() + 1..];
         match kind {
-            HELLO if d.len() >= 21 && d[..8] == self.lobby => {
+            HELLO if d.len() >= 21 => {
+                let lobby: LobbyId = d[..8].try_into().unwrap();
                 let id = u64::from_be_bytes(d[8..16].try_into().unwrap());
                 let vip = u32::from_be_bytes(d[16..20].try_into().unwrap());
-                self.on_hello(from, id, vip, d[20]);
+                self.on_hello(from, lobby, id, vip, d[20]);
             }
-            PEERS if d.len() >= 8 && d[..8] == self.lobby => {
+            PEERS if d.len() >= 8 => {
+                let lobby: LobbyId = d[..8].try_into().unwrap();
                 let about: Vec<(u64, u32, SocketAddrV4)> = d[8..]
                     .as_chunks::<18>()
                     .0
@@ -459,7 +581,7 @@ impl P2p {
                         (id, vip, SocketAddrV4::new(ip, u16::from_be_bytes([e[16], e[17]])))
                     })
                     .collect();
-                self.on_peers(from, &about);
+                self.on_peers(from, lobby, &about);
             }
             DATA if d.len() >= 12 => {
                 let src = u32::from_be_bytes(d[..4].try_into().unwrap());
@@ -468,13 +590,13 @@ impl P2p {
                 let dst_port = u16::from_be_bytes(d[10..12].try_into().unwrap());
                 let vip = self.vip.load(Ordering::Relaxed);
                 let state = self.state.lock().unwrap();
-                // Only from players of the lobby.
+                // Only from players of the lobbies.
                 if !state.peers.values().any(|p| p.addr == Some(from) || p.vip == src) {
                     return;
                 }
                 if dst == vip || is_broadcast(dst) {
                     drop(state);
-                    deliver(src, src_port, dst_port, &d[12..]);
+                    crate::vnet::deliver(src, src_port, dst_port, &d[12..]);
                 } else if let Some(to) = state.peers.values().find(|p| p.vip == dst).and_then(|p| p.addr) {
                     // A relay for two players who cannot reach each other.
                     let mut relayed = Vec::with_capacity(MAGIC.len() + 1 + d.len());
@@ -488,9 +610,12 @@ impl P2p {
         }
     }
 
-    fn on_hello(&self, from: SocketAddrV4, id: u64, vip: u32, flags: u8) {
+    fn on_hello(&self, from: SocketAddrV4, lobby: LobbyId, id: u64, vip: u32, flags: u8) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
+        if state.lobby(&lobby).is_none() {
+            return;
+        }
         state.trying.remove(&from);
         if id == self.id {
             state.own.insert(from);
@@ -508,8 +633,9 @@ impl P2p {
                 self.vip.store(free_vip(&taken), Ordering::Relaxed);
             }
         }
-        let peer = state.peers.entry(id).or_insert(Peer::new(vip, now));
+        let peer = state.peers.entry(id).or_insert(Peer::new(vip, lobby, now));
         peer.vip = vip;
+        peer.lobby = lobby;
         // The nearest of its addresses that answer.
         if !peer.direct(now) || peer.addr.is_none_or(|a| nearness(from) <= nearness(a)) {
             peer.addr = Some(from);
@@ -523,27 +649,31 @@ impl P2p {
         peer.flags = flags & (WAITING | PLAYING);
         if !known {
             log::info!("p2p: player {id:016x} ({}) at {from}", Ipv4Addr::from(vip));
-            // Introductions: the newcomer to everyone, everyone to it.
-            let others: Vec<(u64, u32, SocketAddrV4)> =
-                state.peers.iter().filter(|(i, _)| **i != id).filter_map(|(i, p)| Some((*i, p.vip, p.addr?))).collect();
+            // Introductions: the newcomer to everyone of its lobby, them to it.
+            let others: Vec<(u64, u32, SocketAddrV4)> = state
+                .peers
+                .iter()
+                .filter(|(i, p)| **i != id && p.lobby == lobby)
+                .filter_map(|(i, p)| Some((*i, p.vip, p.addr?)))
+                .collect();
             drop(state);
-            self.peers(from, &others);
+            self.peers(from, &lobby, &others);
             for (_, _, addr) in &others {
-                self.peers(*addr, &[(id, vip, from)]);
+                self.peers(*addr, &lobby, &[(id, vip, from)]);
             }
         } else {
             drop(state);
         }
         if flags & ASK != 0 {
-            self.hello(from, 0);
+            self.hello(from, 0, &lobby);
         }
     }
 
-    fn on_peers(&self, from: SocketAddrV4, about: &[(u64, u32, SocketAddrV4)]) {
+    fn on_peers(&self, from: SocketAddrV4, lobby: LobbyId, about: &[(u64, u32, SocketAddrV4)]) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
         // Only a player of the lobby introduces others.
-        if !state.peers.values().any(|p| p.addr == Some(from)) {
+        if state.lobby(&lobby).is_none() || !state.peers.values().any(|p| p.addr == Some(from) && p.lobby == lobby) {
             return;
         }
         let mut punch = Vec::new();
@@ -551,7 +681,7 @@ impl P2p {
             if id == self.id {
                 continue;
             }
-            let peer = state.peers.entry(id).or_insert(Peer::new(vip, now));
+            let peer = state.peers.entry(id).or_insert(Peer::new(vip, lobby, now));
             peer.vip = vip;
             peer.via = Some(from);
             peer.introduced = now;
@@ -560,11 +690,11 @@ impl P2p {
             }
         }
         for addr in &punch {
-            state.trying.insert(*addr, now);
+            state.trying.insert(*addr, (now, lobby));
         }
         drop(state);
         for addr in punch {
-            self.hello(addr, ASK);
+            self.hello(addr, ASK, &lobby);
         }
     }
 }

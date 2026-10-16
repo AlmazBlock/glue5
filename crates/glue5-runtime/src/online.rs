@@ -44,10 +44,14 @@ pub(crate) const ENGINE_ARGS: &[&str] = &[
 
 /// The local gamer's id (as Rockstar's ids): made up once per user
 /// directory, kept in it.
-fn gamer_id() -> u64 {
+pub(crate) fn gamer_id() -> u64 {
+    gamer_id_in(&crate::rt().config.user_dir)
+}
+
+pub(crate) fn gamer_id_in(user_dir: &std::path::Path) -> u64 {
     static ID: OnceLock<u64> = OnceLock::new();
     *ID.get_or_init(|| {
-        let path = crate::rt().config.user_dir.join("online-id");
+        let path = user_dir.join("online-id");
         if let Some(id) = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse().ok()) {
             return id;
         }
@@ -73,6 +77,7 @@ pub(crate) fn start(online: &crate::Online, hooks: &mut glue5_game::Hooks) {
     crate::vnet::hooks(hooks);
     crate::cloud::hooks(hooks);
     crate::jobs::hooks(hooks);
+    crate::friends::game::hooks(hooks);
     crate::texts::hooks(hooks);
     crate::stats::hooks(hooks);
     // The stand-ins' methods, host functions the game calls through their
@@ -88,8 +93,9 @@ pub(crate) fn start(online: &crate::Online, hooks: &mut glue5_game::Hooks) {
             sign_in_info as *const () as usize,
         ]
     }));
-    if let Err(e) = crate::p2p::start(&online.lobby, crate::vnet::deliver) {
-        log::error!("p2p: {e}");
+    match crate::p2p::start() {
+        Ok(p2p) => p2p.join_lobby(&online.lobby),
+        Err(e) => log::error!("p2p: {e}"),
     }
 }
 
@@ -158,8 +164,10 @@ pub(crate) unsafe extern "C" fn live_manager_init(env: *mut Env, mode: u32) {
 }
 
 /// Hook for `CLiveManager::Update(unsigned int)`: the device's network
-/// stays up (see `vnet::network_up`), the tunables' request is over.
+/// stays up (see `vnet::network_up`), the tunables' request is over;
+/// friends (friends/game.rs).
 pub(crate) unsafe extern "C" fn live_manager_update(env: *mut Env, mode: u32) {
+    unsafe { crate::friends::game::update(env) };
     crate::vnet::network_up(unsafe { Mem::of(env) });
     unsafe { tunables_requested(env) };
     unsafe { orig::live_manager_update(env, mode) };

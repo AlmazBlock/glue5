@@ -15,6 +15,7 @@ mod device_reset;
 mod dht;
 pub mod exit;
 mod files;
+pub mod friends;
 pub mod game_settings;
 mod gamer_tags;
 mod gamelog;
@@ -285,6 +286,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     if let Some(online) = &rt().config.online {
         online::start(online, &mut hooks);
     }
+    friends::set_playing(if rt().config.online.is_some() { friends::Playing::Online } else { friends::Playing::Story });
     glue5_game::install(glue5_game::imports_from!(imports), hooks);
     let engine = threads::spawn_main()?;
     Ok(Game { engine })
