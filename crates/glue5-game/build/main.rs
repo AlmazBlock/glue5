@@ -176,6 +176,14 @@ fn run() -> Result<()> {
         }
         build.flag("/std:c17").define("WIN32_LEAN_AND_MEAN", None).define("NOMINMAX", None);
     }
+    // Linux: Clang too, as everywhere else (Apple's, the NDK's, clang-cl),
+    // rather than the system's cc, usually GCC. `CC` overrides it.
+    if env::var("CARGO_CFG_TARGET_OS")? == "linux" {
+        let target = env::var("TARGET")?;
+        if env::var_os("CC").is_none() && env::var_os(format!("CC_{}", target.replace('-', "_"))).is_none() {
+            build.compiler("clang");
+        }
+    }
     // Three groups, each keyed by the headers it includes (sources are not
     // scanned for includes): the game, the glue, the wasm2c runtime.
     let glue = vec![gen_dir.join("glue.c"), manifest.join("csrc/glue5.c")];
