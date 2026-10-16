@@ -421,9 +421,11 @@ impl App {
             self.touch_mouse = Default::default();
         }
         glue5_runtime::input::set_touch_play(show);
+        glue5_runtime::input::set_touch_targeting(self.settings.touch_aim.targeting());
         if show {
             self.touch.haptics = self.settings.haptics;
             self.touch.camera_speed = self.settings.touch_camera;
+            self.touch.aim_locked = glue5_runtime::input::aim_locked();
             self.touch.layout(ui::screen_size(&self.window), ui::safe_rect(&self.window), self.settings.touch_size);
             self.touch.set_context(glue5_runtime::input::player_context());
             glue5_runtime::input::set_gamepad(0, self.touch.gamepad());

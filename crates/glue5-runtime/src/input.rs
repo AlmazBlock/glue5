@@ -236,6 +236,72 @@ pub fn set_touch_play(on: bool) {
     TOUCH_PLAY.store(on, Ordering::Relaxed);
 }
 
+/// The pause menu's Targeting Mode (`PREF_TARGET_CONFIG`, in its array of
+/// u32 preferences): the aim assist with a pad. Keyboard and mouse always
+/// aim freely.
+const PREF_TARGETING: u64 = 19566112 + 4 * 3;
+/// The aim assist during touch play (a [`Targeting`]), `NO_TARGETING` until
+/// the app sets it.
+static TOUCH_TARGETING: AtomicU32 = AtomicU32::new(NO_TARGETING);
+const NO_TARGETING: u32 = u32::MAX;
+/// The menu's Targeting Mode while touch play's stands in for it.
+static MENU_TARGETING: Mutex<Option<i32>> = Mutex::new(None);
+
+/// The game's targeting modes (its menu's names).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Targeting {
+    /// Assisted Aim - Full: aiming locks on to the nearest target and
+    /// follows it; the right stick switches between targets.
+    Full = 0,
+    /// Assisted Aim - Partial: aiming snaps to the target, then the right
+    /// stick aims freely around it.
+    Partial = 1,
+    /// Free Aim - Assisted: the camera slows down over targets.
+    FreeAssisted = 2,
+    /// Free Aim.
+    Free = 3,
+}
+
+/// The aim assist during touch play, in place of the menu's (shown and
+/// kept there) out of the pause menu.
+pub fn set_touch_targeting(targeting: Targeting) {
+    TOUCH_TARGETING.store(targeting as u32, Ordering::Relaxed);
+}
+
+/// A player ped's `CPlayerInfo`, its targeting (`CPlayerPedTargeting`), the
+/// target that is locked on to.
+const PED_PLAYER_INFO: u64 = 4328;
+const PLAYER_TARGETING: u64 = 1024;
+const TARGETING_LOCK_ON: u64 = 48;
+static AIM_LOCKED: AtomicBool = AtomicBool::new(false);
+
+/// The player's aim is locked on to a target (the assisted targeting modes,
+/// aiming): the camera follows it, the right stick switches targets.
+pub fn aim_locked() -> bool {
+    AIM_LOCKED.load(Ordering::Relaxed)
+}
+
+/// Whether the player's aim is locked on now.
+fn update_aim_locked(env: *mut Env, mem: Mem) {
+    let ped = unsafe { orig::find_player_ped(env) };
+    let info = if ped != 0 { mem.u64(ped + PED_PLAYER_INFO) } else { 0 };
+    let locked = info != 0 && mem.u64(info + PLAYER_TARGETING + TARGETING_LOCK_ON) != 0;
+    AIM_LOCKED.store(locked, Ordering::Relaxed);
+}
+
+/// Puts touch play's targeting mode in place of the menu's while it plays,
+/// the menu's back otherwise (the pause menu shows and saves it).
+fn update_targeting(mem: Mem, touch_play: bool) {
+    let touch = TOUCH_TARGETING.load(Ordering::Relaxed);
+    let mut menu = MENU_TARGETING.lock().unwrap();
+    if touch_play && touch != NO_TARGETING {
+        menu.get_or_insert_with(|| mem.i32(PREF_TARGETING));
+        mem.set_i32(PREF_TARGETING, touch as i32);
+    } else if let Some(mode) = menu.take() {
+        mem.set_i32(PREF_TARGETING, mode);
+    }
+}
+
 /// What the player is doing, for the touch controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerContext {
@@ -306,9 +372,13 @@ pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     // Every part of it (the store, Social Club, the video editor).
     let menu = unsafe { orig::pause_menu_is_active(env, 0) } != 0;
     PAUSE_MENU.store(menu, Ordering::Relaxed);
-    if TOUCH_PLAY.load(Ordering::Relaxed) && !menu {
-        unsafe { Mem::of(env) }.set_i32(LAST_DEVICE, 0);
+    let touch_play = TOUCH_PLAY.load(Ordering::Relaxed) && !menu;
+    let mem = unsafe { Mem::of(env) };
+    if touch_play {
+        mem.set_i32(LAST_DEVICE, 0);
     }
+    update_targeting(mem, touch_play);
+    update_aim_locked(env, mem);
 }
 
 /// Hook for `CTaskPlayerOnFoot::ProcessPreFSM`: the player is on foot.

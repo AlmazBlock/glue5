@@ -289,6 +289,12 @@ const FOLLOW_REACH: f32 = 1.7;
 /// The mouse counts a finger dragged one point turns the camera by, at
 /// camera speed 1 (the game's mouse sensitivity setting applies on top).
 const LOOK_GAIN: f32 = 16.0;
+/// While the aim is locked on, a finger dragged this many points in a frame
+/// pushes the right stick all the way (a swipe switches targets; a thumb's
+/// tremor stays in the game's dead zone). A mouse's motion would break the
+/// lock instead.
+const LOCKED_SWIPE: f32 = 8.0;
+
 #[derive(Clone, Copy, Debug)]
 enum Finger {
     /// A stick held: where the thumb landed and where it is.
@@ -336,11 +342,18 @@ pub struct Touch {
     pub haptics: bool,
     /// The camera's speed (the setting).
     pub camera_speed: f32,
+    /// The player's aim is locked on to a target: drags push the right
+    /// stick instead of turning the camera.
+    pub aim_locked: bool,
     /// What the player is doing: the layout follows.
     context: PlayerContext,
     /// The camera's turn since the last [`Touch::take_look`], in mouse
     /// counts.
     look: Vec2,
+    /// While locked on: the drag since the last [`Touch::gamepad`], and the
+    /// right stick it made (easing off once the finger stops).
+    locked_drag: Vec2,
+    locked_stick: Vec2,
     /// The buttons' icons, loaded when first drawn.
     icons: std::cell::OnceCell<Icons>,
     /// The pause menu's mouse: where it is, its click from and until when
@@ -381,6 +394,7 @@ impl Touch {
             scale: 1.0,
             haptics: false,
             camera_speed: 1.0,
+            aim_locked: false,
             context: PlayerContext {
                 activity: Activity::OnFoot,
                 vehicle_near: false,
@@ -389,6 +403,8 @@ impl Touch {
                 cutscene: false,
             },
             look: Vec2::ZERO,
+            locked_drag: Vec2::ZERO,
+            locked_stick: Vec2::ZERO,
             icons: std::cell::OnceCell::new(),
             mouse_at: None,
             click: None,
@@ -594,6 +610,7 @@ impl Touch {
         let follow = FOLLOW_REACH * self.stick_radius();
         let gain = LOOK_GAIN * self.camera_speed;
         let wheel = self.wheel_open();
+        let mut turned = Vec2::ZERO;
         match self.fingers.get_mut(&id) {
             Some(Finger::Move { origin, at }) => {
                 *at = p;
@@ -605,17 +622,30 @@ impl Touch {
             }
             Some(Finger::Camera { last, .. }) => {
                 if !wheel {
-                    self.look += (p - *last) * gain;
+                    turned = p - *last;
                 }
                 *last = p;
             }
             Some(Finger::Action(a, _, last)) => {
                 if a.kind == Kind::Turns {
-                    self.look += (p - *last) * gain;
+                    turned = p - *last;
                 }
                 *last = p;
             }
             _ => {}
+        }
+        if turned != Vec2::ZERO {
+            self.turn(turned, gain);
+        }
+    }
+
+    /// A finger dragged by `d` turns the camera, or while locked on pushes
+    /// the right stick.
+    fn turn(&mut self, d: Vec2, gain: f32) {
+        if self.aim_locked {
+            self.locked_drag += d;
+        } else {
+            self.look += d * gain;
         }
     }
 
@@ -629,6 +659,8 @@ impl Touch {
         self.fingers.clear();
         self.pressed = 0;
         self.look = Vec2::ZERO;
+        self.locked_drag = Vec2::ZERO;
+        self.locked_stick = Vec2::ZERO;
         self.click = None;
         self.back_until = None;
         self.wheel = 0.0;
@@ -666,6 +698,18 @@ impl Touch {
                     }
                 }
             }
+        }
+        // Locked on, the drags of this frame push the right stick.
+        let drag = std::mem::take(&mut self.locked_drag);
+        self.locked_stick = if !self.aim_locked {
+            Vec2::ZERO
+        } else if drag != Vec2::ZERO {
+            drag / LOCKED_SWIPE
+        } else {
+            self.locked_stick * 0.5
+        };
+        if self.locked_stick.length() > 0.05 {
+            pad.right = stick_value(self.locked_stick);
         }
         // An open wheel picks with the other thumb's drag too (the wheels'
         // buttons sit on the left).
@@ -774,6 +818,40 @@ mod tests {
         let screen = vec2(844.0, 390.0);
         t.layout(screen, Rect::from_min_max(pos2(47.0, 0.0), pos2(797.0, 369.0)), 1.0);
         t
+    }
+
+    #[test]
+    fn locked_on_a_drag_pushes_the_right_stick() {
+        let mut t = phone();
+        t.set_context(context(Activity::OnFoot));
+        let at = |t: &Touch, p: Pos2| (p.x / t.screen.x, p.y / t.screen.y);
+        // Aim held, its thumb trembling: no turn, a stick in the dead zone.
+        let aim = ON_FOOT.iter().find(|a| a.bits == button::L2).unwrap();
+        let p = t.pos(aim.at);
+        let (x, y) = at(&t, p);
+        t.finger_down(1, x, y);
+        t.aim_locked = true;
+        let (x, y) = at(&t, p + vec2(1.0, 0.0));
+        t.finger_motion(1, x, y);
+        let pad = t.gamepad();
+        assert!(pad.right[0] < 0.2 && pad.l2 == 1.0);
+        assert_eq!(t.take_look(), (0, 0));
+        // A swipe on the camera: the stick all the way, then easing off.
+        let c = pos2(560.0, 160.0);
+        let (x, y) = at(&t, c);
+        t.finger_down(2, x, y);
+        let (x, y) = at(&t, c + vec2(-2.0 * LOCKED_SWIPE, 0.0));
+        t.finger_motion(2, x, y);
+        assert_eq!(t.gamepad().right, [-1.0, 0.0]);
+        assert_eq!(t.gamepad().right, [-1.0, 0.0]);
+        assert!(t.gamepad().right[0] > -1.0);
+        assert_eq!(t.take_look(), (0, 0));
+        // Unlocked, drags turn the camera again.
+        t.aim_locked = false;
+        let (x, y) = at(&t, c);
+        t.finger_motion(2, x, y);
+        assert_eq!(t.gamepad().right, [0.0, 0.0]);
+        assert_ne!(t.take_look(), (0, 0));
     }
 
     #[test]
