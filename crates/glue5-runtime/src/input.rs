@@ -203,6 +203,11 @@ const TEXT_LEN: u32 = 64;
 const WIN_W: u64 = 432;
 const WIN_H: u64 = 436;
 
+/// `CMousePointer`'s "shown last frame" in this build: what its `Update`
+/// decided (the pause menu or another screen with a cursor, the window in
+/// front), kept from one update to the next.
+const CURSOR_SHOWN: u64 = 19505961;
+
 /// Mouse buttons in the input block.
 pub mod mouse {
     pub const LEFT: u32 = 1;
@@ -269,6 +274,13 @@ impl InputBlock {
 
     pub fn pointer_locked(&self, locked: bool) {
         self.mem.set_u32(self.at + LOCKED, locked as u32);
+    }
+
+    /// Whether the game shows its own mouse cursor (the pause menu, the
+    /// map, the phone's browser, ...: wherever it is clicked on). The game
+    /// draws it itself; on PC it then frees the pointer.
+    pub fn cursor_shown(&self) -> bool {
+        self.mem.u8(CURSOR_SHOWN) & 1 != 0
     }
 
     /// Typed text (Enter = 13, Backspace = 8 also go through here).
