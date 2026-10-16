@@ -13,6 +13,7 @@ pub mod cpu;
 mod device_reset;
 mod dht;
 pub mod exit;
+mod files;
 pub mod game_settings;
 mod gamer_tags;
 mod gamelog;
@@ -263,6 +264,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     exit::hooks(&mut hooks);
     gamelog::hooks(&mut hooks);
     memory::hooks(&mut hooks);
+    files::hooks(&mut hooks);
     skin::hooks(&mut hooks);
     shader_settings::hooks(&mut hooks);
     shadow_reveal::hooks(&mut hooks);

@@ -296,20 +296,8 @@ pub(crate) unsafe extern "C" fn ugc_query_content(
     0
 }
 
-/// Hook for `rage::fiDevice::MakeGrowBufferFileName(char*, int,
-/// datGrowBuffer*)`: "growbuffer:" and the buffer's address in hex, which
-/// `fiDeviceGrowBuffer` reads back as the file's handle. The engine formats
-/// it with `%p`, which in this build's C library begins with "0x": the
-/// device read 0 (Windows' `%p` has no prefix), and files in memory had no
-/// buffer.
-pub(crate) unsafe extern "C" fn grow_buffer_file_name(env: *mut Env, name: u64, size: u32, buffer: u64) {
-    let m = unsafe { Mem::of(env) };
-    m.write_str(name, &format!("growbuffer:{buffer:x}"), size as usize);
-}
-
 /// This module's hooks, online.
 pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
-    hooks.grow_buffer_file_name = Some(grow_buffer_file_name);
     hooks.xml_bool_attribute = Some(xml_bool_attribute);
     hooks.stats_init = Some(stats_init);
     hooks.stats_update = Some(stats_update);
