@@ -834,8 +834,8 @@ impl App {
         self.replace_surface();
         self.ui.repaint();
         // The game's files may have been copied in meanwhile (Finder, the
-        // Files app, adb).
-        if self.game.is_none() && self.game_dir.is_none() {
+        // Files app, adb). Not for a server, whose copy is found once ready.
+        if self.game.is_none() && self.game_dir.is_none() && self.settings.source == Source::Folder {
             self.find_game(None);
         }
     }
