@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 glue5-game.workspace = true
+glue5-stream.workspace = true
 anyhow.workspace = true
 log.workspace = true
 sha2.workspace = true

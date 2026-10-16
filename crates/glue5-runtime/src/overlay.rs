@@ -14,6 +14,11 @@ const OVERLAYS: [(&str, fn() -> bool, Patch); 3] = [
     ("common/data/ui/frontend.xml", always, feed_width),
 ];
 
+/// The changed files' paths under `data/`.
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    OVERLAYS.iter().map(|(name, _, _)| *name)
+}
+
 fn online() -> bool {
     crate::rt().config.online.is_some()
 }

@@ -100,6 +100,11 @@ struct Args {
     /// The game directory.
     #[arg(long, value_name = "DIR", env = "GLUE5_GAME_DIR")]
     game: PathBuf,
+    /// Stream the game from a server (host or host:port, see glue5-serve)
+    /// instead of --game; the copy is kept in the user directory's
+    /// `stream`, and is used again by the next run.
+    #[arg(long, value_name = "ADDR")]
+    server: Option<String>,
 }
 
 fn parse_size(size: &str) -> Result<(u32, u32)> {
@@ -151,7 +156,30 @@ fn main() -> Result<()> {
         _ => None,
     };
     let user_dir = args.user_dir.unwrap_or_else(|| std::env::temp_dir().join("glue5-headless"));
-    let (game_dir, low) = (args.game, args.low);
+    let (mut game_dir, low) = (args.game, args.low);
+    let stream = match args.server {
+        Some(server) => {
+            let client = glue5_stream::Client::start(glue5_stream::Options {
+                server,
+                root: user_dir.join("stream"),
+                build: glue5_runtime::GAME_BUILD.into(),
+                low_memory: low,
+            });
+            let started = Instant::now();
+            while !client.is_ready() {
+                let status = client.status();
+                if let glue5_stream::Phase::Failed(why) = status.phase {
+                    bail!("{why}");
+                }
+                log::info!("stream: {:?}{}", status.phase, status.error.map(|e| format!(" ({e})")).unwrap_or_default());
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            log::info!("stream: ready in {:.1?}", started.elapsed());
+            game_dir = client.root().to_owned();
+            Some(client)
+        }
+        None => None,
+    };
     if low {
         glue5_runtime::game_settings::apply_low_preset(&user_dir)?;
     }
@@ -190,6 +218,7 @@ fn main() -> Result<()> {
     let game = glue5_runtime::start(
         glue5_runtime::Config {
             game_dir,
+            stream,
             user_dir,
             width: args.size.0,
             height: args.size.1,

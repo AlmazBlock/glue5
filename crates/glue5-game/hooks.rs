@@ -39,4 +39,5 @@ pub const HOOKS: &[&[(&str, &str)]] = &[
     include!("hooks/stats.rs"),
     include!("hooks/upscale.rs"),
     include!("hooks/boot_screen.rs"),
+    include!("hooks/stream.rs"),
 ];

@@ -689,6 +689,7 @@ impl App {
         let game = glue5_runtime::start(
             glue5_runtime::Config {
                 game_dir: game_dir.clone(),
+                stream: None,
                 user_dir: self.user_dir.clone(),
                 width: back_buffer.0,
                 height: back_buffer.1,

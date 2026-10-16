@@ -36,6 +36,7 @@ mod shadow_reveal;
 mod script_assets;
 mod skin;
 mod stats;
+mod stream;
 mod texts;
 mod threads;
 mod time;
@@ -76,9 +77,12 @@ pub mod layout {
         game.join("b").join(super::GAME_BUILD).join("shaders")
     }
 
-    /// Whether `game` holds the game, for this build.
+    /// Whether `game` holds the game, for this build (a stream's partial
+    /// copy does not).
     pub fn is_game_dir(game: &Path) -> bool {
-        data_dir(game).is_dir() && shader_dir(game).join("index.json").is_file()
+        data_dir(game).is_dir()
+            && shader_dir(game).join("index.json").is_file()
+            && !game.join(glue5_stream::cache::MARKER).exists()
     }
 }
 
@@ -88,8 +92,11 @@ use crate::vfs::Vfs;
 /// How the game is started.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The game directory: `b/<build>/` (shaders) and `data/`.
+    /// The game directory: `b/<build>/` (shaders) and `data/`. When the game
+    /// streams, the stream's copy ([`glue5_stream::Client::root`]).
     pub game_dir: PathBuf,
+    /// The game's files come from a server, through this client (ready).
+    pub stream: Option<std::sync::Arc<glue5_stream::Client>>,
     /// Where saves and settings go.
     pub user_dir: PathBuf,
     /// Back buffer size.
@@ -246,7 +253,9 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     log::info!("engine log: {} (GLUE5_ENGINE_LOG=stdout also prints it)", log.display());
     glue5_game::set_trap_hook(trap_site::record);
     time::fine_timers();
-    let vfs = Vfs::new(data.clone(), config.user_dir.clone()).with_context(|| format!("opening {}", data.display()))?;
+    // Streaming, the engine's HTTP device serves /game (stream.rs).
+    let game_files = config.stream.is_none().then(|| data.clone());
+    let vfs = Vfs::new(game_files, config.user_dir.clone()).with_context(|| format!("opening {}", data.display()))?;
     let memory = WasmMemory::reserve()?;
     let runtime = Runtime {
         config,
@@ -283,6 +292,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     tour::hooks(&mut hooks);
     upscale::hooks(&mut hooks);
     boot_screen::hooks(&mut hooks);
+    stream::hooks(&mut hooks);
     if let Some(online) = &rt().config.online {
         online::start(online, &mut hooks);
     }
