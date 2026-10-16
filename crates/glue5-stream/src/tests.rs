@@ -181,6 +181,47 @@ fn demand_overtakes_prefetch() {
 }
 
 #[test]
+fn counts_reads_not_announced_in_time() {
+    let dir = temp("late");
+    let data = noise(16 << 20, 5);
+    fs::create_dir_all(dir.join("data")).unwrap();
+    fs::write(dir.join("data/a.rpf"), &data).unwrap();
+    fs::write(dir.join("data/b.rpf"), &data[..1 << 20]).unwrap();
+    fs::create_dir_all(dir.join(format!("b/{BUILD}/shaders"))).unwrap();
+    fs::write(dir.join(format!("b/{BUILD}/shaders/index.json")), b"{}").unwrap();
+    // 8 MB/s: what is announced takes two seconds to come.
+    let opts = server::Options { game: dir.clone(), build: BUILD.into(), cache: dir.join("packs"), rate: Some(8_000_000) };
+    let prepared = server::prepare(opts, &|_| {}).unwrap();
+    let server = Server::start(&prepared, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let root = temp("late-copy");
+    let client = Client::start(Options {
+        server: server.addr().to_string(),
+        root: root.clone(),
+        build: BUILD.into(),
+        low_memory: false,
+    });
+    wait_ready(&client);
+    let (a, b) = (client.find("data/a.rpf").unwrap(), client.find("data/b.rpf").unwrap());
+    client.hint(a, 0, data.len() as u64, true);
+    std::thread::sleep(Duration::from_millis(300));
+    // Announced in time, on its way: waits, but counts not.
+    let at = 12 << 20;
+    let mut buf = vec![0u8; 256 << 10];
+    assert_eq!(client.read(a, at, &mut buf[..4096]), Some(4096));
+    // Its first block is here now (with the rest of its request), the
+    // others on their way: announced in time too.
+    assert_eq!(client.read(a, at + 4000, &mut buf), Some(buf.len()));
+    assert_eq!(&buf[..], &data[at as usize + 4000..][..buf.len()]);
+    assert_eq!(client.not_in_time(), 0);
+    // Never announced.
+    assert_eq!(client.read(b, 5000, &mut buf[..100]), Some(100));
+    assert_eq!(client.not_in_time(), 1);
+    client.stop();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn downloads_the_whole_game() {
     let dir = temp("whole");
     game(&dir);

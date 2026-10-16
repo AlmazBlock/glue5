@@ -62,6 +62,10 @@ const FILL_REQUESTS: usize = 512;
 const BOOT_SET: &str = "bootset.json";
 /// No data for this long with requests in flight: the connection is dead.
 const SILENCE: Duration = Duration::from_secs(20);
+/// A read whose blocks were asked for less than this before the engine came
+/// to wait for them was not announced in time (the engine often announces a
+/// read as it makes it): it costs a round trip as if not announced at all.
+const IN_TIME: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
@@ -141,6 +145,7 @@ struct Req {
     first: u64,
     last: u64,
     prio: u8,
+    asked: Instant,
 }
 
 struct Waiter {
@@ -231,6 +236,12 @@ impl Client {
 
     pub fn is_ready(&self) -> bool {
         self.ready.get().is_some()
+    }
+
+    /// Engine reads that waited for blocks not announced in time, so far.
+    #[cfg(test)]
+    pub(crate) fn not_in_time(&self) -> u64 {
+        self.stats.cold.load(Ordering::Relaxed)
     }
 
     pub fn status(&self) -> Status {
@@ -329,7 +340,7 @@ impl Client {
         }
         let (first, last) = (off / BLOCK, (off + n as u64 - 1) / BLOCK);
         let started = Instant::now();
-        if self.inflight.lock().unwrap().covering(id, first).is_none() {
+        if !self.in_time(r, id, first, last) {
             self.stats.cold.fetch_add(1, Ordering::Relaxed);
         }
         self.waiters.lock().unwrap().push(Waiter { file: id, first, last, thread: thread::current() });
@@ -365,6 +376,26 @@ impl Client {
         self.stats.waits.fetch_add(1, Ordering::Relaxed);
         self.stats.wait_us.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         got
+    }
+
+    /// Whether the blocks `first..=last` of file `id` not here yet were all
+    /// asked for [`IN_TIME`] before at least: the engine announced the read
+    /// in time. (Its first block alone says little: it is often here, shared
+    /// with the read before.)
+    fn in_time(&self, r: &Ready, id: u32, first: u64, last: u64) -> bool {
+        let inf = self.inflight.lock().unwrap();
+        let mut b = first;
+        while b <= last {
+            if r.cache.has_block(id, b) {
+                b += 1;
+                continue;
+            }
+            match inf.covering(id, b).map(|q| inf.reqs[&q]) {
+                Some(q) if q.asked.elapsed() >= IN_TIME => b = q.last + 1,
+                _ => return false,
+            }
+        }
+        true
     }
 
     /// The engine will read this soon (`ahead`: may read it).
@@ -445,7 +476,7 @@ impl Client {
             while b <= last && b - start < MAX_RUN && !r.cache.has_block(id, b) && inf.covering(id, b).is_none() {
                 b += 1;
             }
-            let req = inf.add(Req { file: id, first: start, last: b - 1, prio });
+            let req = inf.add(Req { file: id, first: start, last: b - 1, prio, asked: Instant::now() });
             let off = start * BLOCK;
             let len = (b * BLOCK).min(size) - off;
             out.push(Header { kind: READ, prio, req, off, len: len as u32, file: id, crc: 0 });
@@ -851,7 +882,7 @@ impl Client {
             let [got, waits, wait_us, cold, hints] = std::array::from_fn(|i| now[i] - last[i]);
             if got > 0 || waits > 0 {
                 log::info!(
-                    "stream: {:.1} MB/s; {waits} engine reads waited, {:.0} ms each, {cold} of them not announced; \
+                    "stream: {:.1} MB/s; {waits} engine reads waited, {:.0} ms each, {cold} of them not announced in time; \
                      {hints} announcements; {} requests in flight; copy {:.2} GB",
                     got as f64 / 1e6 / at.elapsed().as_secs_f64(),
                     if waits > 0 { wait_us as f64 / 1e3 / waits as f64 } else { 0.0 },
