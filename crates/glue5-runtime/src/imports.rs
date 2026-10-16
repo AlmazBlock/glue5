@@ -125,10 +125,10 @@ pub unsafe extern "C" fn wasm_module_int_js(env: *mut Env, name: u64, default: u
         }
         None => default,
     };
-    // Phones, and low memory anywhere: the resource heap's budget is its
+    // Phones and the Apple TV, and low memory anywhere: the resource heap's budget is its
     // starting size. Unbudgeted, the streaming engine keeps it full and it
     // grows by 256 MiB each time: past 2.5 GiB in the game's benchmark.
-    let phone = cfg!(any(target_os = "ios", target_os = "android"));
+    let phone = cfg!(any(target_os = "ios", target_os = "android", target_os = "tvos"));
     if name == "gameResourceMB" && (low || phone) {
         crate::memory::budget_resource_heap(value);
     }

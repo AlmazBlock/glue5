@@ -1172,16 +1172,16 @@ fn holds_no_files(dir: &Path) -> bool {
 }
 
 /// The next event, waiting up to `timeout` for one.
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "tvos")))]
 fn wait_event(events: &mut sdl3::EventPump, timeout: Duration) -> Option<Event> {
     events.wait_event_timeout(timeout)
 }
 
-/// On iOS SDL cannot sleep until an event: its wait runs the run loop for
+/// On iOS and tvOS SDL cannot sleep until an event: its wait runs the run loop for
 /// a moment every millisecond (a sixth of a core, all the time). The run
 /// loop itself sleeps until a source fires (a touch, a controller, a timer)
 /// or the time is up; SDL then has the events it queued.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
 fn wait_event(events: &mut sdl3::EventPump, timeout: Duration) -> Option<Event> {
     use std::ffi::c_void;
     unsafe extern "C" {
