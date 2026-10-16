@@ -153,6 +153,12 @@ fn run() -> Result<()> {
     if env::var("TARGET")? == "aarch64-apple-ios" {
         build.flag("-mcpu=apple-a11");
     }
+    // Android likewise defaults to ARMv8.0, with atomics as calls that pick
+    // LSE at run time. Phones that can run the game have ARMv8.2 cores
+    // (Cortex-A55/A75 and later), none of them a Cortex-A53.
+    if env::var("TARGET")? == "aarch64-linux-android" {
+        build.flag("-march=armv8.2-a").flag("-mno-fix-cortex-a53-835769");
+    }
     if env::var("CARGO_CFG_TARGET_ARCH")? == "x86_64" {
         build.flag_if_supported("-msse4.1"); // SIMDe maps wasm SIMD much better with SSE4.1
     }
