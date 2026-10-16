@@ -7,6 +7,7 @@
 
 pub mod audio;
 mod audio_update;
+mod blips;
 mod boot_screen;
 mod cloud;
 pub mod cpu;
@@ -267,6 +268,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     gamelog::hooks(&mut hooks);
     memory::hooks(&mut hooks);
     files::hooks(&mut hooks);
+    blips::hooks(&mut hooks);
     skin::hooks(&mut hooks);
     shader_settings::hooks(&mut hooks);
     shadow_reveal::hooks(&mut hooks);

@@ -18,6 +18,7 @@ pub const HOOKS: &[&[(&str, &str)]] = &[
     include!("hooks/gamelog.rs"),
     include!("hooks/memory.rs"),
     include!("hooks/files.rs"),
+    include!("hooks/blips.rs"),
     include!("hooks/skin.rs"),
     include!("hooks/shader_settings.rs"),
     include!("hooks/shadow_reveal.rs"),
