@@ -150,6 +150,7 @@ The game is looked for in `game/` beside the AppImage, as beside the Mac app.
 | Apple TV: build, sign, install, launch on the paired Apple TV | `mise run tvos [device]` |
 | Apple TV: only check that the app builds | `mise run tvos:build` |
 | Apple TV: launch the installed app again, with its console | `mise run tvos:run [device]` |
+| Apple TV simulator: build, install, launch with its console | `mise run tvos:sim [simulator]` |
 | Android: build, install, launch on the connected device with its log | `mise run android [device]` |
 | Android: only build the APK | `mise run android:build` |
 | Android: launch the installed app again, with its log | `mise run android:run [device]` |

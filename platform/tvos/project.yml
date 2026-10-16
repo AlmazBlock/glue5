@@ -20,8 +20,10 @@ settings:
     DEAD_CODE_STRIPPING: YES
     DEVELOPMENT_TEAM: ${GLUE5_TEAM}
     CODE_SIGN_STYLE: Automatic
-    # The library built by cargo.
-    OTHER_LDFLAGS: $(PROJECT_DIR)/../../target/aarch64-apple-tvos/release/libglue5.a -liconv
+    # The library built by cargo, for the Apple TV or its simulator. MetalFX
+    # from tvOS 27.1 (glue5-gpu asks before it uses it); the simulator has none.
+    OTHER_LDFLAGS: $(PROJECT_DIR)/../../target/aarch64-apple-tvos/release/libglue5.a -liconv -weak_framework MetalFX
+    "OTHER_LDFLAGS[sdk=appletvsimulator*]": $(PROJECT_DIR)/../../target/aarch64-apple-tvos-sim/release/libglue5.a -liconv
 targets:
   Glue5:
     type: application
@@ -42,9 +44,6 @@ targets:
       - sdk: Foundation.framework
       - sdk: GameController.framework
       - sdk: Metal.framework
-      # From tvOS 27.1 (glue5-gpu asks before it uses it).
-      - sdk: MetalFX.framework
-        weak: true
       - sdk: OpenGLES.framework
       - sdk: QuartzCore.framework
       - sdk: UIKit.framework
