@@ -202,6 +202,26 @@ TCP, not UDP: every byte must arrive, and a reliable, congestion-controlled
 transport over UDP is QUIC, a heavy dependency, worth it only if lossy
 links turn out to need it.
 
+**Reads announced late.** Traced through a proxy that delays each way by
+20 ms and sends 12.5 MB/s behind a 256 KB queue, a cold benchmark run
+waits for ~11,000 engine reads. Until the world shows, the link sets the
+pace. In the fly-through some read waits a third to half of the time, and
+a fifth of the time it is one of ~1,000 reads announced too late: blocks
+nobody had asked for (~40 a run), or asked for less than 10 ms before,
+mostly by guesses the engine announces as it makes the read. Such a read
+waits ~60 ms (the round trip and the queue), one announced in time ~20 ms.
+(The client's log once counted 6,000 of them, from a read's first block
+alone, often here already from the read before.) A table learned on the
+server across sessions (the blocks that come after a request), prefetched
+by the next session, would hide few: which reads come late depends on when
+the engine announces them, not on the blocks, and nine in ten of one run's
+late reads had been asked for in time in another run. Learned from one
+run, such a table foresaw a quarter to a third of the next run's late
+reads on the very same path, bringing 76-94 MB for 14 MB of them (from two
+runs, two fifths, with 155 MB); in play the paths differ, and only a
+device's first session would gain (its copy keeps the rest). It is not
+done: announcing earlier is up to the engine.
+
 **Before the game:** the catalog (every file, size and time) and the two
 packs, ~10 MB, asked together, which bring every small file and the
 shaders whole: the pipelines compile from them as from a folder (Play's
@@ -258,7 +278,7 @@ app's game build; files changed on the server while the game runs need a
 restart. A partial copy without its server plays until the first block it
 lacks, and waits there (a radio station starts at a random place: the
 benchmark waited at its loading screen); the line over the game says so.
-The reads the engine does not announce (~3,000 in the benchmark) cost a
+The reads the engine announces late (~1,000 in the benchmark) cost a
 round trip each: on a slow link, objects that show late, not stalls.
 
 ## Shaders: known pipelines before the game
