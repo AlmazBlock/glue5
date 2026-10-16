@@ -11,9 +11,9 @@ controls. The game runs locally on iOS and macOS. Phones, tablets and
 computers share the same code base; more platforms are planned.
 
 The game's code is compiled for the target device when you build the app.
-It runs without just-in-time (JIT) compilation or streaming from another
-computer. Improvements to the shared runtime benefit both mobile and
-desktop builds.
+It runs without just-in-time (JIT) compilation. Its files are read from a
+folder on the device, or streamed from a computer that has them.
+Improvements to the shared runtime benefit both mobile and desktop builds.
 
 **This project provides only the recompilation tools and compatibility
 layer. It does not include or distribute ANY GTA V assets or game binaries.**
@@ -49,6 +49,7 @@ See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
 | `crates/glue5-game` | The game module. Its build script verifies `game.wasm`, runs wasm2c, applies hooks and compiles the C. |
 | `crates/glue5-runtime` | Host runtime: Emscripten/WASI imports, threads, VFS, input, audio output, the GPU command ring (and a null backend). |
 | `crates/glue5-gpu` | The renderer: executes the engine's D3D11-style command ring with wgpu (Metal on Apple platforms, Vulkan elsewhere). |
+| `crates/glue5-stream` | The game's files over the network: `glue5-serve` (a game folder to other devices), the client and its local copy, Bonjour discovery. |
 | `crates/glue5` | The application (SDL3), the same on every platform: window, input, audio, settings and touch controls (egui overlay). Its `headless` example runs the game without a window. |
 | `platform/ios` | What iOS needs around it: `main.c`, entitlements, the xcodegen spec. |
 | `platform/android` | The Gradle project around it: manifest, the activity (SDL's, subclassed), the adaptive icon. |
@@ -131,6 +132,7 @@ The game is looked for in `game/` beside the AppImage, as beside the Mac app.
 | What | Command |
 |---|---|
 | Play (desktop) | `mise run play` |
+| Serve the game folder to the app on other devices (streaming) | `mise run serve [folder]` (`-- --help` lists the options) |
 | macOS: build and open the app bundle | `mise run macos` |
 | macOS: build only the app bundle | `mise run macos:build` |
 | macOS: open the built app again | `mise run macos:run` |
@@ -321,6 +323,16 @@ repository. On iOS, it is `Documents/game`, populated with
 `mise run ios:game`, Finder > device > Files, or the Files app. On Android,
 it is `Android/data/local.glue5/files/game`, populated with
 `mise run android:game`.
+
+The files can also stream from another computer instead (Settings › Game
+› Game files › Server): the app on a computer with the game, with Settings
+› Game › Share on the network on, or `glue5-serve` on any desktop system.
+Devices on the same network find it (Search); elsewhere its address is
+typed, `host` or `host:port` (port 47100). The app keeps what it received
+in its cache folder for the next starts; Settings › Game › Download the
+whole game makes it a copy of the game of its own, which plays without
+the server. See
+[design.md](docs/design.md#streaming-the-games-files).
 
 If the files are missing, the start page explains where to put them.
 Desktop users can choose a folder; on iOS, the app checks again when it

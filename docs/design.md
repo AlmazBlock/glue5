@@ -145,11 +145,121 @@ folder picker. Default places:
 | iOS | the app's `Documents/game` | Finder (device > Files) or the Files app; `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace` make the folder visible |
 | Android | the app's external files directory, `Android/data/<app>/files/game` | USB file transfer; no storage permission needed |
 
-A future VFS backend could read files over HTTP and cache them locally,
-allowing a phone to start without copying all 20 GB first. The WASM build
-already has HTTP file imports (`wasm_httpfs_*`), currently stubbed here.
-This would be implemented in the VFS and is not required for the initial
-release.
+Or the files come from another device: see the next section.
+
+## Streaming the game's files
+
+Settings › Game › Game files › Server plays the game from a computer that
+has it: the app on a computer sharing its folder (Settings › Game › Share
+on the network), or `glue5-serve` (`mise run serve`, any desktop system, a
+NAS). A phone then needs no copy of its own, and an Apple TV, whose
+storage is only a cache the system empties when it needs room, fetches
+again what it lost. Both modes live side by side: with a folder, nothing
+below runs.
+
+**The engine already streams.** The browser build reads `/game` through
+an HTTP device of its own (`fiDeviceLocal` over `wasm_httpfs_*`): a
+manifest of the files, one read at a time per thread, and a ring in which
+the streamer announces the reads it has queued (`pgStreamer::Read`) and
+those it expects (`strStreamingLoader`). glue5 hands it the manifest
+(`wasm_httpfs_manifest_js`) and hooks its read (`wasm_httpfs_pread`,
+`glue5-runtime/src/stream.rs`): a read the device's copy holds is a
+positioned read from it in the calling thread, as fast as a local folder;
+a missing one asks the server and waits for its blocks only. The
+announcements become prefetch requests. Streaming in the VFS instead would
+get no announcements (they need the HTTP device) and one round trip per
+read of the streamer's single reader.
+
+**What it has to carry** (the benchmark's reads, traced in local mode):
+3.0 GB of distinct data in 189 s, 2.3 GB of it in the first 30 s (start
+and first world), then ~5 MB/s, 12 MB/s at most over 10 s, ~320 MB in
+5 s at a scene cut. The engine hardly reads anything twice (3.17 GB read
+for 3.03 GB distinct): within a session a cache gains nothing, across
+sessions everything. The archives (`.rpf`, 19.4 of 19.5 GB) are already
+compressed or encrypted: zstd takes 1 % off them. The small files are
+text: 3,700 of them (385 MB: shader effects, XML, metadata) make 8.6 MB
+as one zstd stream (level 19, alike files side by side, a 32 MB window),
+the 6,600 translated shaders 1.6 MB.
+
+**The protocol** (`glue5-stream`, `protocol.rs`) is one TCP connection with
+32-byte message headers, not HTTP: the server sends the next 64 KB chunk of
+the most urgent request first (an engine read waiting > a queued read
+announced > a guess or read-ahead > the boot set > a full download), keeps
+little unsent in the kernel (`TCP_NOTSENT_LOWAT`, 128 KB), and moves a
+request to a higher priority when the engine comes to wait for it.
+Requests are one chunk each, so that such a move takes one chunk: behind
+32 MB of prefetch on an 8 MB/s link, a read the engine waits for arrives
+in 10-14 ms (134 ms with 1 MB requests; seconds with the browser build's
+parallel HTTP requests, which share the link evenly). A cold disk on the
+server reads ahead of the queue (`F_RDADVISE`, `posix_fadvise`). Each chunk
+carries a CRC-32 (TCP's checksum is weak, and a bad block would stay in the
+copy): a damaged one is dropped and asked again. Requests are pipelined
+without limit, so the link, not the round trip, sets the pace: through a
+link of 100 Mbit/s and 40 ms (simulated), the first start kept it 96 % busy
+and had the world on screen after 3 min 20 s (2.3 GB), the benchmark then
+running as long as from a folder; over the local loopback, after 36 s.
+TCP, not UDP: every byte must arrive, and a reliable, congestion-controlled
+transport over UDP is QUIC, a heavy dependency, worth it only if lossy
+links turn out to need it.
+
+**Before the game:** the catalog (every file, size and time) and the two
+packs, ~10 MB, asked together, which bring every small file and the
+shaders whole: the pipelines compile from them as from a folder (Play's
+preparation is unchanged). Then, at the lowest priority but one, the boot set (the
+whale5 build's `bootset.json`: the ~550 MB of archive headers and start-up
+data every start reads), while the start page shows and the shaders
+compile; a later start finds it there.
+
+**The copy** (`cache.rs`) mirrors the folder's layout, sparse, with a
+bitmap of the 4 KB blocks each file holds (640 KB for the whole game). Its
+index is saved every two seconds, after the data it describes is on disk
+(`fsync` per file, side by side, then `F_FULLFSYNC` on the index on Apple
+systems: a full flush per file made the text pack take 14 s to save). At
+start, a block counts only if its file is still there with its full
+length: whatever the system deleted meanwhile (iOS and tvOS caches) is
+fetched again when needed. When the volume falls under 1 GB free, files
+read longest ago are emptied. A copy whose packs are complete starts
+without the server (missing blocks wait for it); a lost connection is
+retried for ever and the requests in flight asked again. APFS, when it
+writes a file out, may fill the holes between its written parts with zeros
+(whether it does depends on its state, and changed within an hour on the
+same Mac: 5.7 GB taken for 3.7 GB of blocks); after each save, the holes
+of the files just synced are punched again (`F_PUNCHHOLE`,
+`FALLOC_FL_PUNCH_HOLE` on Linux and Android): 3.74 GB for 3.67. At most
+4,096 files stay open (the limit is 10,240 on Apple systems, often 1,024
+on Linux); the others are opened for each use.
+
+**The whole game** (Settings › Game › Download the whole game) comes at the
+lowest priority, 32 MB on its way at a time, with what the game leaves of
+the link; a complete copy loses its marker and is a game folder like a
+copied one, which plays without the server and which the local mode finds.
+It goes where a copied game would (`Documents/game`, the external files'
+`game`, the user directory's `game` on desktop), not in the cache folder,
+and never over a game folder of the user's own. tvOS has no such option:
+it keeps nothing but caches.
+
+**Where:** the app's cache folder (`paths::cache_dir`): `Library/Caches`
+on iOS and tvOS (purged by the system when away, which suits it),
+`~/Library/Caches` on macOS, `XDG_CACHE_HOME` on Linux, `%LOCALAPPDATA%`
+on Windows (files marked sparse, which they are not by default there),
+the external files folder on Android. The copy carries a marker, so that
+it is never taken for a game folder.
+
+**Finding a server** (`discovery.rs`): Bonjour, `_glue5._tcp`. Apple
+systems announce and browse through the system's responder (no multicast
+entitlement on iOS and tvOS; the service is in `NSBonjourServices`).
+Elsewhere the app asks once, by mDNS from an ordinary port, and responders
+answer by unicast (no Android multicast lock). Servers on Linux and
+Windows are not announced: their address is typed.
+
+Limits: there is no encryption and no access control (on the Internet,
+a private network such as Tailscale gives both); the server must have the
+app's game build; files changed on the server while the game runs need a
+restart. A partial copy without its server plays until the first block it
+lacks, and waits there (a radio station starts at a random place: the
+benchmark waited at its loading screen); the line over the game says so.
+The reads the engine does not announce (~3,000 in the benchmark) cost a
+round trip each: on a slow link, objects that show late, not stalls.
 
 ## Shaders: known pipelines before the game
 
