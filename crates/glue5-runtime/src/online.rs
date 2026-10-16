@@ -158,11 +158,32 @@ pub(crate) unsafe extern "C" fn live_manager_init(env: *mut Env, mode: u32) {
 }
 
 /// Hook for `CLiveManager::Update(unsigned int)`: the device's network
-/// stays up (see `vnet::network_up`).
+/// stays up (see `vnet::network_up`), the tunables' request is over.
 pub(crate) unsafe extern "C" fn live_manager_update(env: *mut Env, mode: u32) {
     crate::vnet::network_up(unsafe { Mem::of(env) });
+    unsafe { tunables_requested(env) };
     unsafe { orig::live_manager_update(env, mode) };
     crate::vnet::network_up(unsafe { Mem::of(env) });
+}
+
+/// Rockstar's cloud tunables never come: their request counts as over
+/// (`CTunables`' flag, set at the end of `OnCloudEvent` either way), as
+/// what waits for it (invites, CanEnterMultiplayer) asks, and the network's
+/// settings are read from them as they would be then: their defaults (an
+/// invite's lifetime among them, else 0: gone as it comes). The scripts
+/// keep their defaults too.
+unsafe fn tunables_requested(env: *mut Env) {
+    const TUNABLES: u64 = 19275808;
+    const CLOUD_REQUEST_DONE: u64 = 464;
+    let m = unsafe { Mem::of(env) };
+    let tunables = m.u64(TUNABLES);
+    if tunables != 0 && m.u8(tunables + CLOUD_REQUEST_DONE) == 0 {
+        // Read before the flag is set: once set, the reader would also ask
+        // Rockstar for its content's URLs.
+        unsafe { orig::network_tunables_read(env, 0) };
+        m.set_u8(tunables + CLOUD_REQUEST_DONE, 1);
+        log::info!("online: the network's tunables, their defaults");
+    }
 }
 
 /// Hook for `CLiveManager::BailOnMultiplayer(eBailReason, int)`: the
@@ -248,6 +269,9 @@ native_results! {
     /// `NETWORK_HAS_SOCIAL_CLUB_ACCOUNT`: the player has one (the pause
     /// menu's Creator needs it).
     social_club_account = 1;
+    /// `ARE_ONLINE_POLICIES_UP_TO_DATE`: there are no Rockstar policies to
+    /// accept (`-sc_noOnlinePolicy`); an invite is dropped otherwise.
+    online_policies_current = 1;
 }
 
 /// Hook for `PLAYSTATS_CREATE_MATCH_HISTORY_ID_2(int&, int&)`: a match's id,
@@ -548,6 +572,7 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.profanity_pending = Some(profanity_pending);
     hooks.profanity_valid = Some(profanity_valid);
     hooks.social_club_account = Some(social_club_account);
+    hooks.online_policies_current = Some(online_policies_current);
     hooks.match_history_id = Some(match_history_id);
     hooks.script_program_loaded = Some(script_program_loaded);
     hooks.presence_online = Some(presence_online);
