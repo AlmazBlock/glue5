@@ -1,6 +1,6 @@
 //! Texts the game data lacks: its scripts are newer and name labels of
 //! later DLC packs, which show as "<LABEL> missing". The ones GTA Online's
-//! jobs show on the way (hosting, the Creator, the job lists) are given
+//! jobs and activities show on the way (hosting, coronas, the job lists) are given
 //! here, in English.
 
 use std::collections::HashMap;
@@ -24,6 +24,8 @@ const TEXTS: &[(&str, &str)] = &[
     ("PM_TNEWVS", "Adversary Modes"),
     ("FMMC_SR", "Stunt Race"),
     ("FMMC_OWR", "Open Wheel Race"),
+    ("MATC_DPADRIGHT", "Press ~INPUT_CONTEXT~ to start."),
+    ("PM_JOIN_AREN", "Join Arena War"),
 ];
 
 /// The engine's label hash (`rage::atStringHash`): Jenkins' one-at-a-time,

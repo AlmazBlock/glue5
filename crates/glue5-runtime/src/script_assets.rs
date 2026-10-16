@@ -15,8 +15,11 @@
 //!   store has no slot for is never loaded, so the interaction menu, which
 //!   waits for it with its other assets, opens without ever being drawn.
 //!
-//! Either counts as loaded for the scripts here: they go on without those
-//! sounds or textures.
+//! - Models and text blocks of later updates (golf waits for two models,
+//!   the awards' texts `MPAWD` and the club emblems' textures).
+//!
+//! Each counts as loaded for the scripts here: they go on without those
+//! sounds, textures, models or texts.
 //!
 //! Whole places are missing too: GTA Online's "simple interiors" (the
 //! casino, bunkers, hangars, nightclubs, the arcade...), DLC from 2016 on.
@@ -28,7 +31,7 @@
 
 use std::cell::Cell;
 
-use glue5_game::{Env, orig};
+use glue5_game::{Env, exports, orig};
 
 use crate::memory::Mem;
 
@@ -113,8 +116,32 @@ pub(crate) unsafe extern "C" fn txd_loaded(env: *mut Env, name: u64) -> u32 {
     !txd_slot_exists(unsafe { Mem::of(env) }, hash) as u32
 }
 
+/// Hook for `streaming_commands::HasModelLoaded(int)`: HAS_MODEL_LOADED,
+/// yes for a model the data lacks (no archetype has its hash).
+pub(crate) unsafe extern "C" fn model_loaded(env: *mut Env, hash: u32) -> u32 {
+    if unsafe { orig::script_model_loaded(env, hash) } != 0 {
+        return 1;
+    }
+    let Ok(top) = (unsafe { exports::emscripten_stack_get_current(env) }) else { return 0 };
+    let Ok(id) = (unsafe { exports::_emscripten_stack_alloc(env, 16) }) else { return 0 };
+    let archetype = unsafe { orig::archetype_from_hash(env, hash, id) };
+    let _ = unsafe { exports::_emscripten_stack_restore(env, top) };
+    (archetype == 0) as u32
+}
+
+/// Hook for `CTextFile::HasThisAdditionalTextLoaded(char const*, int)`:
+/// a block no longer being loaded and not loaded failed (the data lacks it).
+pub(crate) unsafe extern "C" fn additional_text_loaded(env: *mut Env, name: u64, slot: u32) -> u32 {
+    if unsafe { orig::additional_text_loaded(env, name, slot) } != 0 {
+        return 1;
+    }
+    (unsafe { orig::additional_text_requesting(env, name, slot) } == 0) as u32
+}
+
 /// This module's hooks.
 pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.script_model_loaded = Some(model_loaded);
+    hooks.additional_text_loaded = Some(additional_text_loaded);
     hooks.script_bank_request = Some(bank_request);
     hooks.bank_loading_status = Some(bank_loading_status);
     hooks.script_txd_loaded = Some(txd_loaded);

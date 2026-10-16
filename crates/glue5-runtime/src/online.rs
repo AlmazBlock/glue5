@@ -250,6 +250,19 @@ native_results! {
     social_club_account = 1;
 }
 
+/// Hook for `PLAYSTATS_CREATE_MATCH_HISTORY_ID_2(int&, int&)`: a match's id,
+/// the Rockstar account's and the time, or the network card's address
+/// (which the engine cannot read here); the minigames' host (golf) waits
+/// for one. The player's id and the time.
+pub(crate) unsafe extern "C" fn match_history_id(env: *mut Env, info: u64) {
+    let m = unsafe { Mem::of(env) };
+    let params = m.u64(info + 16);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    m.set_u32(m.u64(params), gamer_id() as u32);
+    m.set_u32(m.u64(params + 8), now as u32);
+    m.set_u32(m.u64(info), 1);
+}
+
 /// Hook for `CNetwork::CanAccessNetworkFeatures(eNetworkAccessArea,
 /// eNetworkAccessCode*)`: the gate of every online feature (multiplayer,
 /// creators, store...), whose checks are about Rockstar's services; granted.
@@ -528,6 +541,7 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.profanity_pending = Some(profanity_pending);
     hooks.profanity_valid = Some(profanity_valid);
     hooks.social_club_account = Some(social_club_account);
+    hooks.match_history_id = Some(match_history_id);
     hooks.script_program_loaded = Some(script_program_loaded);
     hooks.presence_online = Some(presence_online);
     hooks.can_enter_multiplayer = Some(can_enter_multiplayer);

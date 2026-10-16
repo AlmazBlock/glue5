@@ -12,4 +12,12 @@
     // data lacks are never loaded.
     ("script_request", "script_commands::RequestScript(char const*)"),
     ("script_loaded", "script_commands::HasScriptLoaded(char const*)"),
+    // HAS_MODEL_LOADED: a model this game data lacks counts as loaded (its
+    // archetype is looked up by hash).
+    ("script_model_loaded", "streaming_commands::HasModelLoaded(int)"),
+    ("archetype_from_hash", "rage::fwArchetypeManager::GetArchetypeFromHashKey(unsigned int, unsigned int*)"),
+    // HAS_THIS_ADDITIONAL_TEXT_LOADED: a text block whose load ended
+    // without it (this data lacks it) counts as loaded.
+    ("additional_text_loaded", "CTextFile::HasThisAdditionalTextLoaded(char const*, int)"),
+    ("additional_text_requesting", "CTextFile::IsRequestingThisAdditionalText(char const*, int)"),
 ]

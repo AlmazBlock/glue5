@@ -33,6 +33,7 @@
     ("profanity_pending", "socialclub_commands::SetupScriptCommands()::scrWrapped_SC_PROFANITY_GET_CHECK_IS_PENDING::Call(rage::scrThread::Info&)"),
     ("profanity_status", "socialclub_commands::SetupScriptCommands()::scrWrapped_SC_PROFANITY_GET_STRING_STATUS::Call(rage::scrThread::Info&)"),
     ("social_club_account", "network_commands::SetupScriptCommands()::scrWrapped_NETWORK_HAS_SOCIAL_CLUB_ACCOUNT::Call(rage::scrThread::Info&)"),
+    ("match_history_id", "stats_commands::SetupScriptCommands()::scrWrapped_PLAYSTATS_CREATE_MATCH_HISTORY_ID_2::Call(rage::scrThread::Info&)"),
     ("savemigration_mp_enabled", "savemigration_commands::SetupScriptCommands()::scrWrapped_SAVEMIGRATION_IS_MP_ENABLED::Call(rage::scrThread::Info&)"),
     ("bad_pack_order", "dlc_commands::SetupScriptCommands()::scrWrapped_GET_EVER_HAD_BAD_PACK_ORDER::Call(rage::scrThread::Info&)"),
 ]
