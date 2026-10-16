@@ -81,7 +81,8 @@ pub fn run() -> Result<()> {
     if MOBILE {
         builder.fullscreen();
     }
-    if cfg!(target_vendor = "apple") {
+    // (tvOS: made below.)
+    if cfg!(target_vendor = "apple") && !TV {
         builder.metal_view();
     }
     let window = builder.build()?;
@@ -95,8 +96,19 @@ pub fn run() -> Result<()> {
     #[cfg(target_os = "android")]
     let surfaces = instance.clone();
     // The window outlives the renderer: the process exits with it.
+    #[cfg(not(target_os = "tvos"))]
     let surface = unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_display_and_window(&window, &window)?)?
+    };
+    // The sdl3 crate has no window handle for tvOS (UIKit only on iOS): the
+    // surface takes the layer of a Metal view of SDL's (the process exits
+    // with it too).
+    #[cfg(target_os = "tvos")]
+    let surface = unsafe {
+        let view = sdl3::sys::metal::SDL_Metal_CreateView(window.raw());
+        let layer = sdl3::sys::metal::SDL_Metal_GetLayer(view);
+        anyhow::ensure!(!layer.is_null(), "no Metal layer for the window: {}", sdl3::get_error());
+        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer))?
     };
     let screen = Screen::open(glue5_gpu::Window {
         instance,
