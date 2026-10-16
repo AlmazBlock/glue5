@@ -337,6 +337,12 @@ pub(crate) unsafe extern "C" fn can_enter_multiplayer(env: *mut Env, session: u6
 /// (script, code offset, the bytes there, the bytes put instead). A patch
 /// whose bytes differ is left out and logged.
 const SCRIPT_PATCHES: &[(&str, u32, &[u8], &[u8])] = &[
+    // g_bFM_Rank_Unlocks_ON = FALSE: GTA Online's activities (golf, tennis,
+    // darts, arm wrestling, the flight school, survivals...) are open from
+    // the start instead of at a rank and after a contact's call, as the
+    // game's own scripts allow; with Rockstar's jobs gone, ranks come
+    // slowly here.
+    ("MP_FM_registration", 194, &[OP_PUSH_1, 99, 72, 7, 28], &[OP_PUSH_0, 99, 72, 7, 28]),
     // CAN_ENTER_MP_AFTER_VALID_CHARACTER_CREATOR_FLOW: with no character yet,
     // the straight-into-freemode start (LOBBY_AUTO_MULTIPLAYER_FREEMODE)
     // must not keep the player from the character creator.
@@ -354,6 +360,7 @@ const SCRIPT_PATCHES: &[(&str, u32, &[u8], &[u8])] = &[
 ];
 const OP_NOP: u8 = 0;
 const OP_PUSH_0: u8 = 113;
+const OP_PUSH_1: u8 = 114;
 /// Script code is kept in pages of this size.
 const SCRIPT_PAGE: u32 = 0x4000;
 
