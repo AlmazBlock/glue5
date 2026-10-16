@@ -34,6 +34,7 @@ mod shadow_reveal;
 mod script_assets;
 mod skin;
 mod stats;
+mod texts;
 mod threads;
 mod time;
 pub mod tour;
