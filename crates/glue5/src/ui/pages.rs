@@ -3,7 +3,7 @@ use super::widgets::{
     Control, action_button, choice, close_button, focus, segmented, setting, slider, text_field, toggle,
 };
 use super::{Action, Mode, Page, SettingsTab, Status, WARN, theme};
-use crate::paths::{self, MOBILE};
+use crate::paths::{self, MOBILE, TOUCH, TV};
 use crate::settings::{
     self, Corner, OverlayDetail, PerfOverlay, RENDER_SCALES, Settings, Source, TouchAim, TouchMode, Upscaling,
 };
@@ -13,7 +13,13 @@ use egui::{Align, Align2, Color32, Id, Layout, Rect, RichText, Sense, Stroke, St
 
 /// The only platform differences are capabilities, not layout.
 fn open_hint() -> &'static str {
-    if MOBILE { "Settings: ⚙ or Back + Start" } else { "Settings: F1 or Back + Start" }
+    if TOUCH {
+        "Settings: ⚙ or Back + Start"
+    } else if TV {
+        "Settings: Back + Start"
+    } else {
+        "Settings: F1 or Back + Start"
+    }
 }
 
 /// The ways into the game, the start page's main column: a name and what
@@ -115,7 +121,8 @@ pub(super) fn start_page(
                 if !MOBILE && icon_button(ui, "🗙", "Quit", labels).clicked() {
                     actions.push(Action::Quit);
                 }
-                // Streamed, the files come from the Servers page.
+                // Streamed (always, on the Apple TV), the files come from the
+                // Servers page.
                 let (icon, files) = match status.source {
                     Source::Server => ("🖧", "Server"),
                     Source::Folder if MOBILE => ("🗁", "Find files"),
@@ -892,15 +899,18 @@ fn settings_items(
             if r.changed() && settings.low_memory {
                 settings.low_preset_written = false;
             }
-            let sources = [(Source::Folder, "Folder"), (Source::Server, "Server")];
-            setting(
-                ui,
-                "Game files",
-                Control::Choice,
-                next_start(started.is_some_and(|s| s.source != settings.source)),
-                |ui| choice(ui, &mut settings.source, &sources),
-            )
-            .on_hover_text("Folder: the game on this device. Server: from a computer that shares it");
+            // The Apple TV has no folder for it: always a server.
+            if !TV {
+                let sources = [(Source::Folder, "Folder"), (Source::Server, "Server")];
+                setting(
+                    ui,
+                    "Game files",
+                    Control::Choice,
+                    next_start(started.is_some_and(|s| s.source != settings.source)),
+                    |ui| choice(ui, &mut settings.source, &sources),
+                )
+                .on_hover_text("Folder: the game on this device. Server: from a computer that shares it");
+            }
             match settings.source {
                 Source::Folder => game_folder(ui, settings, status, actions),
                 Source::Server => {

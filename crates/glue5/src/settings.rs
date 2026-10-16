@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths::MOBILE;
+use crate::paths::{MOBILE, TV};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -198,7 +198,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             game_dir: None,
-            source: Source::Folder,
+            source: if TV { Source::Server } else { Source::Folder },
             server: String::new(),
             share: false,
             download_all: false,
@@ -259,6 +259,9 @@ impl Settings {
         }
         if settings.metal_hud.take() == Some(true) {
             settings.overlay = PerfOverlay::MetalHud;
+        }
+        if TV {
+            settings.source = Source::Server;
         }
         settings
     }

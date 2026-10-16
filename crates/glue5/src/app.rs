@@ -23,7 +23,7 @@ use sdl3::keyboard::Scancode;
 use sdl3::mouse::MouseButton;
 
 use crate::haptics;
-use crate::paths::{self, MOBILE};
+use crate::paths::{self, MOBILE, TOUCH, TV};
 use crate::settings::{self, PerfOverlay, Settings, Source, TouchMode, Upscaling};
 use crate::touch::{self, Touch};
 use crate::ui::{self, Action, Mode, Page, Started, Status, Ui};
@@ -150,7 +150,7 @@ pub fn run() -> Result<()> {
         settings,
         ui: Ui::new(overlay),
         touch: Touch::new(),
-        touch_input: MOBILE,
+        touch_input: TOUCH,
         touch_shown: false,
         touch_mouse: Default::default(),
         lifecycle,
@@ -389,6 +389,11 @@ impl App {
             Event::Window { win_event: WindowEvent::Exposed, .. } => self.ui.repaint(),
             _ => {}
         }
+        // The Siri Remote's touch surface moves like a pad's stick (SDL makes
+        // the remote a gamepad); its touches are not on the screen.
+        if TV && matches!(event, Event::FingerDown { .. } | Event::FingerMotion { .. } | Event::FingerUp { .. }) {
+            return false;
+        }
         if let Event::FingerDown { x, y, .. } = event {
             // The settings button takes its finger before the touch controls
             // see it (or they would show, taking pad 0 from a controller).
@@ -575,7 +580,7 @@ impl App {
             // The settings button: on touch screens always, so that it stays
             // with a controller in use or the touch controls off.
             let gear =
-                (in_game && (MOBILE || show)).then_some(if show { self.settings.touch_opacity } else { GEAR_ALONE });
+                (in_game && (TOUCH || show)).then_some(if show { self.settings.touch_opacity } else { GEAR_ALONE });
             actions = self.ui.frame(&self.window, &mut self.settings, &status, show.then_some(&self.touch), gear);
             if let Some(screen) = &mut self.screen
                 && !screen.show_ui()
