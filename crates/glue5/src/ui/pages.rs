@@ -707,6 +707,9 @@ fn settings_items(
             setting(ui, "Opacity", Control::Slider, None, |ui| {
                 slider(ui, &mut settings.touch_opacity, 0.2..=1.0, 0.01, "%", 0)
             });
+            setting(ui, "Camera speed", Control::Slider, None, |ui| {
+                slider(ui, &mut settings.touch_camera, 0.25..=3.0, 0.05, "×", 2)
+            });
             if crate::haptics::SUPPORTED {
                 setting(ui, "Haptics", Control::Toggle, None, |ui| toggle(ui, &mut settings.haptics));
             }

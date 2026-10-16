@@ -8,7 +8,8 @@
 
 use std::cell::Cell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use glue5_game::{Env, orig};
 
@@ -184,6 +185,209 @@ pub(crate) unsafe extern "C" fn text_box_close_hook(env: *mut Env, this: u64) {
     TEXT_BOX.store(false, Ordering::Relaxed);
 }
 
+// ---- touch play ------------------------------------------------------------------
+
+/// The device the engine saw used last (an `ioSource`'s device index): a
+/// pad's index, or -4 for keyboard and mouse. It picks the prompts' icons,
+/// aim assist, the menus' behaviour.
+const LAST_DEVICE: u64 = 24627136;
+/// A task's ped, a ped's position.
+const TASK_PED: u64 = 16;
+const PED_POSITION: u64 = 112;
+/// A vehicle's type (`VEHICLE_TYPE_*`), and a bicycle's.
+const VEHICLE_TYPE: u64 = 3088;
+const BICYCLE: i32 = 12;
+/// The player's surroundings are scanned for a vehicle to enter every this
+/// many frames on foot.
+const SCAN_EVERY: u32 = 6;
+/// The engine's per-frame signals below count as now for this long.
+const FRESH: Duration = Duration::from_millis(250);
+
+static TOUCH_PLAY: AtomicBool = AtomicBool::new(false);
+static SIGNALS: Mutex<Signals> = Mutex::new(Signals {
+    on_foot: None,
+    in_vehicle: None,
+    driving: None,
+    parachute: None,
+    cutscene: None,
+    activity: Activity::OnFoot,
+});
+static VEHICLE_NEAR: AtomicBool = AtomicBool::new(false);
+static SCAN_FRAME: AtomicU32 = AtomicU32::new(0);
+static PHONE_OUT: AtomicBool = AtomicBool::new(false);
+static PAUSE_MENU: AtomicBool = AtomicBool::new(false);
+
+/// When the engine last ran each of the player's tasks.
+struct Signals {
+    on_foot: Option<Instant>,
+    in_vehicle: Option<Instant>,
+    driving: Option<(Driving, Instant)>,
+    parachute: Option<Instant>,
+    cutscene: Option<Instant>,
+    /// The activity last seen, kept while none is (a ragdoll, a scripted
+    /// scene, the moment between two tasks).
+    activity: Activity,
+}
+
+/// The touch controls are in use: the camera turns with the mouse (a
+/// finger's drag) while the engine keeps playing as with a pad, out of the
+/// pause menu (where they act as a mouse).
+pub fn set_touch_play(on: bool) {
+    TOUCH_PLAY.store(on, Ordering::Relaxed);
+}
+
+/// What the player is doing, for the touch controls.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerContext {
+    pub activity: Activity,
+    /// On foot, next to a vehicle they can get into.
+    pub vehicle_near: bool,
+    /// The phone is out.
+    pub phone: bool,
+    /// The pause menu (the map, the store, ...) is open.
+    pub menu: bool,
+    /// A cutscene plays.
+    pub cutscene: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    OnFoot,
+    Driving(Driving),
+    /// In a vehicle, not driving it.
+    Passenger,
+    /// Skydiving or under a parachute.
+    Parachute,
+}
+
+/// The kinds of vehicles driven alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Driving {
+    /// Cars, motorbikes, quads, boats: steered, a throttle and a brake.
+    Car,
+    /// Pedalled.
+    Bicycle,
+    /// Helicopters, blimps, autogyros: up and down, yaw.
+    Heli,
+    /// A throttle, yaw, landing gear.
+    Plane,
+    /// Up and down, a throttle.
+    Submarine,
+}
+
+pub fn player_context() -> PlayerContext {
+    let mut signals = SIGNALS.lock().unwrap();
+    let fresh = |t: Option<Instant>| t.is_some_and(|t| t.elapsed() < FRESH);
+    // The most particular of what runs now.
+    let now = match signals.driving {
+        Some((driving, t)) if fresh(Some(t)) => Some(Activity::Driving(driving)),
+        _ if fresh(signals.parachute) => Some(Activity::Parachute),
+        _ if fresh(signals.in_vehicle) => Some(Activity::Passenger),
+        _ if fresh(signals.on_foot) => Some(Activity::OnFoot),
+        _ => None,
+    };
+    if let Some(activity) = now {
+        signals.activity = activity;
+    }
+    PlayerContext {
+        activity: signals.activity,
+        vehicle_near: signals.activity == Activity::OnFoot && VEHICLE_NEAR.load(Ordering::Relaxed),
+        phone: PHONE_OUT.load(Ordering::Relaxed),
+        menu: PAUSE_MENU.load(Ordering::Relaxed),
+        cutscene: fresh(signals.cutscene),
+    }
+}
+
+/// Hook for `CControl::Update`: during touch play out of the pause menu, the
+/// engine goes on seeing the pad as the device in use, though the camera
+/// reads the mouse.
+pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
+    unsafe { orig::control_update(env, this) };
+    // Every part of it (the store, Social Club, the video editor).
+    let menu = unsafe { orig::pause_menu_is_active(env, 0) } != 0;
+    PAUSE_MENU.store(menu, Ordering::Relaxed);
+    if TOUCH_PLAY.load(Ordering::Relaxed) && !menu {
+        unsafe { Mem::of(env) }.set_i32(LAST_DEVICE, 0);
+    }
+}
+
+/// Hook for `CTaskPlayerOnFoot::ProcessPreFSM`: the player is on foot.
+pub(crate) unsafe extern "C" fn player_on_foot(env: *mut Env, task: u64) -> u32 {
+    let result = unsafe { orig::player_on_foot(env, task) };
+    SIGNALS.lock().unwrap().on_foot = Some(Instant::now());
+    if TOUCH_PLAY.load(Ordering::Relaxed) && SCAN_FRAME.fetch_add(1, Ordering::Relaxed).is_multiple_of(SCAN_EVERY) {
+        let ped = unsafe { Mem::of(env) }.u64(task + TASK_PED);
+        if ped != 0 {
+            // As the Enter button would (CTaskPlayerOnFoot::CheckShouldEnterVehicle).
+            let vehicle = unsafe { orig::scan_for_vehicle_to_enter(env, ped, ped + PED_POSITION, 0) };
+            VEHICLE_NEAR.store(vehicle != 0, Ordering::Relaxed);
+        }
+    }
+    result
+}
+
+/// Hook for `CTaskPlayerDrive::ProcessPreFSM`: the player is in a vehicle.
+pub(crate) unsafe extern "C" fn player_in_vehicle(env: *mut Env, task: u64) -> u32 {
+    let result = unsafe { orig::player_in_vehicle(env, task) };
+    SIGNALS.lock().unwrap().in_vehicle = Some(Instant::now());
+    result
+}
+
+/// Hook for `CTaskParachute::UpdateFSM`, any ped's: the player's skydives
+/// or is under a parachute.
+pub(crate) unsafe extern "C" fn parachute_update(env: *mut Env, task: u64, state: u32, event: u32) -> u32 {
+    let result = unsafe { orig::parachute_update(env, task, state, event) };
+    let ped = unsafe { Mem::of(env) }.u64(task + TASK_PED);
+    if ped != 0 && ped == unsafe { orig::find_player_ped(env) } {
+        SIGNALS.lock().unwrap().parachute = Some(Instant::now());
+    }
+    result
+}
+
+/// Hook for `CutSceneManager::UpdateSkip`: a cutscene plays.
+pub(crate) unsafe extern "C" fn cutscene_update_skip(env: *mut Env, this: u64) {
+    unsafe { orig::cutscene_update_skip(env, this) };
+    SIGNALS.lock().unwrap().cutscene = Some(Instant::now());
+}
+
+/// Hooks for the `CREATE_MOBILE_PHONE` and `DESTROY_MOBILE_PHONE` natives.
+pub(crate) unsafe extern "C" fn phone_create(env: *mut Env, info: u64) {
+    unsafe { orig::phone_create(env, info) };
+    PHONE_OUT.store(true, Ordering::Relaxed);
+}
+
+pub(crate) unsafe extern "C" fn phone_destroy(env: *mut Env, info: u64) {
+    unsafe { orig::phone_destroy(env, info) };
+    PHONE_OUT.store(false, Ordering::Relaxed);
+}
+
+/// The player drives `vehicle`, a vehicle driven as `kind`.
+fn driving(env: *mut Env, vehicle: u64, kind: Driving) {
+    let bicycle = vehicle != 0 && unsafe { Mem::of(env) }.i32(vehicle + VEHICLE_TYPE) == BICYCLE;
+    SIGNALS.lock().unwrap().driving = Some((if bicycle { Driving::Bicycle } else { kind }, Instant::now()));
+}
+
+/// Hooks for the player's driving tasks (`ProcessDriverInputsForPlayerOnUpdate`,
+/// once a frame while the player drives).
+macro_rules! drive_hooks {
+    ($($name:ident: $kind:ident),* $(,)?) => {$(
+        pub(crate) unsafe extern "C" fn $name(env: *mut Env, task: u64, ped: u64, control: u64, vehicle: u64) {
+            unsafe { orig::$name(env, task, ped, control, vehicle) };
+            driving(env, vehicle, Driving::$kind);
+        }
+    )*};
+}
+
+drive_hooks! {
+    drive_automobile: Car,
+    drive_bike: Car,
+    drive_boat: Car,
+    drive_heli: Heli,
+    drive_autogyro: Heli,
+    drive_plane: Plane,
+    drive_submarine: Submarine,
+}
+
 // ---- keyboard & mouse --------------------------------------------------------
 
 // The input block.
@@ -312,4 +516,18 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.scaleform_add_param_float = Some(scaleform_add_param_float);
     hooks.text_box_open = Some(text_box_open_hook);
     hooks.text_box_close = Some(text_box_close_hook);
+    hooks.control_update = Some(control_update);
+    hooks.player_on_foot = Some(player_on_foot);
+    hooks.phone_create = Some(phone_create);
+    hooks.phone_destroy = Some(phone_destroy);
+    hooks.drive_automobile = Some(drive_automobile);
+    hooks.drive_bike = Some(drive_bike);
+    hooks.drive_boat = Some(drive_boat);
+    hooks.drive_heli = Some(drive_heli);
+    hooks.drive_autogyro = Some(drive_autogyro);
+    hooks.drive_plane = Some(drive_plane);
+    hooks.drive_submarine = Some(drive_submarine);
+    hooks.player_in_vehicle = Some(player_in_vehicle);
+    hooks.parachute_update = Some(parachute_update);
+    hooks.cutscene_update_skip = Some(cutscene_update_skip);
 }

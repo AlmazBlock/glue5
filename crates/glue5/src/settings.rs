@@ -44,6 +44,8 @@ pub struct Settings {
     pub touch: TouchMode,
     pub touch_opacity: f32,
     pub touch_size: f32,
+    /// How fast a finger's drag turns the camera.
+    pub touch_camera: f32,
     /// The Taptic Engine taps under pressed touch controls and plays the game's rumble (iPhone).
     pub haptics: bool,
     /// The game starts in the sandbox (the map, no story) rather than the
@@ -164,6 +166,7 @@ impl Default for Settings {
             touch: TouchMode::Auto,
             touch_opacity: 0.6,
             touch_size: 1.0,
+            touch_camera: 1.0,
             haptics: true,
             sandbox: false,
             online: false,
