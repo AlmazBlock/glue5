@@ -219,8 +219,16 @@ late reads had been asked for in time in another run. Learned from one
 run, such a table foresaw a quarter to a third of the next run's late
 reads on the very same path, bringing 76-94 MB for 14 MB of them (from two
 runs, two fifths, with 155 MB); in play the paths differ, and only a
-device's first session would gain (its copy keeps the rest). It is not
-done: announcing earlier is up to the engine.
+device's first session would gain (its copy keeps the rest). Not done. Nor
+does the engine know of them much earlier: it makes its guesses at the
+start of `strStreamingLoader::LoadRequestedObjects`, for objects it has
+been asked to load (at most 32 a call, a cap rarely reached), and loads
+them in the same call. A probe of `strStreamingInfoManager::RequestObject`
+found that the game had asked for the late ones less than 10 ms before the
+read in half the cases, and less than 50 ms before in nine in ten:
+announcing them at the request would have saved a fifth of their waiting
+in the fly-through (8.6 s of 41), not worth a hook on the engine's request
+path.
 
 **Before the game:** the catalog (every file, size and time) and the two
 packs, ~10 MB, asked together, which bring every small file and the
