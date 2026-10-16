@@ -543,8 +543,7 @@ impl Client {
     }
 
     fn session(&self) -> Result<()> {
-        let addr = resolve(&self.opts.server)?;
-        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).with_context(|| format!("connecting to {addr}"))?;
+        let (stream, addr) = connect(&self.opts.server)?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         let mut reader = BufReader::with_capacity(256 << 10, stream.try_clone()?);
@@ -960,8 +959,24 @@ impl Sync {
     }
 }
 
+/// Connects to the first of the server's addresses that answers, IPv4 first:
+/// a Mac's `.local` name (as Bonjour finds it) also stands for its IPv6
+/// link-local address, where a server listening on IPv4 refuses.
+fn connect(server: &str) -> Result<(TcpStream, SocketAddr)> {
+    let mut addrs = resolve(server)?;
+    addrs.sort_by_key(SocketAddr::is_ipv6);
+    let mut last = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+            Ok(stream) => return Ok((stream, addr)),
+            Err(e) => last = Some(anyhow::Error::new(e).context(format!("connecting to {addr}"))),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no address for {server}")))
+}
+
 /// `host`, `host:port`, `[v6]:port`.
-fn resolve(server: &str) -> Result<SocketAddr> {
+fn resolve(server: &str) -> Result<Vec<SocketAddr>> {
     let server = server.trim();
     let with_port = if server.parse::<SocketAddr>().is_ok() || server.rsplit_once(':').is_some_and(|(h, p)| !h.contains(':') && p.parse::<u16>().is_ok()) {
         server.to_string()
@@ -970,7 +985,7 @@ fn resolve(server: &str) -> Result<SocketAddr> {
     } else {
         format!("{server}:{PORT}")
     };
-    with_port.to_socket_addrs().with_context(|| format!("looking up {server}"))?.next().context("no address")
+    Ok(with_port.to_socket_addrs().with_context(|| format!("looking up {server}"))?.collect())
 }
 
 /// The boot set (whale5's `bootset.json`: `[[path, [[first, last], …]], …]`
@@ -1042,4 +1057,13 @@ fn read_exact_retrying(r: &mut impl Read, mut buf: &mut [u8]) -> io::Result<()> 
         }
     }
     Ok(())
+}
+
+#[test]
+fn connects_to_the_address_that_answers() {
+    // "localhost" stands for ::1 too, where nothing listens.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (_, addr) = connect(&format!("localhost:{port}")).unwrap();
+    assert_eq!(addr, listener.local_addr().unwrap());
 }
