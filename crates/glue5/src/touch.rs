@@ -507,9 +507,10 @@ impl Touch {
         if let Finger::Action(a, ..) = finger
             && a.kind == Kind::Wheel
         {
-            // Fingers on the camera now pick in the wheel, from where they are.
+            // The other fingers now pick in the wheel, from where they are
+            // (the right thumb is often on a button: the gas, fire).
             for f in self.fingers.values_mut() {
-                if let Finger::Camera { origin, last } = f {
+                if let Finger::Camera { origin, last } | Finger::Action(_, origin, last) = f {
                     *origin = *last;
                 }
             }
@@ -627,7 +628,7 @@ impl Touch {
                 *last = p;
             }
             Some(Finger::Action(a, _, last)) => {
-                if a.kind == Kind::Turns {
+                if a.kind == Kind::Turns && !wheel {
                     turned = p - *last;
                 }
                 *last = p;
@@ -712,10 +713,12 @@ impl Touch {
             pad.right = stick_value(self.locked_stick);
         }
         // An open wheel picks with the other thumb's drag too (the wheels'
-        // buttons sit on the left).
+        // buttons sit on the left), on the camera or from a button it holds
+        // (which stays pressed).
         if self.wheel_open() {
             for finger in self.fingers.values() {
-                if let Finger::Camera { origin, last } = *finger
+                if let Finger::Camera { origin, last } | Finger::Action(Action { kind: Kind::Press | Kind::Turns, .. }, origin, last) =
+                    *finger
                     && origin != last
                 {
                     pad.right = stick(origin, last);
@@ -1060,6 +1063,32 @@ mod tests {
         t.finger_motion(1, x, y);
         assert_eq!(t.gamepad().right, [0.0, 0.0]);
         assert_eq!(t.take_look(), ((10.0 * LOOK_GAIN) as i32, 0));
+    }
+
+    #[test]
+    fn an_open_wheel_picks_with_the_thumb_on_the_gas() {
+        let mut t = phone();
+        t.set_context(context(Activity::Driving(Driving::Car)));
+        let at = |t: &Touch, p: Pos2| (p.x / t.screen.x, p.y / t.screen.y);
+        let gas = CAR.iter().find(|a| a.label == "Gas").unwrap();
+        let g = t.pos(gas.at);
+        let (x, y) = at(&t, g);
+        t.finger_down(1, x, y);
+        let (x, y) = at(&t, g + vec2(3.0, 0.0));
+        t.finger_motion(1, x, y);
+        let radio = CAR.iter().find(|a| a.label == "Radio").unwrap();
+        let (x, y) = at(&t, t.pos(radio.at));
+        t.finger_down(2, x, y);
+        // The thumb on the gas picks from where it was, still pressing it.
+        let (x, y) = at(&t, g + vec2(3.0 - 2.0 * t.stick_radius(), 0.0));
+        t.finger_motion(1, x, y);
+        let pad = t.gamepad();
+        assert_eq!(pad.buttons & (button::LEFT | button::R2), button::LEFT | button::R2);
+        assert_eq!(pad.right, [-1.0, 0.0]);
+        assert_eq!(t.take_look(), (0, 0));
+        // The radio let go: the gas only.
+        t.finger_up(2);
+        assert_eq!(t.gamepad().right, [0.0, 0.0]);
     }
 
     #[test]
