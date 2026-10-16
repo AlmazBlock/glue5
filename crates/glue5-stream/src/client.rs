@@ -1,0 +1,1014 @@
+//! The client: the game's files from a server, through the local [`Cache`].
+//!
+//! [`Client::start`] connects in the background and, before the game can
+//! start, takes the catalog and the packs (every small file and the
+//! shaders, ~10 MB in all); the boot set (the ranges every start reads,
+//! ~550 MB) then comes at a low priority while the player is still on the
+//! start page or the shaders compile. A read the cache cannot answer asks
+//! the server at the highest priority, or raises a request already on its
+//! way, and waits for just its blocks. The engine's own announcements of
+//! the reads it will make ([`Client::hint`]) and sequential read-ahead are
+//! fetched in between.
+//!
+//! A lost connection is retried for ever; requests in flight are asked
+//! again on the new one. Without a server, a copy that was complete enough
+//! still plays (whatever is missing waits for the server).
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io::{self, BufReader, Read};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::{self, Thread};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+
+use crate::cache::{BLOCK, Cache};
+use crate::catalog::Catalog;
+use crate::pack::{self, Kind};
+use crate::protocol::*;
+
+pub struct Options {
+    /// `host` or `host:port`.
+    pub server: String,
+    /// Where the copy is kept.
+    pub root: PathBuf,
+    /// The game build this app runs; the server must have the same.
+    pub build: String,
+    /// Which boot set to prefetch.
+    pub low_memory: bool,
+}
+
+/// Free space the copy leaves on its volume: below it, files read longest
+/// ago are emptied (or, downloading the whole game, the download waits).
+const FLOOR: u64 = 1 << 30;
+/// Blocks per request: one chunk (64 KB). When the engine comes to wait for
+/// a prefetched block, the request holding it moves ahead whole: small
+/// requests keep that to one chunk (with 1 MB requests, a read waited 134 ms
+/// behind a prefetch at 8 MB/s; with these, 10-14 ms).
+const MAX_RUN: u64 = CHUNK as u64 / BLOCK;
+/// Read-ahead of sequential reads: from 64 KB, doubling up to 512 KB.
+const AHEAD_FIRST: u64 = 64 << 10;
+const AHEAD_MAX: u64 = 512 << 10;
+/// Two boot ranges closer than this are fetched as one.
+const BOOT_GAP: u64 = 64;
+/// Requests of the full download on their way at most (32 MB): spare
+/// bandwidth is used, the queue of the server stays short.
+const FILL_REQUESTS: usize = 512;
+/// In the copy: the boot set it was given (for a start without the server).
+const BOOT_SET: &str = "bootset.json";
+/// No data for this long with requests in flight: the connection is dead.
+const SILENCE: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Phase {
+    Connecting,
+    /// Taking what every start needs: `what`, `done` of `total` bytes.
+    Syncing { what: &'static str, done: u64, total: u64 },
+    Ready,
+    /// The game cannot come from this server.
+    Failed(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct Status {
+    pub phase: Phase,
+    pub connected: bool,
+    /// Why the last connection attempt failed or ended.
+    pub error: Option<String>,
+    pub cache_bytes: u64,
+    /// Of the boot set: bytes here, of its total.
+    pub boot: (u64, u64),
+    /// Engine reads waiting for the server now.
+    pub waiting: u32,
+    /// The game's size: what a complete copy holds.
+    pub total_bytes: u64,
+    /// Downloading the whole game, and whether it is all here (the copy is
+    /// then a game folder, which plays without the server).
+    pub filling: bool,
+    pub complete: bool,
+    /// The whole game does not fit: the download waits for space.
+    pub no_room: bool,
+}
+
+pub struct Client {
+    opts: Options,
+    phase: Mutex<Phase>,
+    error: Mutex<Option<String>>,
+    ready: OnceLock<Ready>,
+    conn: Mutex<Option<TcpStream>>,
+    inflight: Mutex<Inflight>,
+    waiters: Mutex<Vec<Waiter>>,
+    stats: Stats,
+    stop: AtomicBool,
+    /// The whole game is wanted on this device ([`Client::set_fill`]), and
+    /// it is all here.
+    fill: AtomicBool,
+    complete: AtomicBool,
+    no_room: AtomicBool,
+    /// A copy from an earlier run was tried without the server.
+    tried_offline: AtomicBool,
+    /// The boot set's progress, counted at most twice a second (the UI asks
+    /// every frame).
+    boot: Mutex<Option<(Instant, (u64, u64))>>,
+}
+
+struct Ready {
+    catalog: Catalog,
+    cache: Cache,
+    manifest: Vec<u8>,
+    boot: Vec<(u32, u64, u64)>,
+    /// Per file: the end of its last read, and the current read-ahead.
+    seq_end: Vec<AtomicU64>,
+    ahead: Vec<AtomicU64>,
+    radio: Vec<bool>,
+}
+
+#[derive(Default)]
+struct Inflight {
+    next: u32,
+    reqs: HashMap<u32, Req>,
+    /// Per file: first block -> request (requests of a file never overlap).
+    by_file: HashMap<u32, BTreeMap<u64, u32>>,
+}
+
+#[derive(Clone, Copy)]
+struct Req {
+    file: u32,
+    first: u64,
+    last: u64,
+    prio: u8,
+}
+
+struct Waiter {
+    file: u32,
+    first: u64,
+    last: u64,
+    thread: Thread,
+}
+
+#[derive(Default)]
+struct Stats {
+    received: AtomicU64,
+    waits: AtomicU64,
+    wait_us: AtomicU64,
+    cold: AtomicU64,
+    hints: AtomicU64,
+    waiting: AtomicU32,
+    last_data: Mutex<Option<Instant>>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").field("server", &self.opts.server).field("root", &self.opts.root).finish_non_exhaustive()
+    }
+}
+
+impl Inflight {
+    fn covering(&self, file: u32, block: u64) -> Option<u32> {
+        let (_, &id) = self.by_file.get(&file)?.range(..=block).next_back()?;
+        (self.reqs[&id].last >= block).then_some(id)
+    }
+
+    fn add(&mut self, req: Req) -> u32 {
+        self.next = self.next.wrapping_add(1).max(1);
+        let id = self.next;
+        self.reqs.insert(id, req);
+        self.by_file.entry(req.file).or_default().insert(req.first, id);
+        id
+    }
+
+    fn remove(&mut self, id: u32) -> Option<Req> {
+        let req = self.reqs.remove(&id)?;
+        if let Some(m) = self.by_file.get_mut(&req.file) {
+            m.remove(&req.first);
+            if m.is_empty() {
+                self.by_file.remove(&req.file);
+            }
+        }
+        Some(req)
+    }
+}
+
+impl Client {
+    pub fn start(opts: Options) -> Arc<Client> {
+        let client = Arc::new(Client {
+            opts,
+            phase: Mutex::new(Phase::Connecting),
+            error: Mutex::new(None),
+            ready: OnceLock::new(),
+            conn: Mutex::new(None),
+            inflight: Mutex::new(Inflight::default()),
+            waiters: Mutex::new(Vec::new()),
+            stats: Stats::default(),
+            stop: AtomicBool::new(false),
+            fill: AtomicBool::new(false),
+            complete: AtomicBool::new(false),
+            no_room: AtomicBool::new(false),
+            tried_offline: AtomicBool::new(false),
+            boot: Mutex::new(None),
+        });
+        let c = client.clone();
+        thread::Builder::new().name("stream".into()).spawn(move || c.run()).expect("stream thread");
+        let c = client.clone();
+        thread::Builder::new().name("stream sync".into()).spawn(move || c.keep()).expect("stream sync thread");
+        let c = client.clone();
+        thread::Builder::new().name("stream fill".into()).spawn(move || c.fill()).expect("stream fill thread");
+        client
+    }
+
+    pub fn server(&self) -> &str {
+        &self.opts.server
+    }
+
+    /// The copy's folder: a game folder's layout (`data/`, `b/<build>/shaders/`).
+    pub fn root(&self) -> &Path {
+        &self.opts.root
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.get().is_some()
+    }
+
+    pub fn status(&self) -> Status {
+        let boot = {
+            let mut cached = self.boot.lock().unwrap();
+            match *cached {
+                Some((at, boot)) if at.elapsed() < Duration::from_millis(500) => boot,
+                _ => {
+                    let boot = self.ready.get().map_or((0, 0), |r| {
+                        let (mut have, mut total) = (0, 0);
+                        for &(id, first, last) in &r.boot {
+                            for b in first..=last {
+                                total += 1;
+                                have += r.cache.has_block(id, b) as u64;
+                            }
+                        }
+                        (have * BLOCK, total * BLOCK)
+                    });
+                    *cached = Some((Instant::now(), boot));
+                    boot
+                }
+            }
+        };
+        Status {
+            phase: self.phase.lock().unwrap().clone(),
+            connected: self.conn.lock().unwrap().is_some(),
+            error: self.error.lock().unwrap().clone(),
+            cache_bytes: self.ready.get().map_or(0, |r| r.cache.used()),
+            boot,
+            waiting: self.stats.waiting.load(Ordering::Relaxed),
+            total_bytes: self.ready.get().map_or(0, |r| r.cache.total()),
+            filling: self.fill.load(Ordering::Relaxed) && !self.complete.load(Ordering::Relaxed),
+            complete: self.complete.load(Ordering::Relaxed),
+            no_room: self.no_room.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The engine's manifest of its files (once ready).
+    pub fn engine_manifest(&self) -> Option<&[u8]> {
+        self.ready.get().map(|r| &r.manifest[..])
+    }
+
+    /// The id of the file at `path` (relative to the game folder).
+    pub fn find(&self, path: &str) -> Option<u32> {
+        self.ready.get()?.catalog.find(path)
+    }
+
+    /// Where the copy keeps file `id`.
+    pub fn path(&self, id: u32) -> Option<PathBuf> {
+        let r = self.ready.get()?;
+        ((id as usize) < r.cache.len()).then(|| r.cache.path(id))
+    }
+
+    /// Downloads every file of the game, at the lowest priority (the game's
+    /// own reads first), or stops doing so.
+    pub fn set_fill(&self, on: bool) {
+        self.fill.store(on, Ordering::Release);
+    }
+
+    /// Disconnects for good and saves the index (another server is chosen).
+    /// Reads still waiting stay so.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(s) = self.conn.lock().unwrap().take() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+        self.flush();
+    }
+
+    /// Saves the copy's index (the app is closing).
+    pub fn flush(&self) {
+        if let Some(r) = self.ready.get()
+            && let Err(e) = r.cache.save()
+        {
+            log::warn!("stream cache: saving the index: {e}");
+        }
+    }
+
+    /// Reads `buf.len()` bytes of file `id` at `off` (fewer at its end),
+    /// waiting for the server if they are not here. `None`: no such file.
+    pub fn read(&self, id: u32, off: u64, buf: &mut [u8]) -> Option<usize> {
+        let r = self.ready.get()?;
+        if id as usize >= r.cache.len() {
+            return None;
+        }
+        let size = r.cache.size(id);
+        let n = buf.len().min(size.saturating_sub(off) as usize);
+        if n == 0 {
+            return Some(0);
+        }
+        self.read_ahead(r, id, off, n as u64);
+        match r.cache.read(id, off, &mut buf[..n]) {
+            Ok(Some(got)) => return Some(got),
+            Ok(None) => {}
+            Err(e) => log::warn!("stream cache: reading {}: {e}", r.catalog.entries[id as usize].path),
+        }
+        let (first, last) = (off / BLOCK, (off + n as u64 - 1) / BLOCK);
+        let started = Instant::now();
+        if self.inflight.lock().unwrap().covering(id, first).is_none() {
+            self.stats.cold.fetch_add(1, Ordering::Relaxed);
+        }
+        self.waiters.lock().unwrap().push(Waiter { file: id, first, last, thread: thread::current() });
+        self.stats.waiting.fetch_add(1, Ordering::Relaxed);
+        let mut asked: Option<Instant> = None;
+        let mut logged = started;
+        let got = loop {
+            match r.cache.read(id, off, &mut buf[..n]) {
+                Ok(Some(got)) => break Some(got),
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("stream cache: reading {}: {e}", r.catalog.entries[id as usize].path);
+                    break None;
+                }
+            }
+            // Asked again now and then: a new connection, an evicted block.
+            if asked.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
+                self.want(id, first, last, DEMAND);
+                asked = Some(Instant::now());
+            }
+            if logged.elapsed() >= Duration::from_secs(5) {
+                log::warn!(
+                    "stream: waiting {:.0?} for {} at {off} ({n} bytes)",
+                    started.elapsed(),
+                    r.catalog.entries[id as usize].path
+                );
+                logged = Instant::now();
+            }
+            thread::park_timeout(Duration::from_millis(250));
+        };
+        self.waiters.lock().unwrap().retain(|w| w.thread.id() != thread::current().id() || w.file != id);
+        self.stats.waiting.fetch_sub(1, Ordering::Relaxed);
+        self.stats.waits.fetch_add(1, Ordering::Relaxed);
+        self.stats.wait_us.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        got
+    }
+
+    /// The engine will read this soon (`ahead`: may read it).
+    pub fn hint(&self, id: u32, off: u64, len: u64, ahead: bool) {
+        let Some(r) = self.ready.get() else { return };
+        if id as usize >= r.cache.len() || len == 0 || off >= r.cache.size(id) {
+            return;
+        }
+        let last = (off + len - 1).min(r.cache.size(id) - 1) / BLOCK;
+        self.stats.hints.fetch_add(1, Ordering::Relaxed);
+        self.want(id, off / BLOCK, last, if ahead { AHEAD } else { HINT });
+    }
+
+    /// A read that continues the previous one of the file (a stream being
+    /// played, a resource read in pieces) also fetches what follows.
+    fn read_ahead(&self, r: &Ready, id: u32, off: u64, n: u64) {
+        let i = id as usize;
+        let prev = r.seq_end[i].swap(off + n, Ordering::Relaxed);
+        // Radio stations are read in ~33 KB blocks one after the other, each
+        // a round trip without this.
+        let sequential =
+            if r.radio[i] { prev != 0 && off >= prev && off - prev <= 64 << 10 } else { off == prev && n >= 64 << 10 };
+        if !sequential {
+            r.ahead[i].store(0, Ordering::Relaxed);
+            return;
+        }
+        let ahead = match r.ahead[i].load(Ordering::Relaxed) {
+            0 => AHEAD_FIRST,
+            a => (a * 2).min(AHEAD_MAX),
+        };
+        r.ahead[i].store(ahead, Ordering::Relaxed);
+        let (from, size) = (off + n, r.cache.size(id));
+        if from < size {
+            self.want(id, from / BLOCK, ((from + ahead).min(size) - 1) / BLOCK, AHEAD);
+        }
+    }
+
+    /// Makes sure blocks `first..=last` of file `id` are here or on their
+    /// way at `prio` at least.
+    fn want(&self, id: u32, first: u64, last: u64, prio: u8) {
+        let mut out = Vec::new();
+        self.plan(id, first, last, prio, &mut out, usize::MAX);
+        self.send(&out);
+    }
+
+    /// Adds to `out` the requests (at most `limit` new ones) that bring
+    /// blocks `first..=last` of file `id`, or raise those on their way to
+    /// `prio`. Returns the block it stopped at (past `last` when done).
+    fn plan(&self, id: u32, first: u64, last: u64, prio: u8, out: &mut Vec<Header>, limit: usize) -> u64 {
+        let Some(r) = self.ready.get() else { return u64::MAX };
+        let blocks = r.cache.blocks(id);
+        if blocks == 0 || first >= blocks {
+            return u64::MAX;
+        }
+        let last = last.min(blocks - 1);
+        let size = r.cache.size(id);
+        let mut inf = self.inflight.lock().unwrap();
+        let mut b = first;
+        let mut added = 0;
+        while b <= last {
+            if added >= limit {
+                return b;
+            }
+            if r.cache.has_block(id, b) {
+                b += 1;
+                continue;
+            }
+            if let Some(req) = inf.covering(id, b) {
+                let q = inf.reqs.get_mut(&req).unwrap();
+                if prio < q.prio {
+                    q.prio = prio;
+                    out.push(Header { kind: PRIORITY, prio, req, ..Default::default() });
+                }
+                b = q.last + 1;
+                continue;
+            }
+            let start = b;
+            while b <= last && b - start < MAX_RUN && !r.cache.has_block(id, b) && inf.covering(id, b).is_none() {
+                b += 1;
+            }
+            let req = inf.add(Req { file: id, first: start, last: b - 1, prio });
+            let off = start * BLOCK;
+            let len = (b * BLOCK).min(size) - off;
+            out.push(Header { kind: READ, prio, req, off, len: len as u32, file: id, crc: 0 });
+            added += 1;
+        }
+        b
+    }
+
+    /// Sends requests (they stay in flight, and are sent again, if the
+    /// connection is down).
+    fn send(&self, msgs: &[Header]) {
+        if msgs.is_empty() {
+            return;
+        }
+        let mut buf = Vec::with_capacity(msgs.len() * HEADER);
+        for m in msgs {
+            buf.extend_from_slice(&m.encode());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        if let Some(s) = conn.as_mut()
+            && io::Write::write_all(s, &buf).is_err()
+        {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+            *conn = None;
+        }
+    }
+
+    fn set_phase(&self, p: Phase) {
+        *self.phase.lock().unwrap() = p;
+    }
+
+    /// Connects, syncs, serves; again after every lost connection.
+    fn run(self: Arc<Self>) {
+        let mut backoff = Duration::from_millis(500);
+        while !self.stop.load(Ordering::Acquire) {
+            let result = self.session();
+            let failed = matches!(*self.phase.lock().unwrap(), Phase::Failed(_));
+            *self.conn.lock().unwrap() = None;
+            if let Err(e) = &result {
+                let msg = format!("{e:#}");
+                if self.error.lock().unwrap().as_deref() != Some(&msg) {
+                    log::warn!("stream: {}: {msg}", self.opts.server);
+                }
+                *self.error.lock().unwrap() = Some(msg);
+            }
+            if failed {
+                return;
+            }
+            if !self.is_ready() {
+                self.set_phase(Phase::Connecting);
+                // A copy from an earlier run can play while the server is away.
+                if !self.tried_offline.swap(true, Ordering::AcqRel)
+                    && let Err(e) = self.ready_offline()
+                {
+                    log::info!("stream: no copy to play from without the server: {e:#}");
+                }
+            }
+            thread::sleep(backoff);
+            backoff = (backoff * 2).min(Duration::from_secs(5));
+            if result.is_ok() {
+                backoff = Duration::from_millis(500);
+            }
+        }
+    }
+
+    fn session(&self) -> Result<()> {
+        let addr = resolve(&self.opts.server)?;
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).with_context(|| format!("connecting to {addr}"))?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let mut reader = BufReader::with_capacity(256 << 10, stream.try_clone()?);
+        let h = Header::read(&mut reader).context("waiting for the server")?;
+        if h.kind != HELLO {
+            bail!("not a Glue 5 server");
+        }
+        let hello: serde_json::Value = serde_json::from_slice(&payload(&mut reader, h.len, MAX_MESSAGE)?)?;
+        if hello["protocol"].as_u64() != Some(PROTOCOL) {
+            self.set_phase(Phase::Failed(format!("the server speaks protocol {}, this app {PROTOCOL}", hello["protocol"])));
+            bail!("protocol mismatch");
+        }
+        if hello["build"].as_str() != Some(&self.opts.build) {
+            self.set_phase(Phase::Failed(format!(
+                "the server has game build {}, this app runs {}",
+                hello["build"].as_str().unwrap_or("?"),
+                self.opts.build
+            )));
+            bail!("build mismatch");
+        }
+        log::info!("stream: connected to {addr}");
+        *self.error.lock().unwrap() = None;
+        let mut sync = Sync { reader, stream: stream.try_clone()?, next: 1 << 31, blobs: HashMap::new() };
+        match self.ready.get() {
+            None => self.sync(&mut sync, &hello)?,
+            Some(r) if hello["catalog"].as_str() != Some(&r.catalog.hash) => {
+                self.set_phase(Phase::Failed("the game's files changed on the server: restart the app".into()));
+                bail!("the catalog changed");
+            }
+            Some(_) => {}
+        }
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        // What was in flight on the last connection, and the boot set's rest.
+        let again: Vec<Header> = {
+            let inf = self.inflight.lock().unwrap();
+            let r = self.ready.get().unwrap();
+            inf.reqs
+                .iter()
+                .map(|(&req, q)| {
+                    let off = q.first * BLOCK;
+                    let len = ((q.last + 1) * BLOCK).min(r.cache.size(q.file)) - off;
+                    Header { kind: READ, prio: q.prio, req, off, len: len as u32, file: q.file, crc: 0 }
+                })
+                .collect()
+        };
+        *self.stats.last_data.lock().unwrap() = Some(Instant::now());
+        *self.conn.lock().unwrap() = Some(stream);
+        self.send(&again);
+        self.prefetch_boot();
+        self.receive(sync.reader)
+    }
+
+    /// Takes the catalog and the packs, opens the copy.
+    fn sync(&self, s: &mut Sync, hello: &serde_json::Value) -> Result<()> {
+        let size = |name: &str| hello["blobs"][name].as_u64();
+        // Asked together: one round trip, not one each.
+        let boot_name = if self.opts.low_memory && size("bootset_low").is_some() { "bootset_low" } else { "bootset" };
+        let mut first = vec![("catalog", size("catalog").context("no catalog")?)];
+        first.extend(size(boot_name).map(|n| (boot_name, n)));
+        let first = s.ask(&first)?;
+        let compressed = s.take(first[0], &|_, _| {})?;
+        let json = zstd::decode_all(&compressed[..])?;
+        let catalog = Catalog::from_json(&json)?;
+        if catalog.build != self.opts.build {
+            bail!("the catalog is for build {}", catalog.build);
+        }
+        fs::create_dir_all(&self.opts.root)?;
+        let cache = Cache::open(&self.opts.root, &catalog)?;
+        let mut packs = read_json(&self.opts.root.join("packs.json"));
+        let mut needed = Vec::new();
+        for kind in Kind::ALL {
+            let hash = hello["packs"][kind.name()]["hash"].as_str().unwrap_or_default().to_string();
+            let members = pack::members(&catalog, kind);
+            if packs[kind.name()].as_str() != Some(&hash) || !members.iter().all(|&i| cache.complete(i)) {
+                needed.push((kind, hash, size(kind.name()).context("no pack")?));
+            }
+        }
+        let started = Instant::now();
+        let asked = s.ask(&needed.iter().map(|(kind, _, total)| (kind.name(), *total)).collect::<Vec<_>>())?;
+        for ((kind, hash, total), req) in needed.into_iter().zip(asked) {
+            let what = kind.name();
+            let progress = |done, total| self.set_phase(Phase::Syncing { what, done, total });
+            let data = s.take(req, &progress)?;
+            let mut files = 0;
+            pack::unpack(&data[..], |id, bytes| {
+                if (id as usize) < catalog.entries.len() && bytes.len() as u64 == catalog.entries[id as usize].size {
+                    cache.write_whole(id, bytes)?;
+                    files += 1;
+                }
+                Ok(())
+            })?;
+            log::info!("stream: {what} pack: {files} files, {:.1} MB in {:.1?}", total as f64 / 1e6, started.elapsed());
+            packs[kind.name()] = hash.into();
+            cache.save()?;
+            fs::write(self.opts.root.join("packs.json"), serde_json::to_vec(&packs)?)?;
+        }
+        let boot = match first.get(1) {
+            Some(&req) => {
+                let boot = zstd::decode_all(&s.take(req, &|_, _| {})?[..])?;
+                fs::write(self.opts.root.join(BOOT_SET), &boot)?;
+                boot_runs(&catalog, &boot)
+            }
+            None => Vec::new(),
+        };
+        fs::write(self.opts.root.join(crate::cache::CATALOG), &json)?;
+        self.make_ready(catalog, cache, boot);
+        Ok(())
+    }
+
+    /// Plays from the copy of an earlier run while the server is away (the
+    /// packs must be complete; anything else missing waits for it).
+    fn ready_offline(&self) -> Result<()> {
+        let json = fs::read(self.opts.root.join(crate::cache::CATALOG))?;
+        let catalog = Catalog::from_json(&json)?;
+        if catalog.build != self.opts.build {
+            bail!("the copy is of build {}", catalog.build);
+        }
+        let cache = Cache::open(&self.opts.root, &catalog)?;
+        for kind in Kind::ALL {
+            if !pack::members(&catalog, kind).iter().all(|&i| cache.complete(i)) {
+                bail!("the copy lacks the {} pack", kind.name());
+            }
+        }
+        log::info!("stream: playing from the copy until {} answers", self.opts.server);
+        let boot = fs::read(self.opts.root.join(BOOT_SET)).map(|b| boot_runs(&catalog, &b)).unwrap_or_default();
+        self.make_ready(catalog, cache, boot);
+        Ok(())
+    }
+
+    fn make_ready(&self, catalog: Catalog, cache: Cache, boot: Vec<(u32, u64, u64)>) {
+        let n = catalog.entries.len();
+        let radio = catalog.entries.iter().map(|e| e.path.to_ascii_lowercase().contains("/radio_")).collect();
+        let manifest = catalog.engine_manifest();
+        let ready = Ready {
+            catalog,
+            cache,
+            manifest,
+            boot,
+            seq_end: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            ahead: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            radio,
+        };
+        // A copy complete from an earlier run (Cache::open finished it).
+        let complete = ready.cache.all_here();
+        if self.ready.set(ready).is_ok() {
+            self.complete.store(complete, Ordering::Release);
+            self.set_phase(Phase::Ready);
+        }
+    }
+
+    fn prefetch_boot(&self) {
+        let Some(r) = self.ready.get() else { return };
+        let mut out = Vec::new();
+        for &(id, first, last) in &r.boot {
+            self.plan(id, first, last, BOOT, &mut out, usize::MAX);
+        }
+        if !out.is_empty() {
+            log::info!("stream: boot set: {} requests", out.len());
+        }
+        self.send(&out);
+    }
+
+    /// Takes the server's answers until the connection ends.
+    fn receive(&self, mut reader: BufReader<TcpStream>) -> Result<()> {
+        let r = self.ready.get().unwrap();
+        let mut buf = vec![0u8; CHUNK as usize];
+        let mut since_check = 0u64;
+        // Requests with a chunk that came damaged.
+        let mut corrupt: Vec<u32> = Vec::new();
+        loop {
+            if self.stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let Some(h) = next_header(&mut reader).context("connection lost")? else {
+                let busy = !self.inflight.lock().unwrap().reqs.is_empty();
+                let last = *self.stats.last_data.lock().unwrap();
+                if busy && last.is_some_and(|t| t.elapsed() > SILENCE) {
+                    bail!("the server stopped answering");
+                }
+                continue;
+            };
+            match h.kind {
+                DATA => {
+                    if h.len > CHUNK {
+                        bail!("a chunk of {} bytes", h.len);
+                    }
+                    read_exact_retrying(&mut reader, &mut buf[..h.len as usize])?;
+                    *self.stats.last_data.lock().unwrap() = Some(Instant::now());
+                    self.stats.received.fetch_add(h.len as u64, Ordering::Relaxed);
+                    if crc(&buf[..h.len as usize]) != h.crc {
+                        // Not kept: the request is asked again when it ends.
+                        log::warn!("stream: a damaged chunk of request {} (offset {}): asked again", h.req, h.off);
+                        corrupt.push(h.req);
+                        continue;
+                    }
+                    if (h.file as usize) < r.cache.len() {
+                        self.store(r, h.file, h.off, &buf[..h.len as usize]);
+                        since_check += h.len as u64;
+                        if since_check >= 64 << 20 {
+                            since_check = 0;
+                            self.make_room(r);
+                        }
+                    }
+                }
+                END => {
+                    let req = self.inflight.lock().unwrap().remove(h.req);
+                    if let Some(at) = corrupt.iter().position(|&c| c == h.req) {
+                        corrupt.swap_remove(at);
+                        if let Some(q) = req {
+                            self.want(q.file, q.first, q.last, q.prio);
+                        }
+                        continue;
+                    }
+                    if h.len != DONE
+                        && let Some(q) = req
+                    {
+                        log::warn!(
+                            "stream: {} blocks {}..={}: the server answered {}",
+                            r.catalog.entries[q.file as usize].path,
+                            q.first,
+                            q.last,
+                            match h.len {
+                                SHORT => "the file is shorter",
+                                UNKNOWN => "no such file",
+                                _ => "read error",
+                            }
+                        );
+                    }
+                }
+                k => bail!("unexpected message {k}"),
+            }
+        }
+    }
+
+    fn store(&self, r: &Ready, id: u32, off: u64, data: &[u8]) {
+        let mut result = r.cache.write(id, off, data);
+        // Not for the whole game: it would empty what it downloaded.
+        if let Err(e) = &result
+            && is_full(e)
+            && !self.fill.load(Ordering::Acquire)
+        {
+            r.cache.evict(2 * FLOOR);
+            result = r.cache.write(id, off, data);
+        }
+        if let Err(e) = result {
+            log::error!("stream cache: writing {}: {e}", r.catalog.entries[id as usize].path);
+        }
+        let (first, last) = (off / BLOCK, (off + data.len() as u64).div_ceil(BLOCK));
+        for w in self.waiters.lock().unwrap().iter() {
+            if w.file == id && w.first <= last && first <= w.last {
+                w.thread.unpark();
+            }
+        }
+    }
+
+    /// The full download: keeps [`FILL_REQUESTS`] requests on their way,
+    /// file after file, until every block is here.
+    fn fill(self: Arc<Self>) {
+        let mut cursor = 0u32;
+        while !self.stop.load(Ordering::Acquire) {
+            let connected = self.conn.lock().unwrap().is_some();
+            let Some(r) = self.ready.get().filter(|_| connected && self.fill.load(Ordering::Acquire)) else {
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            };
+            if self.complete.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            let no_room = r.cache.free_space().is_some_and(|free| free < FLOOR);
+            self.no_room.store(no_room, Ordering::Release);
+            if no_room {
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            let outstanding = self.inflight.lock().unwrap().reqs.values().filter(|q| q.prio == FILL).count();
+            let mut budget = FILL_REQUESTS.saturating_sub(outstanding);
+            let n = r.cache.len() as u32;
+            let (mut visited, mut incomplete, mut out) = (0, 0, Vec::new());
+            while budget > 0 && visited < n {
+                visited += 1;
+                if !r.cache.complete(cursor) {
+                    incomplete += 1;
+                    let before = out.len();
+                    let stopped = self.plan(cursor, 0, u64::MAX, FILL, &mut out, budget);
+                    budget -= out.len() - before;
+                    if stopped < r.cache.blocks(cursor) {
+                        // The budget ran out in this file: on with it next time.
+                        break;
+                    }
+                }
+                cursor = (cursor + 1) % n.max(1);
+            }
+            self.send(&out);
+            if visited == n && incomplete == 0 && outstanding == 0 {
+                if let Err(e) = r.cache.finish() {
+                    log::warn!("stream cache: {e}");
+                }
+                self.complete.store(true, Ordering::Release);
+                log::info!("stream: the whole game is on this device ({:.1} GB)", r.cache.total() as f64 / 1e9);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Keeps the volume above [`FLOOR`] (not while the whole game is
+    /// wanted: then the download waits for room).
+    fn make_room(&self, r: &Ready) {
+        if self.fill.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(free) = r.cache.free_space()
+            && free < FLOOR
+        {
+            r.cache.evict(2 * FLOOR - free);
+        }
+    }
+
+    /// Saves the index every few seconds; logs the traffic every ten.
+    fn keep(self: Arc<Self>) {
+        let counters = |s: &Stats| {
+            [&s.received, &s.waits, &s.wait_us, &s.cold, &s.hints].map(|c| c.load(Ordering::Relaxed))
+        };
+        let (mut last, mut at) = ([0u64; 5], Instant::now());
+        while !self.stop.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_secs(2));
+            let Some(r) = self.ready.get() else { continue };
+            if let Err(e) = r.cache.save() {
+                log::warn!("stream cache: saving the index: {e}");
+            }
+            if at.elapsed() < Duration::from_secs(10) {
+                continue;
+            }
+            let now = counters(&self.stats);
+            let [got, waits, wait_us, cold, hints] = std::array::from_fn(|i| now[i] - last[i]);
+            if got > 0 || waits > 0 {
+                log::info!(
+                    "stream: {:.1} MB/s; {waits} engine reads waited, {:.0} ms each, {cold} of them not announced; \
+                     {hints} announcements; {} requests in flight; copy {:.2} GB",
+                    got as f64 / 1e6 / at.elapsed().as_secs_f64(),
+                    if waits > 0 { wait_us as f64 / 1e3 / waits as f64 } else { 0.0 },
+                    self.inflight.lock().unwrap().reqs.len(),
+                    r.cache.used() as f64 / 1e9
+                );
+            }
+            (last, at) = (now, Instant::now());
+        }
+    }
+}
+
+/// Blob requests of the sync, answered before anything else is asked.
+struct Sync {
+    reader: BufReader<TcpStream>,
+    stream: TcpStream,
+    next: u32,
+    /// Blobs asked for: name, size, what came, whether all of it did.
+    blobs: HashMap<u32, (String, u64, Vec<u8>, bool)>,
+}
+
+impl Sync {
+    /// Asks for blobs (name, size), all in one write; their request numbers.
+    fn ask(&mut self, blobs: &[(&str, u64)]) -> Result<Vec<u32>> {
+        let mut msg = Vec::new();
+        let mut reqs = Vec::new();
+        for &(name, size) in blobs {
+            self.next += 1;
+            let req = self.next;
+            msg.extend_from_slice(&Header { kind: BLOB, prio: HINT, req, len: name.len() as u32, ..Default::default() }.encode());
+            msg.extend_from_slice(name.as_bytes());
+            self.blobs.insert(req, (name.to_string(), size, Vec::with_capacity(size as usize), false));
+            reqs.push(req);
+        }
+        io::Write::write_all(&mut self.stream, &msg)?;
+        Ok(reqs)
+    }
+
+    /// Blob `req`, once all of it is here (taking the others' chunks meanwhile).
+    fn take(&mut self, req: u32, progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>> {
+        loop {
+            match self.blobs.get(&req) {
+                Some((_, _, _, true)) => return Ok(self.blobs.remove(&req).unwrap().2),
+                Some(_) => {}
+                None => bail!("blob {req} was never asked for"),
+            }
+            let h = Header::read(&mut self.reader).context("taking the game's lists and packs")?;
+            let Some((name, size, data, done)) = self.blobs.get_mut(&h.req) else {
+                bail!("unexpected message {} for request {}", h.kind, h.req);
+            };
+            match h.kind {
+                DATA => {
+                    if h.len > CHUNK {
+                        bail!("a chunk of {} bytes", h.len);
+                    }
+                    let at = data.len();
+                    data.resize(at + h.len as usize, 0);
+                    self.reader.read_exact(&mut data[at..])?;
+                    if crc(&data[at..]) != h.crc {
+                        bail!("{name} came damaged");
+                    }
+                    if h.req == req {
+                        progress(data.len() as u64, *size);
+                    }
+                }
+                END => {
+                    if h.len != DONE || data.len() as u64 != *size {
+                        bail!("the server could not send {name}");
+                    }
+                    *done = true;
+                }
+                k => bail!("unexpected message {k} while taking {name}"),
+            }
+        }
+    }
+}
+
+/// `host`, `host:port`, `[v6]:port`.
+fn resolve(server: &str) -> Result<SocketAddr> {
+    let server = server.trim();
+    let with_port = if server.parse::<SocketAddr>().is_ok() || server.rsplit_once(':').is_some_and(|(h, p)| !h.contains(':') && p.parse::<u16>().is_ok()) {
+        server.to_string()
+    } else if server.contains(':') && !server.starts_with('[') {
+        format!("[{server}]:{PORT}")
+    } else {
+        format!("{server}:{PORT}")
+    };
+    with_port.to_socket_addrs().with_context(|| format!("looking up {server}"))?.next().context("no address")
+}
+
+/// The boot set (whale5's `bootset.json`: `[[path, [[first, last], …]], …]`
+/// in byte offsets) as block runs, close ranges merged.
+fn boot_runs(catalog: &Catalog, json: &[u8]) -> Vec<(u32, u64, u64)> {
+    let Ok(serde_json::Value::Array(files)) = serde_json::from_slice(json) else { return Vec::new() };
+    let mut runs = Vec::new();
+    for f in files {
+        let (Some(path), Some(ranges)) = (f[0].as_str(), f[1].as_array()) else { continue };
+        let Some(id) = catalog.find(&format!("data/{path}")) else { continue };
+        let blocks = catalog.entries[id as usize].size.div_ceil(BLOCK);
+        let mut cur: Option<(u64, u64)> = None;
+        for r in ranges {
+            let (Some(a), Some(b)) = (r[0].as_u64(), r[1].as_u64()) else { continue };
+            let (a, b) = (a / BLOCK, (b / BLOCK).min(blocks.saturating_sub(1)));
+            if a > b {
+                continue;
+            }
+            match &mut cur {
+                Some(c) if a <= c.1 + BOOT_GAP => c.1 = c.1.max(b),
+                _ => {
+                    runs.extend(cur.take().map(|(x, y)| (id, x, y)));
+                    cur = Some((a, b));
+                }
+            }
+        }
+        runs.extend(cur.map(|(x, y)| (id, x, y)));
+    }
+    runs
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    fs::read(path).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn is_full(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::StorageFull || e.raw_os_error() == Some(28)
+}
+
+/// The next message's header, or `None` if nothing came within the
+/// socket's read timeout (a header is never left half read).
+fn next_header(r: &mut impl Read) -> io::Result<Option<Header>> {
+    let mut b = [0u8; HEADER];
+    match r.read(&mut b[..1]) {
+        Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+        Ok(_) => {}
+        Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    }
+    read_exact_retrying(r, &mut b[1..])?;
+    Ok(Some(Header::decode(&b)))
+}
+
+/// `read_exact` through the reader's timeouts (a chunk may arrive slowly).
+fn read_exact_retrying(r: &mut impl Read, mut buf: &mut [u8]) -> io::Result<()> {
+    let started = Instant::now();
+    while !buf.is_empty() {
+        match r.read(buf) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => buf = &mut buf[n..],
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {
+                if started.elapsed() > SILENCE {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}

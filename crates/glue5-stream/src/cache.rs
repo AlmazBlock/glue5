@@ -1,0 +1,627 @@
+//! The client's copy of the game: the server's files at the same paths
+//! (`data/…`, `b/<build>/shaders/…`), sparse, with a bitmap per file of the
+//! 4 KB blocks it holds.
+//!
+//! Blocks are written as they arrive and marked present right after; the
+//! index of present blocks (`index`) is saved every few seconds, after the
+//! data it describes is on disk, so a crash or a power cut loses at most
+//! what came in since. The system may delete any of it while the app is
+//! not running (Apple TV and iPhone caches, a user): at every start a
+//! block only counts if its file is still there with its full length, and
+//! the rest is fetched again when needed.
+//!
+//! Reads of present blocks are plain positioned reads from these files, as
+//! fast as a local game folder. When space runs out, files unused for the
+//! longest time are emptied (a per-file lock keeps readers away meanwhile).
+
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock, RwLock};
+
+use anyhow::Result;
+
+use crate::catalog::Catalog;
+use crate::sys;
+
+pub const BLOCK: u64 = 4096;
+const MAGIC: &[u8; 4] = b"G5SC";
+/// Missing blocks are given back to the file system in runs of at least this.
+const MIN_HOLE: u64 = 64 << 10;
+const VERSION: u32 = 1;
+/// In a partial copy: it is not a game folder for the local mode.
+pub const MARKER: &str = ".glue5-stream";
+/// In every copy (partial or complete): the server's list of files.
+pub const CATALOG: &str = "catalog.json";
+
+pub struct Cache {
+    root: PathBuf,
+    total: u64,
+    /// Files kept open, and how many may be: the rest are opened for each
+    /// use (the open-file limit is 10240 on Apple systems, often 1024 on
+    /// Linux, and the packs alone write 10,000 files).
+    kept: AtomicUsize,
+    keep_at_most: usize,
+    slots: Vec<Slot>,
+    session: u32,
+    used: AtomicU64,
+    /// Files written to since the last save (their data is synced first).
+    dirty: Mutex<Vec<u32>>,
+    changed: AtomicBool,
+    saving: Mutex<()>,
+}
+
+struct Slot {
+    path: String,
+    size: u64,
+    mtime: u64,
+    present: Box<[AtomicU64]>,
+    file: OnceLock<File>,
+    /// Shared by reads, exclusive while the file is emptied.
+    guard: RwLock<()>,
+    last_used: AtomicU32,
+    dirty: AtomicBool,
+}
+
+impl Slot {
+    fn blocks(&self) -> u64 {
+        self.size.div_ceil(BLOCK)
+    }
+
+    fn bytes(&self) -> u64 {
+        let n: u64 = self.present.iter().map(|w| w.load(Ordering::Relaxed).count_ones() as u64).sum();
+        (n * BLOCK).min(self.size)
+    }
+}
+
+impl Cache {
+    /// The copy in `root` of the files of `catalog`.
+    pub fn open(root: &Path, catalog: &Catalog) -> Result<Cache> {
+        fs::create_dir_all(root)?;
+        sys::raise_open_file_limit();
+        let old = load_index(&root.join("index")).unwrap_or_default();
+        let session = old.session.wrapping_add(1);
+        let (mut kept, mut used) = (0usize, 0u64);
+        let mut slots = Vec::with_capacity(catalog.entries.len());
+        for e in &catalog.entries {
+            let words = e.size.div_ceil(BLOCK).div_ceil(64) as usize;
+            let mut present: Box<[AtomicU64]> = (0..words).map(|_| AtomicU64::new(0)).collect();
+            let mut last_used = 0;
+            if let Some(o) = old.files.get(&e.path)
+                && o.size == e.size
+                && o.mtime == e.mtime
+                && o.bits.len() == words
+                && fs::metadata(root.join(&e.path)).is_ok_and(|m| m.len() == e.size)
+            {
+                present = o.bits.iter().map(|&w| AtomicU64::new(w)).collect();
+                last_used = o.last_used;
+                kept += 1;
+            }
+            let slot = Slot {
+                path: e.path.clone(),
+                size: e.size,
+                mtime: e.mtime,
+                present,
+                file: OnceLock::new(),
+                guard: RwLock::new(()),
+                last_used: AtomicU32::new(last_used),
+                dirty: AtomicBool::new(false),
+            };
+            used += slot.bytes();
+            slots.push(slot);
+        }
+        // Files of an older catalog.
+        for path in old.files.keys() {
+            if catalog.find(path).is_none() && crate::catalog::safe_path(path) {
+                let _ = fs::remove_file(root.join(path));
+            }
+        }
+        log::info!(
+            "stream cache: {} ({:.2} GB in {kept} of {} files, session {session})",
+            root.display(),
+            used as f64 / 1e9,
+            slots.len()
+        );
+        let total = slots.iter().map(|s| s.size).sum();
+        let cache = Cache {
+            root: root.to_owned(),
+            total,
+            kept: AtomicUsize::new(0),
+            keep_at_most: sys::open_file_budget(),
+            slots,
+            session,
+            used: AtomicU64::new(used),
+            dirty: Mutex::new(Vec::new()),
+            changed: AtomicBool::new(true),
+            saving: Mutex::new(()),
+        };
+        if cache.all_here() {
+            cache.finish()?;
+        } else {
+            fs::write(root.join(MARKER), b"A partial copy of a game folder, streamed by Glue 5.\n")?;
+        }
+        cache.save()?;
+        Ok(cache)
+    }
+
+    /// Every block of every file is here.
+    pub fn all_here(&self) -> bool {
+        (0..self.slots.len() as u32).all(|id| self.complete(id))
+    }
+
+    /// The copy is complete: a game folder like any other (for the local
+    /// mode too), saved for good.
+    pub fn finish(&self) -> io::Result<()> {
+        // Empty files have no blocks to bring them.
+        for (id, s) in self.slots.iter().enumerate() {
+            if s.file.get().is_none() && !fs::metadata(self.root.join(&s.path)).is_ok_and(|m| m.len() == s.size) {
+                self.open_file(id as u32)?;
+            }
+        }
+        self.save()?;
+        match fs::remove_file(self.root.join(MARKER)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// The bytes of a complete copy.
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn size(&self, id: u32) -> u64 {
+        self.slots[id as usize].size
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// Bytes held.
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// The blocks `first..=last` of file `id` are all here.
+    pub fn has(&self, id: u32, first: u64, last: u64) -> bool {
+        all_set(&self.slots[id as usize].present, first, last)
+    }
+
+    pub fn has_block(&self, id: u32, block: u64) -> bool {
+        let w = self.slots[id as usize].present[(block / 64) as usize].load(Ordering::Acquire);
+        w & (1 << (block % 64)) != 0
+    }
+
+    /// The whole file is here.
+    pub fn complete(&self, id: u32) -> bool {
+        let s = &self.slots[id as usize];
+        s.size == 0 || all_set(&s.present, 0, s.blocks() - 1)
+    }
+
+    pub fn blocks(&self, id: u32) -> u64 {
+        self.slots[id as usize].blocks()
+    }
+
+    /// Reads `buf.len()` bytes at `off` (fewer at the end of the file) if
+    /// they are all here.
+    pub fn read(&self, id: u32, off: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        let s = &self.slots[id as usize];
+        if off >= s.size || buf.is_empty() {
+            return Ok(Some(0));
+        }
+        let n = buf.len().min((s.size - off) as usize);
+        let _g = s.guard.read().unwrap();
+        if !all_set(&s.present, off / BLOCK, (off + n as u64 - 1) / BLOCK) {
+            return Ok(None);
+        }
+        let got = sys::read_full_at(&*self.handle(id)?, &mut buf[..n], off)?;
+        s.last_used.store(self.session, Ordering::Relaxed);
+        Ok(Some(got))
+    }
+
+    /// Stores `data` at `off` (a block boundary) of file `id` and marks the
+    /// blocks it fills (the last one may end with the file).
+    pub fn write(&self, id: u32, off: u64, data: &[u8]) -> io::Result<()> {
+        let s = &self.slots[id as usize];
+        if !off.is_multiple_of(BLOCK) || off + data.len() as u64 > s.size {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "write outside the file's blocks"));
+        }
+        if data.is_empty() {
+            // An empty file has no blocks: it is here once it exists.
+            if s.size == 0 {
+                self.open_file(id)?;
+            }
+            return Ok(());
+        }
+        // Not while the file is emptied: its blocks would be marked over zeros.
+        let _g = s.guard.read().unwrap();
+        sys::write_all_at(&*self.handle(id)?, data, off)?;
+        let end = off + data.len() as u64;
+        if end >= off + BLOCK || end == s.size {
+            let last = if end == s.size { (end - 1) / BLOCK } else { end / BLOCK - 1 };
+            let added = set_range(&s.present, off / BLOCK, last);
+            self.used.fetch_add(added * BLOCK, Ordering::Relaxed);
+        }
+        s.last_used.store(self.session, Ordering::Relaxed);
+        if !s.dirty.swap(true, Ordering::AcqRel) {
+            self.dirty.lock().unwrap().push(id);
+        }
+        self.changed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Stores the whole file `id` (from a pack), without keeping it open.
+    pub fn write_whole(&self, id: u32, data: &[u8]) -> io::Result<()> {
+        let s = &self.slots[id as usize];
+        if data.len() as u64 != s.size {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not the file's size"));
+        }
+        let _g = s.guard.read().unwrap();
+        let f = match s.file.get() {
+            Some(f) => Handle::Kept(f),
+            None => Handle::Once(self.open_file(id)?),
+        };
+        sys::write_all_at(&f, data, 0)?;
+        if s.size > 0 {
+            let added = set_range(&s.present, 0, s.blocks() - 1);
+            self.used.fetch_add((added * BLOCK).min(s.size), Ordering::Relaxed);
+        }
+        s.last_used.store(self.session, Ordering::Relaxed);
+        if !s.dirty.swap(true, Ordering::AcqRel) {
+            self.dirty.lock().unwrap().push(id);
+        }
+        self.changed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Where file `id` is kept.
+    pub fn path(&self, id: u32) -> PathBuf {
+        self.root.join(&self.slots[id as usize].path)
+    }
+
+    /// File `id`, kept open if there is room for one more.
+    fn handle(&self, id: u32) -> io::Result<Handle<'_>> {
+        let s = &self.slots[id as usize];
+        if let Some(f) = s.file.get() {
+            return Ok(Handle::Kept(f));
+        }
+        let f = self.open_file(id)?;
+        if self.kept.fetch_add(1, Ordering::Relaxed) < self.keep_at_most {
+            Ok(Handle::Kept(s.file.get_or_init(|| f)))
+        } else {
+            self.kept.fetch_sub(1, Ordering::Relaxed);
+            Ok(Handle::Once(f))
+        }
+    }
+
+    /// Opens (creates, sparse, at its full length) file `id`.
+    fn open_file(&self, id: u32) -> io::Result<File> {
+        let s = &self.slots[id as usize];
+        let path = self.root.join(&s.path);
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let f = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)?;
+        if f.metadata()?.len() != s.size {
+            sys::make_sparse(&f);
+            f.set_len(s.size)?;
+        }
+        Ok(f)
+    }
+
+    /// Saves the index if anything changed (the data first).
+    pub fn save(&self) -> io::Result<()> {
+        let _one = self.saving.lock().unwrap();
+        if !self.changed.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let dirty = std::mem::take(&mut *self.dirty.lock().unwrap());
+        for &id in &dirty {
+            self.slots[id as usize].dirty.store(false, Ordering::Release);
+        }
+        // A file not kept open is opened again just to be synced (a sync
+        // flushes the file, whichever handle asks).
+        let sync = |id: &u32| match self.slots[*id as usize].file.get() {
+            Some(f) => sys::sync_data(f),
+            None => File::open(self.path(*id)).and_then(|f| sys::sync_data(&f)),
+        };
+        // A pack writes thousands of files: synced side by side, each only to
+        // the drive (one full flush of the drive's cache, the index's, below
+        // covers them all: 14 s -> well under one for the text pack on a Mac).
+        let workers = dirty.len().div_ceil(256).clamp(1, 8);
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = dirty
+                .chunks(dirty.len().div_ceil(workers).max(1))
+                .map(|chunk| scope.spawn(move || chunk.iter().try_for_each(sync)))
+                .collect();
+            jobs.into_iter().try_for_each(|j| j.join().unwrap_or(Ok(())))
+        })?;
+        for &id in &dirty {
+            if let Err(e) = self.keep_sparse(id) {
+                log::debug!("stream cache: {}: {e}", self.slots[id as usize].path);
+            }
+        }
+        let mut out = Vec::with_capacity(64 + self.slots.len() * 64);
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&VERSION.to_le_bytes());
+        out.extend_from_slice(&self.session.to_le_bytes());
+        out.extend_from_slice(&(self.slots.len() as u32).to_le_bytes());
+        for s in &self.slots {
+            out.extend_from_slice(&(s.path.len() as u16).to_le_bytes());
+            out.extend_from_slice(s.path.as_bytes());
+            out.extend_from_slice(&s.size.to_le_bytes());
+            out.extend_from_slice(&s.mtime.to_le_bytes());
+            out.extend_from_slice(&s.last_used.load(Ordering::Relaxed).to_le_bytes());
+            out.extend_from_slice(&(s.present.len() as u32).to_le_bytes());
+            for w in s.present.iter() {
+                out.extend_from_slice(&w.load(Ordering::Acquire).to_le_bytes());
+            }
+        }
+        let tmp = self.root.join("index.tmp");
+        let mut f = File::create(&tmp)?;
+        f.write_all(&out)?;
+        // The data before the index that says it is there.
+        sys::sync_full(&f)?;
+        fs::rename(&tmp, self.root.join("index"))
+    }
+
+    /// Frees what the file system allocated for blocks that are not here.
+    /// APFS, when it writes a file out, may fill the holes between its
+    /// written parts with zeros (whether it does depends on its state: once
+    /// 4.2 GB were taken for 3.7 GB of blocks); a just-synced file gives them
+    /// back here. Nothing reads or writes the file meanwhile.
+    fn keep_sparse(&self, id: u32) -> io::Result<()> {
+        let s = &self.slots[id as usize];
+        if self.complete(id) {
+            return Ok(());
+        }
+        let _g = s.guard.write().unwrap();
+        let f = match s.file.get() {
+            Some(f) => Handle::Kept(f),
+            None => Handle::Once(OpenOptions::new().read(true).write(true).open(self.root.join(&s.path))?),
+        };
+        let blocks = s.blocks();
+        let set = |b: u64| s.present[(b / 64) as usize].load(Ordering::Acquire) & (1 << (b % 64)) != 0;
+        for (start, end) in sys::data_extents(&f)? {
+            let (mut b, last) = (start.div_ceil(BLOCK), (end / BLOCK).min(blocks));
+            while b < last {
+                if set(b) {
+                    b += 1;
+                    continue;
+                }
+                let hole = b;
+                while b < last && !set(b) {
+                    b += 1;
+                }
+                let (off, len) = (hole * BLOCK, ((b * BLOCK).min(s.size)) - hole * BLOCK);
+                if len >= MIN_HOLE {
+                    sys::punch_hole(&f, off, len)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Empties the files used longest ago until `want` bytes are freed:
+    /// first those this run has not read, then any. Returns the bytes freed.
+    pub fn evict(&self, want: u64) -> u64 {
+        let mut order: Vec<u32> = (0..self.slots.len() as u32).filter(|&i| self.slots[i as usize].bytes() > 0).collect();
+        order.sort_by_key(|&i| self.slots[i as usize].last_used.load(Ordering::Relaxed));
+        let mut freed = 0;
+        for id in order {
+            if freed >= want {
+                break;
+            }
+            let s = &self.slots[id as usize];
+            let _g = s.guard.write().unwrap();
+            let bytes = s.bytes();
+            for w in s.present.iter() {
+                w.store(0, Ordering::Release);
+            }
+            if let Some(f) = s.file.get() {
+                let _ = f.set_len(0).and_then(|()| f.set_len(s.size));
+            } else {
+                let _ = fs::remove_file(self.root.join(&s.path));
+            }
+            self.used.fetch_sub(bytes.min(self.used()), Ordering::Relaxed);
+            freed += bytes;
+        }
+        if freed > 0 {
+            self.changed.store(true, Ordering::Release);
+            log::info!("stream cache: {:.2} GB freed", freed as f64 / 1e9);
+        }
+        freed
+    }
+
+    /// Bytes free on the cache's volume.
+    pub fn free_space(&self) -> Option<u64> {
+        sys::free_space(&self.root)
+    }
+}
+
+/// A file of the copy: kept open, or open for this use only.
+enum Handle<'a> {
+    Kept(&'a File),
+    Once(File),
+}
+
+impl std::ops::Deref for Handle<'_> {
+    type Target = File;
+    fn deref(&self) -> &File {
+        match self {
+            Handle::Kept(f) => f,
+            Handle::Once(f) => f,
+        }
+    }
+}
+
+/// Deletes the copy in `root`.
+pub fn clear(root: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(root) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+#[derive(Default)]
+struct Index {
+    session: u32,
+    files: HashMap<String, Saved>,
+}
+
+struct Saved {
+    size: u64,
+    mtime: u64,
+    last_used: u32,
+    bits: Vec<u64>,
+}
+
+fn load_index(path: &Path) -> Option<Index> {
+    let mut data = Vec::new();
+    File::open(path).ok()?.read_to_end(&mut data).ok()?;
+    let mut r = Bytes(&data);
+    if r.take(4)? != MAGIC || r.u32()? != VERSION {
+        return None;
+    }
+    let session = r.u32()?;
+    let count = r.u32()?;
+    let mut files = HashMap::with_capacity(count as usize);
+    for _ in 0..count {
+        let len = u16::from_le_bytes(r.take(2)?.try_into().ok()?) as usize;
+        let path = String::from_utf8(r.take(len)?.to_vec()).ok()?;
+        let (size, mtime, last_used, words) = (r.u64()?, r.u64()?, r.u32()?, r.u32()?);
+        let bits = (0..words).map(|_| r.u64()).collect::<Option<Vec<u64>>>()?;
+        files.insert(path, Saved { size, mtime, last_used, bits });
+    }
+    Some(Index { session, files })
+}
+
+struct Bytes<'a>(&'a [u8]);
+
+impl<'a> Bytes<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let (a, b) = (self.0.get(..n)?, self.0.get(n..)?);
+        self.0 = b;
+        Some(a)
+    }
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+}
+
+/// The bits `lo..=hi` of a word.
+fn mask(lo: u64, hi: u64) -> u64 {
+    let width = hi - lo + 1;
+    (if width == 64 { u64::MAX } else { (1u64 << width) - 1 }) << lo
+}
+
+fn all_set(bits: &[AtomicU64], first: u64, last: u64) -> bool {
+    let mut b = first;
+    while b <= last {
+        let word = b / 64;
+        let m = mask(b % 64, (last - word * 64).min(63));
+        if bits[word as usize].load(Ordering::Acquire) & m != m {
+            return false;
+        }
+        b = (word + 1) * 64;
+    }
+    true
+}
+
+/// Sets the bits `first..=last`; returns how many were not set.
+fn set_range(bits: &[AtomicU64], first: u64, last: u64) -> u64 {
+    let (mut b, mut added) = (first, 0);
+    while b <= last {
+        let word = b / 64;
+        let m = mask(b % 64, (last - word * 64).min(63));
+        let old = bits[word as usize].fetch_or(m, Ordering::AcqRel);
+        added += (m & !old).count_ones() as u64;
+        b = (word + 1) * 64;
+    }
+    added
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::Entry;
+
+    #[test]
+    fn bits() {
+        let bits: Vec<AtomicU64> = (0..3).map(|_| AtomicU64::new(0)).collect();
+        assert_eq!(set_range(&bits, 3, 130), 128);
+        assert!(all_set(&bits, 3, 130) && !all_set(&bits, 2, 130) && !all_set(&bits, 3, 131));
+        assert_eq!(set_range(&bits, 0, 191), 64);
+        assert!(all_set(&bits, 0, 191));
+    }
+
+    #[test]
+    fn keeps_what_is_still_there() {
+        let root = std::env::temp_dir().join(format!("glue5-cache-test-{}", std::process::id()));
+        let _ = clear(&root);
+        let entries = vec![
+            Entry { path: "data/a.rpf".into(), size: 3 * BLOCK + 10, mtime: 1 },
+            Entry { path: "data/b.xml".into(), size: 5, mtime: 1 },
+        ];
+        let catalog = Catalog::new("x".into(), entries.clone(), 2);
+        {
+            let c = Cache::open(&root, &catalog).unwrap();
+            let block = vec![7u8; BLOCK as usize];
+            c.write(0, 0, &block).unwrap();
+            c.write(0, 3 * BLOCK, &[9u8; 10]).unwrap();
+            c.write(1, 0, b"hello").unwrap();
+            assert!(c.has(0, 0, 0) && !c.has(0, 1, 1) && c.has(0, 3, 3) && c.complete(1));
+            let mut buf = [0u8; 12];
+            assert_eq!(c.read(0, 3 * BLOCK - 2, &mut buf).unwrap(), None);
+            assert_eq!(c.read(0, 3 * BLOCK, &mut buf).unwrap(), Some(10));
+            c.save().unwrap();
+        }
+        // The system deleted one file while the app was away.
+        fs::remove_file(root.join("data/b.xml")).unwrap();
+        let c = Cache::open(&root, &catalog).unwrap();
+        assert!(c.has(0, 0, 0) && c.has(0, 3, 3) && !c.complete(1));
+        let mut buf = [0u8; 4];
+        assert_eq!(c.read(0, 0, &mut buf).unwrap(), Some(4));
+        assert_eq!(buf, [7; 4]);
+        assert!(c.evict(1) > 0 && !c.has(0, 0, 0));
+        let _ = clear(&root);
+    }
+
+    /// What the copy takes on disk is what it holds (APFS may fill holes when
+    /// it writes a file out; the save gives them back).
+    #[cfg(unix)]
+    #[test]
+    fn takes_only_its_blocks() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("glue5-cache-sparse-{}", std::process::id()));
+        let _ = clear(&root);
+        let size = 37_007_360;
+        let catalog = Catalog::new("x".into(), vec![Entry { path: "data/r.rpf".into(), size, mtime: 1 }], 1);
+        let c = Cache::open(&root, &catalog).unwrap();
+        let chunk = vec![1u8; 64 << 10];
+        for off in [0, 15_794_176, 23_494_656, 36_700_160] {
+            c.write(0, off, &chunk).unwrap();
+        }
+        c.save().unwrap();
+        let taken = fs::metadata(root.join("data/r.rpf")).unwrap().blocks() * 512;
+        assert!(taken <= 4 * (64 << 10) + (256 << 10), "{taken} bytes taken for 256 KB");
+        let mut buf = vec![0u8; 64 << 10];
+        assert_eq!(c.read(0, 23_494_656, &mut buf).unwrap(), Some(64 << 10));
+        assert_eq!(buf, chunk);
+        let _ = clear(&root);
+    }
+}
