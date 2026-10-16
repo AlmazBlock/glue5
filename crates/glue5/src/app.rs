@@ -181,8 +181,13 @@ pub fn run() -> Result<()> {
     };
     app.last_failure = std::fs::read_to_string(app.user_dir.join(FAILURE_FILE)).ok();
     app.find_game(args.game_dir.as_deref());
-    if args.play && app.game_dir.is_some() {
-        app.play()?;
+    if args.play {
+        match app.settings.source {
+            Source::Folder if app.game_dir.is_some() => app.play()?,
+            Source::Folder => {}
+            // Once the stream is ready (`update` asks again until then).
+            Source::Server => app.play_requested = true,
+        }
     }
     app.run()
 }
