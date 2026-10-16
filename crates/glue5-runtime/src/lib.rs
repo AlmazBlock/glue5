@@ -20,6 +20,7 @@ mod gamelog;
 pub mod gpu;
 mod granular;
 mod imports;
+mod jobs;
 pub mod input;
 pub mod memory;
 mod online;

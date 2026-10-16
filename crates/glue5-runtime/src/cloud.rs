@@ -25,8 +25,8 @@ const LOAD_FAILED: u64 = 25461316;
 /// loaded empty rather than failed.
 static NEW_SLOTS: AtomicU32 = AtomicU32::new(0);
 /// `netStatus`: its code, then a result code.
-const NET_STATUS_FAILED: u32 = 2;
-const NET_STATUS_SUCCEEDED: u32 = 3;
+pub(crate) const NET_STATUS_FAILED: u32 = 2;
+pub(crate) const NET_STATUS_SUCCEEDED: u32 = 3;
 
 fn without_lan<R>(env: *mut Env, f: impl FnOnce() -> R) -> R {
     let m = unsafe { Mem::of(env) };
@@ -162,7 +162,7 @@ fn file(path: &str) -> PathBuf {
 /// HTTP's "Not Found": no such file yet (a new player).
 const NOT_FOUND: u32 = 404;
 
-fn finish(m: Mem, status: u64, code: u32) {
+pub(crate) fn finish(m: Mem, status: u64, code: u32) {
     finish_with(m, status, code, 0);
 }
 
@@ -270,32 +270,6 @@ mod tests {
     }
 }
 
-/// Hook for `rage::rlUgc::QueryContent(int, rlUgcContentType, char const*,
-/// char const*, int, int, int*, int*, atDelegate<...> const&,
-/// sysMemAllocator*, netStatus*)`: the players' creations are on Rockstar's
-/// servers, and a query fails to start, as the engine's does without
-/// credentials, but without making its web request first. Freemode's
-/// FM_maintain_cloud_header_data asks every frame, and each try logged five
-/// errors. (A query that succeeds with nothing found does not do: the way
-/// into GTA Online then stops at "Unable to connect to Rockstar game
-/// services".)
-pub(crate) unsafe extern "C" fn ugc_query_content(
-    _env: *mut Env,
-    _gamer: u32,
-    _content_type: u32,
-    _query: u64,
-    _params: u64,
-    _offset: u32,
-    _count: u32,
-    _found: u64,
-    _total: u64,
-    _delegate: u64,
-    _allocator: u64,
-    _status: u64,
-) -> u32 {
-    0
-}
-
 /// This module's hooks, online.
 pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.xml_bool_attribute = Some(xml_bool_attribute);
@@ -314,5 +288,4 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.ros_credentials_valid = Some(ros_credentials_valid);
     hooks.post_member_file = Some(post_member_file);
     hooks.get_member_file = Some(get_member_file);
-    hooks.ugc_query_content = Some(ugc_query_content);
 }
