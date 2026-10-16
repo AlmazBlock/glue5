@@ -4,7 +4,11 @@ use super::widgets::{
 };
 use super::{Action, Mode, Page, SettingsTab, Status, WARN, theme};
 use crate::paths::{self, MOBILE};
-use crate::settings::{self, Corner, OverlayDetail, PerfOverlay, RENDER_SCALES, Settings, TouchAim, TouchMode, Upscaling};
+use crate::settings::{
+    self, Corner, OverlayDetail, PerfOverlay, RENDER_SCALES, Settings, Source, TouchAim, TouchMode, Upscaling,
+};
+use crate::sharing::State as Sharing;
+use glue5_stream::Phase;
 use egui::{Align, Align2, Color32, Id, Layout, Rect, RichText, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
 
 /// The only platform differences are capabilities, not layout.
@@ -426,6 +430,9 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str, with_label: bool) -> 
 /// session stopped.
 fn info(ui: &mut egui::Ui, status: &Status, actions: &mut Vec<Action>) {
     card(ui, |ui| game_files(ui, status));
+    if let Some(sharing) = &status.sharing {
+        card(ui, |ui| sharing_card(ui, sharing));
+    }
     if let Some(results) = status.benchmark {
         card(ui, |ui| last_benchmark(ui, results));
     }
@@ -469,6 +476,9 @@ fn card_title(ui: &mut egui::Ui, title: &str, state: Option<(&str, Color32)>) {
 }
 
 fn game_files(ui: &mut egui::Ui, status: &Status) {
+    if status.source == Source::Server {
+        return streamed_files(ui, status);
+    }
     let state = if status.game_dir.is_some() { ("Ready", READY) } else { ("Missing", WARN) };
     card_title(ui, "GAME FILES", Some(state));
     if let Some(dir) = status.game_dir {
@@ -480,6 +490,104 @@ fn game_files(ui: &mut egui::Ui, status: &Status) {
         }
         ui.label(RichText::new(paths::where_the_game_goes()).small().color(theme::MUTED));
         ui.label(RichText::new(paths::game_layout()).monospace().small().color(theme::MUTED));
+        ui.label(RichText::new(paths::or_stream()).small().color(theme::MUTED));
+    }
+}
+
+fn small(ui: &mut egui::Ui, text: &str, color: Color32) {
+    ui.label(RichText::new(text).small().color(color));
+}
+
+/// A thin bar: how far something is (0 to 1).
+fn rail(ui: &mut egui::Ui, done: f32) {
+    let scale = theme::density(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 4.0 * scale), Sense::hover());
+    ui.painter().rect_filled(rect, 2.0 * scale, Color32::from_gray(60));
+    let filled = Rect::from_min_size(rect.min, vec2(rect.width() * done.clamp(0.0, 1.0), rect.height()));
+    ui.painter().rect_filled(filled, 2.0 * scale, Color32::WHITE);
+}
+
+pub(super) fn bytes(n: u64) -> String {
+    if n >= 1 << 30 { format!("{:.1} GB", n as f64 / 1e9) } else { format!("{:.0} MB", n as f64 / 1e6) }
+}
+
+/// The game's files from a server: where from, how far.
+fn streamed_files(ui: &mut egui::Ui, status: &Status) {
+    let Some((server, s)) = status.stream else {
+        card_title(ui, "GAME FILES", Some(("No server", WARN)));
+        small(ui, "Enter the address of a computer that shares the game: Settings › Game › Server.", theme::MUTED);
+        return;
+    };
+    let state = match &s.phase {
+        Phase::Failed(_) => ("Stopped", WARN),
+        Phase::Ready if !s.connected => ("Offline", WARN),
+        Phase::Ready => ("Ready", READY),
+        Phase::Syncing { .. } => ("Taking files", theme::MUTED),
+        Phase::Connecting => ("Connecting", WARN),
+    };
+    card_title(ui, "GAME FILES", Some(state));
+    let mut from = format!("From {server}");
+    if s.cache_bytes > 0 {
+        from.push_str(&format!(" · {} on this device", bytes(s.cache_bytes)));
+    }
+    small(ui, &from, theme::MUTED);
+    match &s.phase {
+        Phase::Failed(why) => small(ui, why, WARN),
+        Phase::Connecting => match &s.error {
+            Some(e) => small(ui, e, WARN),
+            None => small(ui, "Looking for the server…", theme::MUTED),
+        },
+        Phase::Syncing { what, done, total } => {
+            let what = if *what == "text" { "small files" } else { "shaders" };
+            let done = *done as f32 / (*total).max(1) as f32;
+            small(ui, &format!("Taking the {what}, once: {:.0}%", done * 100.0), theme::MUTED);
+            rail(ui, done);
+        }
+        Phase::Ready if s.complete => small(ui, "The whole game is on this device.", theme::MUTED),
+        Phase::Ready if !s.connected => small(ui, "Playing from this device's copy until the server answers.", theme::MUTED),
+        Phase::Ready if s.filling => {
+            let done = s.cache_bytes as f32 / s.total_bytes.max(1) as f32;
+            let line = format!("Downloading the whole game: {} of {}", bytes(s.cache_bytes), bytes(s.total_bytes));
+            small(ui, &line, theme::MUTED);
+            if s.no_room {
+                small(ui, "Not enough space on this device: the download waits for some.", WARN);
+            }
+            rail(ui, done);
+        }
+        Phase::Ready if s.boot.0 < s.boot.1 => {
+            let done = s.boot.0 as f32 / s.boot.1 as f32;
+            small(ui, &format!("Taking what every start reads: {:.0}%", done * 100.0), theme::MUTED);
+            rail(ui, done);
+        }
+        Phase::Ready => {}
+    }
+}
+
+/// This computer serving its game folder.
+fn sharing_card(ui: &mut egui::Ui, sharing: &Sharing) {
+    match sharing {
+        Sharing::Preparing(done) => {
+            card_title(ui, "SHARING", Some(("Preparing", theme::MUTED)));
+            small(ui, "Packing the small files and the shaders, the first time.", theme::MUTED);
+            if let Some(done) = done {
+                rail(ui, *done);
+            }
+        }
+        Sharing::On(addresses) => {
+            card_title(ui, "SHARING", Some(("On", READY)));
+            if addresses.is_empty() {
+                small(ui, "No network address found: is this computer on a network?", WARN);
+            } else {
+                small(ui, "Other devices play this computer's game: their Settings › Game › Server.", theme::MUTED);
+                for a in addresses {
+                    ui.label(RichText::new(a).monospace().color(Color32::WHITE));
+                }
+            }
+        }
+        Sharing::Failed(why) => {
+            card_title(ui, "SHARING", Some(("Stopped", WARN)));
+            small(ui, why, WARN);
+        }
     }
 }
 
@@ -750,16 +858,19 @@ fn settings_items(
             if r.changed() && settings.low_memory {
                 settings.low_preset_written = false;
             }
-            let dir = if started.is_some() { settings.game_dir.as_deref() } else { status.game_dir };
-            let mut shown = dir.map_or_else(|| "Not found".to_owned(), |d| d.display().to_string());
-            if started.is_some_and(|s| Some(s.game_dir.as_path()) != settings.game_dir.as_deref()) {
-                shown.push_str(" · next start");
+            let sources = [(Source::Folder, "Folder"), (Source::Server, "Server")];
+            setting(
+                ui,
+                "Game files",
+                Control::Choice,
+                next_start(started.is_some_and(|s| s.source != settings.source)),
+                |ui| choice(ui, &mut settings.source, &sources),
+            )
+            .on_hover_text("Folder: the game on this device. Server: from a computer that shares it");
+            match settings.source {
+                Source::Folder => game_folder(ui, settings, status, actions),
+                Source::Server => server_settings(ui, settings, status, actions),
             }
-            setting(ui, "Game folder", Control::Action, Some(&shown), |ui| {
-                if action_button(ui, if MOBILE { "Find files" } else { "Choose…" }).clicked() {
-                    actions.push(if MOBILE { Action::FindGame } else { Action::ChooseGame });
-                }
-            });
             if started.is_none() {
                 setting(
                     ui,
@@ -806,6 +917,87 @@ fn next_start(differs: bool) -> Option<&'static str> {
     differs.then_some("Next start")
 }
 
+fn game_folder(ui: &mut egui::Ui, settings: &mut Settings, status: &Status, actions: &mut Vec<Action>) {
+    let started = status.started;
+    let dir = if started.is_some() { settings.game_dir.as_deref() } else { status.game_dir };
+    let mut shown = dir.map_or_else(|| "Not found".to_owned(), |d| d.display().to_string());
+    if started.is_some_and(|s| s.source == Source::Folder && Some(s.game_dir.as_path()) != settings.game_dir.as_deref()) {
+        shown.push_str(" · next start");
+    }
+    setting(ui, "Game folder", Control::Action, Some(&shown), |ui| {
+        if action_button(ui, if MOBILE { "Find files" } else { "Choose…" }).clicked() {
+            actions.push(if MOBILE { Action::FindGame } else { Action::ChooseGame });
+        }
+    });
+    if !MOBILE {
+        let shown = match &status.sharing {
+            None => "Phones, tablets and TVs play it from here".to_owned(),
+            Some(Sharing::Preparing(_)) => "Preparing…".to_owned(),
+            Some(Sharing::On(a)) => a.first().map_or_else(|| "No network address".to_owned(), |a| format!("On: {a}")),
+            Some(Sharing::Failed(why)) => why.clone(),
+        };
+        setting(ui, "Share on the network", Control::Toggle, Some(&shown), |ui| toggle(ui, &mut settings.share));
+    }
+}
+
+fn server_settings(ui: &mut egui::Ui, settings: &mut Settings, status: &Status, actions: &mut Vec<Action>) {
+    let state = match status.stream.map(|(_, s)| s) {
+        None => "A computer sharing the game, or glue5-serve".to_owned(),
+        Some(s) => match &s.phase {
+            Phase::Ready if s.connected => "Connected".to_owned(),
+            Phase::Ready => "Not answering: playing from the copy".to_owned(),
+            Phase::Failed(why) => why.clone(),
+            Phase::Syncing { .. } => "Taking files…".to_owned(),
+            Phase::Connecting => s.error.clone().unwrap_or_else(|| "Connecting…".to_owned()),
+        },
+    };
+    setting(ui, "Server", Control::Action, Some(&state), |ui| {
+        text_field(ui, "", &mut settings.server, "192.168.1.20", 120)
+    });
+    let found = if status.searching {
+        "Searching…"
+    } else if status.servers.is_empty() {
+        "Servers that announce themselves"
+    } else {
+        "Found:"
+    };
+    setting(ui, "On this network", Control::Action, Some(found), |ui| {
+        ui.add_enabled_ui(!status.searching, |ui| {
+            if action_button(ui, "Search").clicked() {
+                actions.push(Action::FindServers);
+            }
+        });
+    });
+    for server in status.servers {
+        setting(ui, &server.name, Control::Action, Some(&server.address), |ui| {
+            if action_button(ui, "Use").clicked() {
+                actions.push(Action::UseServer(server.address.clone()));
+            }
+        });
+    }
+    if paths::can_download_all() {
+        let shown = match status.stream.map(|(_, s)| s) {
+            Some(s) if s.complete => "All here: plays without the server".to_owned(),
+            Some(s) if s.no_room => format!("Waiting for space: {} of {}", bytes(s.cache_bytes), bytes(s.total_bytes)),
+            Some(s) if s.filling => format!("{} of {}", bytes(s.cache_bytes), bytes(s.total_bytes)),
+            Some(s) if s.total_bytes > 0 => format!("{}, to play without the server", bytes(s.total_bytes)),
+            _ => "To play without the server".to_owned(),
+        };
+        setting(ui, "Download the whole game", Control::Toggle, Some(&shown), |ui| toggle(ui, &mut settings.download_all))
+            .on_hover_text("At the lowest priority: the game's own reads go first");
+    }
+    let copy = status.stream.map_or(0, |(_, s)| s.cache_bytes);
+    setting(ui, "Copy on this device", Control::Action, Some(&bytes(copy)), |ui| {
+        ui.add_enabled_ui(status.started.is_none() && copy > 0, |ui| {
+            if action_button(ui, "Delete").clicked() {
+                actions.push(Action::ClearCopy);
+            }
+        })
+        .response
+    })
+    .on_hover_text("What came from the server, kept for the next starts; it is taken again when needed");
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Mode, SettingsTab, Status, settings_page, start_page, theme};
@@ -831,6 +1023,12 @@ mod tests {
             benchmark: None,
             online: false,
             friend_requests: 0,
+            source: crate::settings::Source::Folder,
+            stream: None,
+            sharing: None,
+            servers: &[],
+            searching: false,
+            banner: None,
         }
     }
 
@@ -1098,6 +1296,66 @@ mod tests {
             }
             let home = ctx.memory(|m| m.area_rect(Id::new("start"))).unwrap();
             assert!(screen.contains_rect(home), "{size:?}: {home:?}");
+        }
+    }
+
+    /// The start page and the Game settings in each state of the stream (and
+    /// of sharing) lay out within the screen, the settings within the safe area.
+    #[test]
+    fn streaming_states_fit() {
+        use crate::settings::Source;
+        use glue5_stream::Phase;
+        let base = glue5_stream::Status {
+            phase: Phase::Ready,
+            connected: true,
+            error: None,
+            cache_bytes: 3_700_000_000,
+            boot: (300 << 20, 550 << 20),
+            waiting: 0,
+            total_bytes: 21_000_000_000,
+            filling: false,
+            complete: false,
+            no_room: false,
+        };
+        let states = [
+            glue5_stream::Status { phase: Phase::Connecting, error: Some("connection refused".into()), ..base.clone() },
+            glue5_stream::Status { phase: Phase::Syncing { what: "text", done: 3 << 20, total: 9 << 20 }, ..base.clone() },
+            base.clone(),
+            glue5_stream::Status { filling: true, no_room: true, ..base.clone() },
+            glue5_stream::Status { complete: true, connected: false, ..base.clone() },
+            glue5_stream::Status { phase: Phase::Failed("the server has game build x".into()), ..base.clone() },
+        ];
+        let found = [glue5_stream::discovery::Found { name: "Mac".into(), address: "mac.local:47100".into() }];
+        for size in [vec2(1440.0, 900.0), vec2(390.0, 844.0), vec2(844.0, 390.0)] {
+            for (i, stream) in states.iter().enumerate() {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                let screen = Rect::from_min_size(Pos2::ZERO, size);
+                let mut settings = Settings::default();
+                (settings.source, settings.server) = (Source::Server, "192.168.1.20".into());
+                let mut status = status();
+                status.source = Source::Server;
+                status.stream = Some(("192.168.1.20", stream));
+                status.servers = &found;
+                status.sharing = Some(crate::sharing::State::On(vec!["10.0.0.2".into()]));
+                let mut tab = SettingsTab::Game;
+                for page in 0..8 {
+                    let mut output =
+                        ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |root| {
+                            if page < 4 {
+                                start_page(root.ctx(), &mut settings, &status, None, &mut false, &mut Vec::new(), &mut None);
+                            } else {
+                                let (actions, go) = (&mut Vec::new(), &mut None);
+                                settings_page(root.ctx(), &mut settings, &status, None, &mut tab, &mut None, actions, go);
+                            }
+                        });
+                    output.textures_delta.clear();
+                }
+                let home = ctx.memory(|m| m.area_rect(Id::new("start"))).unwrap();
+                assert!(screen.contains_rect(home), "{size:?}, state {i}: {home:?}");
+                let window = ctx.memory(|m| m.area_rect(Id::new("settings-window"))).unwrap();
+                assert!(ctx.content_rect().contains_rect(window), "{size:?}, state {i}: {window:?}");
+            }
         }
     }
 }

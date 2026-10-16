@@ -101,8 +101,8 @@ fn paint_label(ui: &Ui, rect: Rect, text: &str, size: f32, offset: f32, color: C
     ui.painter().galley(pos, galley, color);
 }
 
-/// A line of text in a field of its own, its name on the left: the choice
-/// control's look. Anywhere on the field gives the text the focus.
+/// A line of text in a field of its own, its name on the left (if any): the
+/// choice control's look. Anywhere on the field gives the text the focus.
 pub(super) fn text_field(ui: &mut Ui, label: &str, text: &mut String, hint: &str, max: usize) -> Response {
     let scale = density(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0 * scale), Sense::hover());
@@ -110,7 +110,7 @@ pub(super) fn text_field(ui: &mut Ui, label: &str, text: &mut String, hint: &str
     ui.painter().rect_filled(rect, radius, Color32::from_gray(36));
     let field = ui.interact(rect, ui.id().with(label), Sense::click());
     let inner = rect.shrink2(vec2(14.0 * scale, 0.0));
-    let label_width = 52.0 * scale;
+    let label_width = if label.is_empty() { 0.0 } else { 52.0 * scale };
     ui.painter().text(inner.left_center(), Align2::LEFT_CENTER, label, FontId::proportional(13.0 * scale), MUTED);
     let edit_rect = Rect::from_min_max(pos2(inner.left() + label_width, inner.top()), inner.max);
     let edit = ui

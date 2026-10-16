@@ -13,6 +13,16 @@ use crate::paths::MOBILE;
 pub struct Settings {
     /// The game directory, once found or chosen.
     pub game_dir: Option<PathBuf>,
+    /// Where the game's files come from: a folder on this device, or a
+    /// server (another device sharing its folder, or glue5-serve).
+    pub source: Source,
+    /// The server: `host` or `host:port`.
+    pub server: String,
+    /// This computer shares its game folder on the network (desktop).
+    pub share: bool,
+    /// The whole game comes from the server to this device (in its game
+    /// folder), to play without it.
+    pub download_all: bool,
     /// Smaller engine pools, and the game's graphics settings lowered once
     /// (the browser build's `?low=1`).
     pub low_memory: bool,
@@ -72,6 +82,14 @@ pub struct Settings {
     /// Settings saved before the choice of overlays: Apple's HUD on or off.
     #[serde(skip_serializing)]
     metal_hud: Option<bool>,
+}
+
+/// Where the game's files come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Source {
+    Folder,
+    Server,
 }
 
 /// The performance overlay over the game.
@@ -182,6 +200,10 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             game_dir: None,
+            source: Source::Folder,
+            server: String::new(),
+            share: false,
+            download_all: false,
             low_memory: MOBILE && sdl3::cpuinfo::system_ram() < LOW_MEMORY_RAM_MB,
             low_preset_written: false,
             render_scale: None,

@@ -69,6 +69,12 @@ pub enum Action {
     ResetGraphics,
     /// Join a friend (by its key) playing GTA Online in `lobby`.
     JoinFriend { key: String, lobby: String },
+    /// Delete the stream's copy of the game.
+    ClearCopy,
+    /// Look for servers on the network.
+    FindServers,
+    /// Stream from this server (an address found).
+    UseServer(String),
 }
 
 /// Navigation from a controller.
@@ -86,6 +92,7 @@ pub enum Nav {
 /// starts again.
 pub struct Started {
     pub game_dir: PathBuf,
+    pub source: crate::settings::Source,
     pub max_fps: u32,
     pub low_memory: bool,
     pub render_scale: f32,
@@ -126,6 +133,17 @@ pub struct Status<'a> {
     pub online: bool,
     /// Friends asking to be friends, waiting for an answer.
     pub friend_requests: usize,
+    /// Where the game's files come from (the setting).
+    pub source: crate::settings::Source,
+    /// The stream from a server, if one is set: its address and state.
+    pub stream: Option<(&'a str, &'a glue5_stream::Status)>,
+    /// This computer sharing its game folder (desktop).
+    pub sharing: Option<crate::sharing::State>,
+    /// Servers found on the network, and whether a search runs.
+    pub servers: &'a [glue5_stream::discovery::Found],
+    pub searching: bool,
+    /// A line over the game: it waits for the server.
+    pub banner: Option<&'a str>,
 }
 
 /// The settings button over the game: from the safe area's top right
@@ -425,7 +443,12 @@ impl Ui {
         if !hud {
             self.perf.hide();
         }
-        if self.page.is_none() && touch.is_none() && gear.is_none() && (!hud || !self.perf.due(settings.overlay_detail))
+        let banner = status.banner.filter(|_| self.page.is_none());
+        if self.page.is_none()
+            && touch.is_none()
+            && gear.is_none()
+            && banner.is_none()
+            && (!hud || !self.perf.due(settings.overlay_detail))
         {
             if self.drawn && !hud {
                 self.overlay.submit(Vec::new(), Default::default(), 1.0);
@@ -467,6 +490,9 @@ impl Ui {
         self.gear = gear.map(|alpha| draw_gear(&ctx, safe, settings.touch_size, alpha));
         if hud {
             self.perf.draw(&ctx, safe, settings, status);
+        }
+        if let Some(text) = banner {
+            draw_banner(&ctx, safe, text);
         }
         if self.page.is_some() && status.started.is_none() {
             theme::backdrop(&ctx, self.background.as_ref());
@@ -522,6 +548,16 @@ impl Ui {
         }
         actions
     }
+}
+
+/// A line at the top of the game, centred: what it waits for.
+fn draw_banner(ctx: &egui::Context, safe: Rect, text: &str) {
+    let painter = ctx.layer_painter(LayerId::new(egui::Order::Foreground, egui::Id::new("banner")));
+    let galley = painter.layout_no_wrap(text.into(), egui::FontId::proportional(14.0), egui::Color32::WHITE);
+    let size = galley.size() + egui::vec2(32.0, 16.0);
+    let rect = Rect::from_center_size(egui::pos2(safe.center().x, safe.top() + 16.0 + size.y / 2.0), size);
+    painter.rect_filled(rect, size.y / 2.0, egui::Color32::from_black_alpha(190));
+    painter.galley(rect.center() - galley.size() / 2.0, galley, egui::Color32::WHITE);
 }
 
 // Points: the UI's unit, the same physical size everywhere. As SDL's

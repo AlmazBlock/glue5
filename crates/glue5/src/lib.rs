@@ -20,6 +20,7 @@ mod keymap;
 mod pads;
 mod paths;
 mod settings;
+mod sharing;
 mod touch;
 mod ui;
 

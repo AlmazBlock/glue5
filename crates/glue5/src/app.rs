@@ -24,7 +24,7 @@ use sdl3::mouse::MouseButton;
 
 use crate::haptics;
 use crate::paths::{self, MOBILE};
-use crate::settings::{self, PerfOverlay, Settings, TouchMode, Upscaling};
+use crate::settings::{self, PerfOverlay, Settings, Source, TouchMode, Upscaling};
 use crate::touch::{self, Touch};
 use crate::ui::{self, Action, Mode, Page, Started, Status, Ui};
 use crate::{audio, benchmark, keymap, pads};
@@ -157,6 +157,12 @@ pub fn run() -> Result<()> {
         folder: None,
         game_dir: None,
         problem: None,
+        stream: None,
+        source: Source::Folder,
+        stream_for: None,
+        sharing: None,
+        servers: Arc::default(),
+        stream_waiting: None,
         last_failure: None,
         graphics_reset: false,
         upscalers: UPSCALERS.iter().copied().filter(|u| screen.has_upscaler(u.upscaler())).collect(),
@@ -251,6 +257,20 @@ struct App {
     game_dir: Option<PathBuf>,
     /// Why it was not, or a folder chosen that is not one.
     problem: Option<String>,
+    /// The game streamed from a server (Settings › Game › Game files): its
+    /// client, which keeps a copy of the game in the cache folder.
+    stream: Option<Arc<glue5_stream::Client>>,
+    /// The source `game_dir` is for.
+    source: Source,
+    /// The server and whether the whole game is wanted, as the stream was
+    /// started for (it starts again when they change).
+    stream_for: Option<(String, bool)>,
+    /// This computer sharing its game folder (desktop).
+    sharing: Option<crate::sharing::Sharing>,
+    /// Servers found on the network by the last search, and whether one runs.
+    servers: Arc<Mutex<(bool, Vec<glue5_stream::discovery::Found>)>>,
+    /// Engine reads have waited for the server since then.
+    stream_waiting: Option<Instant>,
     /// Why the last game stopped, if it did.
     last_failure: Option<String>,
     /// The game's graphics settings went back to their defaults.
@@ -298,7 +318,7 @@ impl App {
     fn run(mut self) -> Result<()> {
         loop {
             if let Some(exit) = glue5_runtime::exit::requested() {
-                self.settings.save(&self.user_dir);
+                self.save();
                 if exit == Exit::Restart {
                     if MOBILE {
                         // A phone app cannot start itself again: says so before it ends.
@@ -332,7 +352,7 @@ impl App {
             let events: Vec<Event> = first.into_iter().chain(self.events.poll_iter()).collect();
             for event in events {
                 if self.event(event) {
-                    self.settings.save(&self.user_dir);
+                    self.save();
                     return Ok(());
                 }
             }
@@ -340,7 +360,7 @@ impl App {
                 self.came_back();
             }
             if self.update(page)? {
-                self.settings.save(&self.user_dir);
+                self.save();
                 return Ok(());
             }
         }
@@ -409,6 +429,7 @@ impl App {
     /// Everything after the events: touch controls, pads, the UI and what
     /// it asks for. True to quit.
     fn update(&mut self, page_before: Option<Page>) -> Result<bool> {
+        self.keep_sources();
         let in_game = self.game.is_some();
         // Touch controls: a virtual pad in slot 0 unless a controller has it.
         let show = in_game
@@ -494,6 +515,10 @@ impl App {
 
         // The UI: over the game at every turn, before it when something changed.
         let mut actions = Vec::new();
+        let stream = self.stream.clone();
+        let stream = stream.as_ref().map(|c| (c.server(), c.status()));
+        let banner = self.banner(stream.as_ref().map(|(_, s)| s));
+        let servers = self.servers.lock().unwrap().clone();
         if in_game || (!self.lifecycle.background.load(Ordering::Relaxed) && self.ui.wants_frame()) {
             let status = Status {
                 game_dir: self.game_dir.as_deref(),
@@ -512,6 +537,12 @@ impl App {
                 benchmark: self.benchmark.as_ref(),
                 online: self.game.is_some() && self.mode == Mode::Online,
                 friend_requests: glue5_runtime::friends::snapshot().requests.len(),
+                source: self.settings.source,
+                stream: stream.as_ref().map(|(server, status)| (*server, status)),
+                sharing: self.sharing.as_ref().map(crate::sharing::Sharing::state),
+                servers: &servers.1,
+                searching: servers.0,
+                banner,
             };
             // The settings button: on touch screens always, so that it stays
             // with a controller in use or the touch controls off.
@@ -553,6 +584,12 @@ impl App {
                         glue5_runtime::friends::follow(&key);
                         self.ui.back();
                     }
+                }
+                Action::ClearCopy => self.clear_copy(),
+                Action::FindServers => self.find_servers(),
+                Action::UseServer(address) => {
+                    self.settings.server = address;
+                    self.settings.save(&self.user_dir);
                 }
             }
         }
@@ -689,7 +726,7 @@ impl App {
         let game = glue5_runtime::start(
             glue5_runtime::Config {
                 game_dir: game_dir.clone(),
-                stream: None,
+                stream: self.stream.clone().filter(|_| self.source == Source::Server),
                 user_dir: self.user_dir.clone(),
                 width: back_buffer.0,
                 height: back_buffer.1,
@@ -714,7 +751,7 @@ impl App {
             }
         };
         let started =
-            Started { game_dir, max_fps: s.max_fps, low_memory: s.low_memory, render_scale: s.render_scale() };
+            Started { game_dir, source: self.source, max_fps: s.max_fps, low_memory: s.low_memory, render_scale: s.render_scale() };
         self.game = Some(Running { game, input: None, started, back_buffer, _audio: audio });
         self.ui.game_started();
         Ok(())
@@ -817,6 +854,183 @@ impl App {
             Ok(surface) => self.presentation.replace_surface(surface),
             Err(e) => log::error!("no surface for the window: {e:#}"),
         }
+    }
+
+    /// The settings, and the stream's index (the app ends).
+    fn save(&self) {
+        self.settings.save(&self.user_dir);
+        if let Some(stream) = &self.stream {
+            stream.flush();
+        }
+    }
+
+    /// Follows the settings: the game's files from a folder or a server
+    /// (the stream started, or started again for another server), this
+    /// computer's folder shared or not. Not while the game runs on them.
+    fn keep_sources(&mut self) {
+        if self.game.is_some() {
+            return;
+        }
+        let source = self.settings.source;
+        if source != self.source {
+            self.source = source;
+            match source {
+                Source::Folder => self.find_game(None),
+                Source::Server => {
+                    self.game_dir = None;
+                    self.problem = None;
+                    // On a TV or a phone, typing an address is the last resort.
+                    if self.settings.server.trim().is_empty() {
+                        self.find_servers();
+                    }
+                }
+            }
+            self.ui.repaint();
+        }
+        // Not while the address is being typed.
+        let server = self.settings.server.trim();
+        let wanted = (source == Source::Server && !server.is_empty()).then(|| (server.to_string(), self.settings.download_all));
+        if wanted != self.stream_for && !self.ui.wants_text() {
+            self.stream_for = wanted.clone();
+            self.start_stream(wanted.map(|(server, _)| server));
+        }
+        if let Some(stream) = &self.stream {
+            let status = stream.status();
+            // A complete download is a game folder: the local mode finds it too.
+            if status.complete && self.settings.download_all && self.settings.game_dir.is_none() {
+                self.settings.game_dir = Some(stream.root().to_owned());
+            }
+            let ready = stream.is_ready().then(|| stream.root().to_owned());
+            if source == Source::Server && ready != self.game_dir {
+                self.game_dir = ready;
+                self.ui.repaint();
+            }
+            // The start page shows how far it is, while something moves.
+            let moving = status.phase != glue5_stream::Phase::Ready
+                || !status.connected
+                || status.boot.0 < status.boot.1
+                || status.filling;
+            if moving {
+                self.ui.repaint_in(Duration::from_millis(300));
+            }
+        }
+        if !MOBILE {
+            let share = (self.settings.share && source == Source::Folder).then(|| self.game_dir.clone()).flatten();
+            if self.sharing.as_ref().map(|s| s.dir()) != share.as_deref() {
+                let cache = paths::cache_dir(&self.user_dir).join("serve");
+                self.sharing = share.map(|dir| crate::sharing::Sharing::start(dir, cache));
+                self.ui.repaint();
+            }
+            if self.sharing.as_ref().is_some_and(|s| matches!(s.state(), crate::sharing::State::Preparing(_))) {
+                self.ui.repaint_in(Duration::from_millis(500));
+            }
+        }
+    }
+
+    /// (Re)starts the stream from `server` (none: stops it), its copy where
+    /// the settings want it: moved there if it was elsewhere (on the same
+    /// volume: a rename).
+    fn start_stream(&mut self, server: Option<String>) {
+        let root = self.copy_root();
+        let old = self.stream.take().map(|old| {
+            old.stop();
+            old.root().to_owned()
+        });
+        if let Some(old) = old.filter(|old| *old != root && old.exists() && !root.exists()) {
+            if let Some(parent) = root.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::rename(&old, &root) {
+                log::warn!("stream: moving the copy to {}: {e}", root.display());
+            }
+        }
+        self.stream = server.map(|server| {
+            let client = glue5_stream::Client::start(glue5_stream::Options {
+                server,
+                root,
+                build: glue5_runtime::GAME_BUILD.into(),
+                low_memory: self.settings.low_memory,
+            });
+            client.set_fill(self.settings.download_all && paths::can_download_all());
+            client
+        });
+        if self.source == Source::Server {
+            self.game_dir = None;
+        }
+        self.ui.repaint();
+    }
+
+    /// The line over the game while it waits for the server.
+    fn banner(&mut self, stream: Option<&glue5_stream::Status>) -> Option<&'static str> {
+        let stream = stream.filter(|_| self.game.is_some() && self.source == Source::Server)?;
+        if stream.waiting == 0 {
+            self.stream_waiting = None;
+        } else {
+            self.stream_waiting.get_or_insert_with(Instant::now);
+        }
+        if !stream.connected {
+            Some("The server does not answer: trying again…")
+        } else if self.stream_waiting.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
+            Some("Waiting for the game's files from the server…")
+        } else {
+            None
+        }
+    }
+
+    /// Where the stream's copy goes: the cache folder, or, for the whole
+    /// game, the device's game folder (not when the user's own game is there).
+    fn copy_root(&self) -> PathBuf {
+        match paths::download_dir(&self.user_dir) {
+            Some(dir)
+                if self.settings.download_all
+                    && (!is_game_dir(&dir) || dir.join(glue5_stream::cache::CATALOG).is_file()) =>
+            {
+                dir
+            }
+            _ => paths::stream_copy(&self.user_dir),
+        }
+    }
+
+    /// Deletes the stream's copy (the game does not run).
+    fn clear_copy(&mut self) {
+        if self.game.is_some() {
+            return;
+        }
+        let root = self.stream.as_ref().map_or_else(|| self.copy_root(), |s| s.root().to_owned());
+        if let Some(stream) = self.stream.take() {
+            stream.stop();
+        }
+        // Started again (empty) at the next turn.
+        self.stream_for = None;
+        if self.settings.game_dir.as_deref() == Some(root.as_path()) {
+            self.settings.game_dir = None;
+        }
+        if let Err(e) = glue5_stream::cache::clear(&root) {
+            self.ui.note(format!("The copy could not be deleted: {e}"));
+        }
+        if self.source == Source::Server {
+            self.game_dir = None;
+        }
+    }
+
+    /// Looks for servers on the network, in the background.
+    fn find_servers(&mut self) {
+        let servers = self.servers.clone();
+        {
+            let mut s = servers.lock().unwrap();
+            if s.0 {
+                return;
+            }
+            s.0 = true;
+        }
+        let spawned = std::thread::Builder::new().name("find servers".into()).spawn(move || {
+            let found = glue5_stream::discovery::find(Duration::from_secs(3));
+            *servers.lock().unwrap() = (false, found);
+        });
+        if spawned.is_err() {
+            self.servers.lock().unwrap().0 = false;
+        }
+        self.ui.repaint_in(Duration::from_millis(300));
     }
 
     /// Looks for the game: the folder named on the command line or by
