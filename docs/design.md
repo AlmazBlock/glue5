@@ -197,14 +197,20 @@ in 10-14 ms (134 ms with 1 MB requests; seconds with the browser build's
 parallel HTTP requests, which share the link evenly). A cold disk on the
 server reads ahead of the queue (`F_RDADVISE`, `posix_fadvise`). Each chunk
 carries a CRC-32 (TCP's checksum is weak, and a bad block would stay in the
-copy): a damaged one is dropped and asked again. Requests are pipelined
+copy): a damaged one is dropped and asked again, as is one whose header
+(which has none) puts it outside its request. Requests are pipelined
 without limit, so the link, not the round trip, sets the pace: through a
 link of 100 Mbit/s and 40 ms (simulated), the first start kept it 96 % busy
 and had the world on screen after 3 min 20 s (2.3 GB), the benchmark then
 running as long as from a folder; over the local loopback, after 36 s.
 TCP, not UDP: every byte must arrive, and a reliable, congestion-controlled
 transport over UDP is QUIC, a heavy dependency, worth it only if lossy
-links turn out to need it.
+links turn out to need it. The client drops a connection with requests in
+flight and no data for 20 s (counted from the request, after a quiet
+spell), or which takes no request for 20 s (a write timeout: a stalled
+server holds up neither the app nor stopping); the server lets go of a
+client gone without a word after a minute (TCP keepalive: no read
+timeout, as a client may ask nothing for long).
 
 **Reads announced late.** Traced through a proxy that delays each way by
 20 ms and sends 12.5 MB/s behind a 256 KB queue, a cold benchmark run
@@ -247,8 +253,9 @@ runs. (The simulated link, a Python proxy, also slows down under load:
 8.3 to 10.4 MB/s from run to run; a start needs 2.8 GB before the world
 either way.)
 
-**Before the game:** the catalog (every file, size and time) and the two
-packs, ~10 MB, asked together, which bring every small file and the
+**Before the game:** the catalog (every file, size and time, asked with
+the boot set's ranges), then the packs it does not have, ~10 MB, asked
+together (two round trips), which bring every small file and the
 shaders whole: the pipelines compile from them as from a folder (Play's
 preparation is unchanged). Then, at the lowest priority but one, the boot
 set (the whale5 build's `bootset.json`: the ~550 MB of archive headers and
@@ -280,19 +287,28 @@ start, a block counts only if its file is still there with its full
 length: whatever the system deleted meanwhile (iOS and tvOS caches) is
 fetched again when needed. When the volume falls under 1 GB free, files
 read longest ago are emptied, 256 MB beyond that at a time: data files of
-earlier runs first, then this run's least recently used, the packs' files
-last (an iPhone with a gigabyte free gave away a gigabyte at a time, the
-start's own files and the packs among them). A copy whose packs are complete starts
-without the server (missing blocks wait for it); a lost connection is
-retried for ever and the requests in flight asked again. APFS, when it
-writes a file out, may fill the holes between its written parts with zeros
-(whether it does depends on its state, and changed within an hour on the
-same Mac: 5.7 GB taken for 3.7 GB of blocks); after each save, the holes
-of the files just synced are punched again (`F_PUNCHHOLE`): 3.74 GB for
-3.67. Each hole holds off the file's writes while it is punched, not its
-reads. Other file systems never fill holes, and are left alone. At most
-4,096 files stay open (the limit is 10,240 on Apple systems, often 1,024
-on Linux); the others are opened for each use.
+earlier runs first, then this run's least recently used, the boot set's
+files after them (read first, they were the least recently used), the
+packs' files last (an iPhone with a gigabyte free gave away a gigabyte at
+a time, the start's own files and the packs among them). An index without
+their blocks is saved before their data is freed (a crash in between
+would otherwise trust zeros). Emptying that raises no free space
+(something else fills the volume) stops until the volume has room again:
+it would give away the whole copy for nothing. A copy whose packs are
+complete starts without the server (missing blocks wait for it); a lost
+connection is retried for ever (at once after one that served, then at
+growing intervals) and the requests in flight asked again, in the order
+they were asked. Stopping a client (another server chosen, the copy
+deleted) returns at once: it finishes in the background, its index saved
+last, and the next client, like moving or deleting a copy, waits for it.
+APFS, when it writes a file out, may fill the holes between its written
+parts with zeros (whether it does depends on its state, and changed within
+an hour on the same Mac: 5.7 GB taken for 3.7 GB of blocks); after each
+save, the holes of the files just synced are punched again
+(`F_PUNCHHOLE`): 3.74 GB for 3.67. Each hole holds off the file's writes
+while it is punched, not its reads. Other file systems never fill holes,
+and are left alone. At most 4,096 files stay open (the limit is 10,240 on
+Apple systems, often 1,024 on Linux); the others are opened for each use.
 
 **The whole game** (Download the whole game, on the Servers page) comes at the
 lowest priority, 32 MB on its way at a time, with what the game leaves of
@@ -302,7 +318,8 @@ It goes where a copied game would (`Documents/game`, the external files'
 `game`, the user directory's `game` on desktop), not in the cache folder,
 and never over a game folder of the user's own. Complete, it stays there
 whatever the setting says later, used as it is and never emptied for room
-(moved back into the cache, an iPhone's system emptied 17 of its 21 GB);
+(moved back into the cache, an iPhone's system emptied 17 of its 21 GB),
+nor changed by a server whose files differ (played with its own catalog);
 only a partial copy moves when the setting changes, and one left in the
 cache beside the whole game is deleted. tvOS has no such option:
 it keeps nothing but caches.

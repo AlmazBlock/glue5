@@ -72,7 +72,7 @@ fn run() -> Result<()> {
     for ip in glue5_stream::lan_addresses() {
         log::info!("on this network: {ip}:{port}");
     }
-    // Devices on the network find it (Apple systems announce it).
+    // Devices on the network find it (it announces itself).
     let _advert = glue5_stream::discovery::advertise(port);
     loop {
         std::thread::park();
