@@ -467,3 +467,20 @@ fn the_file_is_written_at_most_every_few_seconds() {
     assert!((1..=2).contains(&writes), "{writes}");
     assert_eq!(a.restarted().s.recent[0].name, "Carl 39");
 }
+
+#[test]
+fn a_file_that_cannot_be_read_is_kept() {
+    let dir = dir("Bad");
+    std::fs::write(dir.join(FILE), b"{ not json").unwrap();
+    let mut p = Player { s: Service::load(&dir, "Ann", 1), addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1), dir: dir.clone() };
+    p.s.identity();
+    p.flush();
+    let kept: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with("friends.json.bad-"))
+        .collect();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(std::fs::read(&kept[0]).unwrap(), b"{ not json");
+    assert!(serde_json::from_slice::<Store>(&std::fs::read(dir.join(FILE)).unwrap()).is_ok_and(|s| s.key.is_some()));
+}

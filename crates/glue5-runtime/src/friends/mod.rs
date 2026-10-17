@@ -480,8 +480,10 @@ pub(crate) struct Service {
     summarized: bool,
     /// Bumped at every change the application shows.
     generation: u64,
-    /// Whether there are changes to write to the file, and when it was
-    /// last; the writes in order (`Saving`).
+    /// Whether the file may be written (see `load`), whether there are
+    /// changes to write to it, and when it was last; the writes in order
+    /// (`Saving`).
+    writable: bool,
     unsaved: bool,
     saved: Option<Instant>,
     version: u64,
@@ -528,16 +530,22 @@ impl Out {
 
 impl Service {
     fn load(dir: &Path, name: &str, id: u64) -> Service {
-        let store: Store = std::fs::read(dir.join(FILE))
-            .ok()
-            .and_then(|b| match serde_json::from_slice(&b) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    log::warn!("friends: {FILE}: {e}");
-                    None
-                }
-            })
-            .unwrap_or_default();
+        let path = dir.join(FILE);
+        // A file that cannot be read (or has no key that can) is not written
+        // over, the friends in it lost: it is put aside; one there that
+        // cannot be read now is left as it is, and nothing is written.
+        let (store, writable) = match std::fs::read(&path) {
+            Ok(b) => match serde_json::from_slice::<Store>(&b) {
+                Ok(s) if s.key.as_deref().is_none_or(|k| crypto::unhex::<32>(k).is_some()) => (s, true),
+                Ok(_) => (Store::default(), put_aside(&path, "no key")),
+                Err(e) => (Store::default(), put_aside(&path, &e.to_string())),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Store::default(), true),
+            Err(e) => {
+                log::warn!("friends: {}: {e}; not written this time", path.display());
+                (Store::default(), false)
+            }
+        };
         let identity = store.key.as_deref().and_then(crypto::unhex::<32>).map(Identity::from_private);
         // The code comes from the key and the salt; one from before (random,
         // which anyone who knew it could answer for) is replaced.
@@ -580,6 +588,7 @@ impl Service {
             started: Instant::now(),
             summarized: false,
             generation: 1,
+            writable,
             unsaved: false,
             saved: None,
             version: 0,
@@ -614,6 +623,9 @@ impl Service {
             return None;
         }
         self.unsaved = false;
+        if !self.writable {
+            return None;
+        }
         self.saved = Some(now);
         self.version += 1;
         let store = Store {
@@ -1463,6 +1475,22 @@ impl Service {
 fn seal(t: &mut Transport, m: &Message) -> Option<Vec<u8>> {
     let d = serde_json::to_vec(m).ok()?;
     t.seal(&d, Instant::now())
+}
+
+/// Moves a file that cannot be read aside (`<name>.bad-<time>`): whether
+/// it went (its place may be written).
+fn put_aside(path: &Path, why: &str) -> bool {
+    let aside = path.with_file_name(format!("{FILE}.bad-{}", unix()));
+    match std::fs::rename(path, &aside) {
+        Ok(()) => {
+            log::warn!("friends: {} ({why}): kept as {}", path.display(), aside.display());
+            true
+        }
+        Err(e) => {
+            log::warn!("friends: {} ({why}), not kept aside ({e}): not written this time", path.display());
+            false
+        }
+    }
 }
 
 /// Writes a file only the player can read (where the system has owners).
