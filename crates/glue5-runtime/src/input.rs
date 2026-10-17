@@ -220,6 +220,12 @@ pub(crate) unsafe extern "C" fn text_box_close_hook(env: *mut Env, this: u64) {
 /// aim assist, the menus' behaviour.
 const LAST_DEVICE: u64 = 24627136;
 const KEYBOARD_MOUSE: i32 = -4;
+/// The keyboard and mouse scheme a script loaded for its minigame (golf,
+/// darts, yoga, the arcade's: `INIT_PC_SCRIPTED_CONTROLS`), its name's
+/// hash: "default"'s when none (`SHUTDOWN_PC_SCRIPTED_CONTROLS`).
+const PC_SCHEME: u64 = 24627144;
+/// joaat("default").
+const DEFAULT_SCHEME: u32 = 3839837909;
 /// A task's ped, a ped's position.
 const TASK_PED: u64 = 16;
 const PED_POSITION: u64 = 112;
@@ -238,6 +244,9 @@ static TOUCH_PLAY: AtomicBool = AtomicBool::new(false);
 static DIRECT: AtomicBool = AtomicBool::new(false);
 /// When a script last showed its menu's cursor.
 static CURSOR_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// A screen of the game's own shows its pointer (the browser, a hacking
+/// screen: their movies draw it).
+static POINTER: AtomicBool = AtomicBool::new(false);
 /// The pause menu shows its map.
 static MAP: AtomicBool = AtomicBool::new(false);
 static SIGNALS: Mutex<Signals> = Mutex::new(Signals {
@@ -254,6 +263,8 @@ static PHONE_OUT: AtomicBool = AtomicBool::new(false);
 static PAUSE_MENU: AtomicBool = AtomicBool::new(false);
 /// The pause menu's frontend is up, with a script's menu in it or not.
 static FRONTEND: AtomicBool = AtomicBool::new(false);
+/// A minigame's keyboard and mouse scheme is loaded.
+static MINIGAME: AtomicBool = AtomicBool::new(false);
 static SCRIPTED: AtomicBool = AtomicBool::new(false);
 static CHARACTER: AtomicU32 = AtomicU32::new(Character::Other as u32);
 static GUN: AtomicBool = AtomicBool::new(false);
@@ -432,6 +443,9 @@ pub struct PlayerContext {
     pub cursor: bool,
     /// The pause menu shows its map.
     pub map: bool,
+    /// Direct touch: a screen of the game's own takes the pointer (the
+    /// browser, a hacking screen): it is all the screen.
+    pub pointer: bool,
 }
 
 /// The story's characters, or anyone else (GTA Online's).
@@ -497,7 +511,10 @@ pub fn player_context() -> PlayerContext {
         },
         gun: GUN.load(Ordering::Relaxed),
         cursor: DIRECT.load(Ordering::Relaxed)
-            && (FRONTEND.load(Ordering::Relaxed) || fresh(*CURSOR_AT.lock().unwrap())),
+            && (FRONTEND.load(Ordering::Relaxed)
+                || (!MINIGAME.load(Ordering::Relaxed)
+                    && (fresh(*CURSOR_AT.lock().unwrap()) || POINTER.load(Ordering::Relaxed)))),
+        pointer: DIRECT.load(Ordering::Relaxed) && !MINIGAME.load(Ordering::Relaxed) && POINTER.load(Ordering::Relaxed),
         map: MAP.load(Ordering::Relaxed),
     }
 }
@@ -547,14 +564,23 @@ pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     FRONTEND.store(frontend, Ordering::Relaxed);
     MAP.store(frontend && unsafe { orig::pause_menu_in_map(env) } != 0, Ordering::Relaxed);
     let scripted = off & !OFF_BY_PAUSE_MENU != 0;
+    let scheme = mem.u32(PC_SCHEME);
+    let minigame = scheme != 0 && scheme != DEFAULT_SCHEME;
+    MINIGAME.store(minigame, Ordering::Relaxed);
+    let pointer = crate::prompts::pointer_shown(env);
+    POINTER.store(pointer, Ordering::Relaxed);
     let touch_play = TOUCH_PLAY.load(Ordering::Relaxed) && !menu;
     if touch_play {
         // Direct touch: a script's menu or scene (its buttons' bar, the
-        // player's controls taken), the pause menu, a cursor shown: as with
-        // keyboard and mouse, so that the menus made for the mouse show
-        // their cursor. The touch controls' pad works there too.
+        // player's controls taken), the pause menu, a cursor or pointer
+        // shown: as with keyboard and mouse, so that the screens made for
+        // the mouse show theirs. The touch controls' pad works there too.
+        // Not in a minigame that loaded its own keyboard and mouse scheme
+        // (its controls change with it): the pad, as made for touch.
         let fresh = |t: Option<Instant>| t.is_some_and(|t| t.elapsed() < FRESH);
-        let mouse = DIRECT.load(Ordering::Relaxed) && (frontend || bar || scripted || fresh(*CURSOR_AT.lock().unwrap()));
+        let mouse = DIRECT.load(Ordering::Relaxed)
+            && !minigame
+            && (frontend || bar || scripted || pointer || fresh(*CURSOR_AT.lock().unwrap()));
         mem.set_i32(LAST_DEVICE, if mouse { KEYBOARD_MOUSE } else { 0 });
     }
     update_targeting(mem, touch_play);

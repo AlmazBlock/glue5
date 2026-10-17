@@ -169,7 +169,7 @@ mod tests {
             for (vehicle_near, phone, menu, cutscene) in
                 [(false, false, false, false), (true, false, false, false), (false, true, false, false), (false, false, true, false), (false, false, false, true)]
             {
-                contexts.push(PlayerContext { activity, vehicle_near, phone, menu, cutscene, scripted: false, character: Character::Other, gun: false, cursor: false, map: false });
+                contexts.push(PlayerContext { activity, vehicle_near, phone, menu, cutscene, scripted: false, character: Character::Other, gun: false, cursor: false, map: false, pointer: false });
             }
         }
         // Screens in points, and their safe areas' insets (left, top, right, bottom).

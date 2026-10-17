@@ -911,6 +911,7 @@ mod tests {
                             gun: false,
                             cursor: false,
                             map: false,
+                            pointer: false,
                         };
                         let mut touch = Touch::new();
                         touch.layout(screen, safe, scale);

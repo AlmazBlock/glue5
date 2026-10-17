@@ -891,10 +891,10 @@ fn settings_items(
                 |ui| toggle(ui, &mut settings.touch_direct),
             )
             .on_hover_text(
-                "The game's menus made for the mouse (the pause menu, shops, the interaction menu, the \
-                 character creator) take taps and drags as a phone's own screens do: tap to choose, drag up \
-                 or down to scroll, left or right to change a value, drag the map, pinch to zoom; their \
-                 arrows and Select buttons go",
+                "The game's screens made for the mouse (the pause menu, shops, the interaction menu, the \
+                 character creator, the phone's browser) take taps and drags as a phone's own screens do: \
+                 tap to choose, drag up or down to scroll, left or right to change a value, drag the map, \
+                 pinch to zoom; their arrows and Select buttons go. Minigames keep the touch controls",
             );
             if crate::haptics::SUPPORTED {
                 setting(ui, "Haptics", Control::Toggle, None, |ui| toggle(ui, &mut settings.haptics));

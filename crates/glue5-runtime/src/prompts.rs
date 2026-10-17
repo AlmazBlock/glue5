@@ -93,6 +93,52 @@ fn is_bar(mem: Mem, id: u32) -> bool {
     name.to_ascii_lowercase().ends_with(b"instructional_buttons")
 }
 
+/// Movies showing a cursor of their own (the browser's, a hacking
+/// screen's: their scripts do for keyboard and mouse only), and when a
+/// script last moved one (those calls come each frame it is used).
+struct Pointer {
+    shown: Vec<u32>,
+    moved: Option<Instant>,
+}
+
+static POINTER: Mutex<Pointer> = Mutex::new(Pointer { shown: Vec::new(), moved: None });
+
+/// A movie's method that shows, hides or moves a cursor of its own.
+fn pointer_method(mem: Mem, movie: u32, method: &[u8], args: u64, count: u32) {
+    let first_bool = (count > 0 && mem.u32(args + 8) & 0x8F == GFX_BOOL).then(|| mem.u8(args + 16) != 0);
+    let show = match method {
+        b"SHOW_CURSOR" => Some(true),
+        b"HIDE_CURSOR" => Some(false),
+        b"SET_CURSOR_VISIBILITY" | b"SET_IS_MOUSE_CONTROL" => first_bool,
+        b"MOVE_CURSOR" | b"SET_CURSOR" | b"SET_CURSOR_POSITION" | b"SET_CURSOR_STATE" | b"SET_MOUSE_INPUT" => {
+            POINTER.lock().unwrap().moved = Some(Instant::now());
+            None
+        }
+        _ => return,
+    };
+    if let Some(show) = show {
+        let mut pointer = POINTER.lock().unwrap();
+        pointer.shown.retain(|&m| m != movie);
+        if show {
+            pointer.shown.push(movie);
+        }
+    }
+}
+
+/// A script's screen takes a pointer now: its movie, drawn this frame,
+/// shows a cursor, or a script moved one lately.
+pub(crate) fn pointer_shown(env: *mut Env) -> bool {
+    let mem = unsafe { Mem::of(env) };
+    let pointer = POINTER.lock().unwrap();
+    if pointer.moved.is_some_and(|t| t.elapsed() < Duration::from_millis(250)) {
+        return true;
+    }
+    !pointer.shown.is_empty()
+        && (0..20)
+            .map(|i| SCRIPT_MOVIES + i * SCRIPT_MOVIE_SIZE)
+            .any(|e| mem.u8(e + SCRIPT_MOVIE_DRAWN) == 1 && pointer.shown.contains(&(mem.i32(e) as u32)))
+}
+
 /// Hook for `CScaleformMgr::CallMethodInternal`: every method call of the
 /// game's movies (scripts' and code's), its arguments as GFxValues. The
 /// first call of each (`instantly` false) builds the bars.
@@ -115,6 +161,7 @@ pub(crate) unsafe extern "C" fn scaleform_call_method(
         let mem = unsafe { Mem::of(env) };
         let method = mem.bytes(name, 28);
         let method = &method[..method.iter().position(|&b| b == 0).unwrap_or(method.len())];
+        pointer_method(mem, movie, method, args, count);
         if matches!(method, b"CLEAR_ALL" | b"SET_DATA_SLOT" | b"SET_DATA_SLOT_EMPTY" | b"DRAW_INSTRUCTIONAL_BUTTONS")
             && is_bar(mem, movie)
         {

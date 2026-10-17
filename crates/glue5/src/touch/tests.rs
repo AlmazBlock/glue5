@@ -33,6 +33,7 @@ fn context(activity: Activity) -> PlayerContext {
         gun: false,
         cursor: false,
         map: false,
+        pointer: false,
     }
 }
 
@@ -415,6 +416,10 @@ fn with_direct_touch_a_scripts_cursor_menu_drops_the_pad() {
     let m = t.take_mouse();
     assert!(m.down && (m.at.unwrap().x - x).abs() < 1e-6);
     assert_eq!(t.take_look(), (0, 0));
+    // A screen with its own pointer (the browser): all the screen, though
+    // the player's controls are not taken.
+    t.set_context(PlayerContext { cursor: true, pointer: true, ..context(Activity::OnFoot) });
+    assert!(t.buttons().is_empty() && t.occupied().len() == 1);
     // Without direct touch, the same menu is the D-pad's.
     t.direct = false;
     t.set_context(PlayerContext { scripted: true, cursor: true, ..context(Activity::OnFoot) });

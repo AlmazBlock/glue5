@@ -20,11 +20,13 @@
 //! - In the pause menu, a finger is the mouse, with keys beside it.
 //! - Direct touch (experimental): the menus made for the mouse (the pause
 //!   menu, and the scripts' that show its cursor: shops, the interaction
-//!   menu, the character creator) take fingers as on a phone's own screens:
-//!   a tap clicks where it lands, a drag up or down scrolls, left or right
-//!   changes the value of the row picked (its arrows take no click), on the
-//!   map it moves it, two fingers zoom; Back alone stays, and the D-pad
-//!   and Select go.
+//!   menu, the character creator; the screens with a pointer of their own:
+//!   the browser, the hacking screens) take fingers as on a phone's own
+//!   screens: a tap clicks where it lands, a drag up or down scrolls, left
+//!   or right changes the value of the row picked (its arrows take no
+//!   click), on the map it moves it, two fingers zoom; Back alone stays,
+//!   and the D-pad and Select go. Minigames keep the pad (those that load
+//!   keyboard and mouse controls of their own change with them).
 //!
 //! They make a [`Gamepad`] (and the camera a mouse's motion): the game plays
 //! as with a controller (its prompts, aim assist).
@@ -570,6 +572,7 @@ impl Touch {
                 gun: false,
                 cursor: false,
                 map: false,
+                pointer: false,
             },
             prompts: Vec::new(),
             phone: None,
@@ -612,9 +615,10 @@ impl Touch {
 
     /// The screen is a menu that takes the mouse, without a touch layout:
     /// the pause menu; with direct touch, a script's menu showing its cursor
-    /// while the player's controls are off (a shop, the character creator).
+    /// while the player's controls are off (a shop, the character creator),
+    /// or a screen with its own pointer (the browser, a hacking screen).
     fn menu_mode(&self) -> bool {
-        self.context.menu || (self.direct && self.context.cursor && self.context.scripted)
+        self.context.menu || (self.direct && self.context.cursor && (self.context.scripted || self.context.pointer))
     }
 
     /// With direct touch, a script's menu shows its cursor over play (the
