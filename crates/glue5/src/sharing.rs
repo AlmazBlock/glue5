@@ -13,8 +13,10 @@ use glue5_stream::server::{self, Server, Step};
 pub enum State {
     /// Listing the folder, or packing its small files (once): how far.
     Preparing(Option<f32>),
-    /// Serving: where the other devices connect.
-    On(Vec<String>),
+    /// Serving: where the other devices connect, and whether they find
+    /// this computer by themselves (announced on the network; not when
+    /// another program holds the port announcements use).
+    On(Vec<String>, bool),
     Failed(String),
 }
 
@@ -68,8 +70,9 @@ impl Sharing {
                     let shown = |ip: Ipv4Addr| if port == glue5_stream::PORT { ip.to_string() } else { format!("{ip}:{port}") };
                     let addresses = glue5_stream::lan_addresses().into_iter().map(shown).collect();
                     let advert = glue5_stream::discovery::advertise(port);
+                    let announced = advert.is_some();
                     *srv.lock().unwrap() = Some((server, advert));
-                    *s.lock().unwrap() = State::On(addresses);
+                    *s.lock().unwrap() = State::On(addresses, announced);
                 }
                 Ok(_) => {}
                 Err(_) if stop.load(Ordering::Acquire) => {}

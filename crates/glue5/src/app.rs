@@ -1000,9 +1000,19 @@ impl App {
 
     /// Follows the settings: the game's files from a folder or a server
     /// (the stream started, or started again for another server), this
-    /// computer's folder shared or not. Not while the game runs on them.
+    /// computer's folder shared or not. Not while the game runs on them,
+    /// but sharing turned off stops at once.
     fn keep_sources(&mut self) {
         if self.game.is_some() {
+            // Turned on, it starts with the start page: its first preparation
+            // packs files for a minute, which the game would feel. Stopped in
+            // the background (it says goodbye on the network).
+            if !self.settings.share
+                && let Some(sharing) = self.sharing.take()
+            {
+                std::thread::spawn(move || drop(sharing));
+                self.ui.repaint();
+            }
             return;
         }
         let source = self.settings.source;

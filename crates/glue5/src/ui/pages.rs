@@ -614,12 +614,17 @@ fn sharing_card(ui: &mut egui::Ui, sharing: &Sharing) {
                 rail(ui, *done);
             }
         }
-        Sharing::On(addresses) => {
+        Sharing::On(addresses, announced) => {
             card_title(ui, "SHARING", Some(("On", READY)));
             if addresses.is_empty() {
                 small(ui, "No network address found: is this computer on a network?", WARN);
             } else {
-                small(ui, "Other devices find this computer in their Servers page, or play from one of these addresses:", theme::MUTED);
+                if *announced {
+                    small(ui, "Other devices find this computer in their Servers page, or play from one of these addresses:", theme::MUTED);
+                } else {
+                    // Another program has the port announcements use.
+                    small(ui, "Other devices do not find this computer by themselves: type one of these addresses in their Servers page:", WARN);
+                }
                 for a in addresses {
                     ui.label(RichText::new(a).monospace().color(Color32::WHITE));
                 }
@@ -987,9 +992,13 @@ fn game_folder(ui: &mut egui::Ui, settings: &mut Settings, status: &Status, acti
     });
     if !MOBILE {
         let shown = match &status.sharing {
+            // Turned on while the game runs: it starts with the start page.
+            None if settings.share && status.started.is_some() => {
+                "Phones, tablets and TVs play it from here · next start".to_owned()
+            }
             None => "Phones, tablets and TVs play it from here".to_owned(),
             Some(Sharing::Preparing(_)) => "Preparing…".to_owned(),
-            Some(Sharing::On(a)) => a.first().map_or_else(|| "No network address".to_owned(), |a| format!("On: {a}")),
+            Some(Sharing::On(a, _)) => a.first().map_or_else(|| "No network address".to_owned(), |a| format!("On: {a}")),
             Some(Sharing::Failed(why)) => why.clone(),
         };
         setting(ui, "Share on the network", Control::Toggle, Some(&shown), |ui| toggle(ui, &mut settings.share));
@@ -1338,7 +1347,7 @@ mod tests {
                 status.source = Source::Server;
                 status.stream = Some(("192.168.1.20", stream));
                 status.servers = &found;
-                status.sharing = Some(crate::sharing::State::On(vec!["10.0.0.2".into()]));
+                status.sharing = Some(crate::sharing::State::On(vec!["10.0.0.2".into()], true));
                 let mut tab = SettingsTab::Game;
                 let mut servers = crate::ui::ServersPage::default();
                 for page in 0..12 {
