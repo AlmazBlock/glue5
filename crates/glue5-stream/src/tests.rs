@@ -694,6 +694,65 @@ fn a_stopped_client_finishes_before_its_folder_is_touched() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// The files under `root`'s `data` and `b`, with their sizes.
+fn files(root: &Path) -> Vec<(PathBuf, u64)> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) {
+        for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                walk(&e.path(), out);
+            } else {
+                out.push((e.path(), m.len()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&root.join("data"), &mut out);
+    walk(&root.join("b"), &mut out);
+    out.sort();
+    out
+}
+
+/// The whole game, downloaded, stays as it is when the server's files
+/// change (one of another size, one gone): same files, same sizes, no
+/// marker, complete, played with its own catalog.
+#[test]
+fn keeps_the_whole_game_as_it_is() {
+    let dir = temp("kept");
+    game(&dir);
+    let root = temp("kept-copy");
+    let opts = |server: SocketAddr| Options { server: server.to_string(), root: root.clone(), build: BUILD.into(), low_memory: false };
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let client = Client::start(opts(server.addr()));
+    wait_ready(&client);
+    client.set_fill(true);
+    let started = Instant::now();
+    while !client.status().complete {
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", client.status());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.stop();
+    client.join();
+    drop(server);
+    let whole = files(&root);
+    fs::write(dir.join("data/x64/later.rpf"), noise(1 << 19, 5)).unwrap();
+    fs::remove_file(dir.join("data/common/data/a.xml")).unwrap();
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let client = Client::start(opts(server.addr()));
+    wait_ready(&client);
+    assert!(client.status().complete && !root.join(crate::cache::MARKER).exists());
+    assert_eq!(files(&root), whole);
+    let id = client.find("data/x64/later.rpf").unwrap();
+    let mut buf = vec![0u8; 4096];
+    assert_eq!(client.read(id, 0, &mut buf), Some(4096));
+    assert_eq!(&buf[..], &noise(1 << 20, 9)[..4096]);
+    client.stop();
+    client.join();
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn checks_a_server_before_it_is_chosen() {
     let dir = temp("check");
