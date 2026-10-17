@@ -331,7 +331,11 @@ a private network such as Tailscale gives both); the server must have the
 app's game build; files changed on the server while the game runs need a
 restart. A partial copy without its server plays until the first block it
 lacks, and waits there (a radio station starts at a random place: the
-benchmark waited at its loading screen); the line over the game says so.
+benchmark waited at its loading screen). Over the game a small round sign
+says so (a turning ring: waiting for the server; amber: the server does
+not answer), in words for three seconds after it changes; it sits left of
+the settings button or in the next free place, off the touch controls and
+the overlay, and a tap opens the Servers page.
 The reads the engine announces late (~1,000 in the benchmark) cost a
 round trip each: on a slow link, objects that show late, not stalls.
 
