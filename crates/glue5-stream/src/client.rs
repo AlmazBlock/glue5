@@ -669,27 +669,32 @@ impl Client {
             Some(_) => {}
         }
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        // What was in flight on the last connection, and the boot set's rest.
-        let again: Vec<Header> = {
-            let inf = self.inflight.lock().unwrap();
-            let r = self.ready.get().unwrap();
-            inf.reqs
-                .iter()
-                .map(|(&req, q)| {
-                    let off = q.first * BLOCK;
-                    let len = ((q.last + 1) * BLOCK).min(r.cache.size(q.file)) - off;
-                    Header { kind: READ, prio: q.prio, req, off, len: len as u32, file: q.file, crc: 0 }
-                })
-                .collect()
-        };
         *self.stats.last_data.lock().unwrap() = Some(Instant::now());
         {
-            // No request goes on it before these.
+            // What was in flight on the last connection goes first, in the
+            // order it was asked (the server queues it so, and reads its
+            // disk in that order). Taken once the connection is there, with
+            // its writes held: a request planned meanwhile is either among
+            // these or sent after them (maybe both: answered twice).
             let _one = self.sending.lock().unwrap();
             *self.conn.lock().unwrap() = Some(Arc::new(stream));
             self.connected.store(true, Ordering::Release);
+            let mut again: Vec<Header> = {
+                let inf = self.inflight.lock().unwrap();
+                let r = self.ready.get().unwrap();
+                inf.reqs
+                    .iter()
+                    .map(|(&req, q)| {
+                        let off = q.first * BLOCK;
+                        let len = ((q.last + 1) * BLOCK).min(r.cache.size(q.file)) - off;
+                        Header { kind: READ, prio: q.prio, req, off, len: len as u32, file: q.file, crc: 0 }
+                    })
+                    .collect()
+            };
+            again.sort_by_key(|h| h.req);
             self.write(&encode(&again));
         }
+        // Then the boot set's rest.
         self.prefetch_boot();
         self.receive(sync.reader)
     }
