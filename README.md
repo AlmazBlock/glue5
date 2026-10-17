@@ -263,7 +263,8 @@ off).
   (16 characters, 75 random bits and a check character) to give out.
   Asking with a code reaches its owner, who says yes or no; a new code
   retires the old one. A player met online can be asked without one,
-  from the page's players met: the players of a lobby tell each other
+  from the page's players met or the pause menu's "Send Friend Request"
+  on a player of the session: the players of a lobby tell each other
   their key, and a request without a code is answered only while its
   sender is in the same lobby. The key, the code, the friends and the
   players met are in `friends.json` in the user directory (readable by the

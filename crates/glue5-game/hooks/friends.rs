@@ -11,6 +11,7 @@
     ("pause_menu_update", "CPauseMenu::Update()"),
     ("player_list_update", "CPlayerListMenu::Update()"),
     ("player_list_input", "CPlayerListMenu::UpdateInput(int)"),
+    ("player_list_populate", "CPlayerListMenu::Populate(MenuScreenId)"),
     ("social_club_connected", "SocialClubMgr::IsConnectedToSocialClub() const"),
     ("gamer_online", "rage::rlGamerInfo::IsOnline() const"),
     // The data behind the pause menu's lists of friends (their cards).

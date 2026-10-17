@@ -440,6 +440,13 @@ pub(crate) unsafe extern "C" fn player_list_input(env: *mut Env, menu: u64, inpu
     in_player_menus(|| unsafe { orig::player_list_input(env, menu, input) })
 }
 
+/// Hook for `CPlayerListMenu::Populate(MenuScreenId)`, which the menu's
+/// movie calls back as a list opens (outside `CPauseMenu::Update`): it
+/// asks the players' crews, without which the list shows none of them.
+pub(crate) unsafe extern "C" fn player_list_populate(env: *mut Env, menu: u64, screen: u64) -> u32 {
+    in_player_menus(|| unsafe { orig::player_list_populate(env, menu, screen) })
+}
+
 /// Hook for `SocialClubMgr::IsConnectedToSocialClub() const`: connected
 /// for the pause menu and its lists of players and friends, which
 /// otherwise say "the internet connection has been lost" instead of the
@@ -740,6 +747,7 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.pause_menu_update = Some(pause_menu_update);
     hooks.player_list_update = Some(player_list_update);
     hooks.player_list_input = Some(player_list_input);
+    hooks.player_list_populate = Some(player_list_populate);
     hooks.social_club_connected = Some(social_club_connected);
     hooks.gamer_online = Some(gamer_online);
     hooks.presence_send = Some(presence_send);
