@@ -339,13 +339,15 @@ it is `Android/data/local.glue5/files/game`, populated with
 `mise run android:game`.
 
 The files can also stream from another computer instead (Settings › Game
-› Game files › Server): the app on a computer with the game, with Settings
-› Game › Share on the network on, or `glue5-serve` on any desktop system.
-Devices on the same network find it (Search); elsewhere its address is
-typed, `host` or `host:port` (port 47100). The app keeps what it received
-in its cache folder for the next starts; Settings › Game › Download the
-whole game makes it a copy of the game of its own, which plays without
-the server. See
+› Game files › Server, or Play from a computer on the start page): the app
+on a computer with the game, with Settings › Game › Share on the network
+on, or `glue5-serve` on any desktop system. The Servers page (the start
+page's Server button, or Settings › Game › Server) lists the computers on
+the same network that share the game, whether each serves this game and
+how far it is; elsewhere an address is typed, `host` or `host:port` (port
+47100). The app keeps what it received in its cache folder for the next
+starts; Download the whole game, on the same page, makes it a copy of the
+game of its own, which plays without the server. See
 [design.md](docs/design.md#streaming-the-games-files).
 
 If the files are missing, the start page explains where to put them.

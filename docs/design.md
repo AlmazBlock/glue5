@@ -257,7 +257,7 @@ of the files just synced are punched again (`F_PUNCHHOLE`,
 4,096 files stay open (the limit is 10,240 on Apple systems, often 1,024
 on Linux); the others are opened for each use.
 
-**The whole game** (Settings › Game › Download the whole game) comes at the
+**The whole game** (Download the whole game, on the Servers page) comes at the
 lowest priority, 32 MB on its way at a time, with what the game leaves of
 the link; a complete copy loses its marker and is a game folder like a
 copied one, which plays without the server and which the local mode finds.
@@ -278,7 +278,13 @@ systems announce and browse through the system's responder (no multicast
 entitlement on iOS and tvOS; the service is in `NSBonjourServices`).
 Elsewhere the app asks once, by mDNS from an ordinary port, and responders
 answer by unicast (no Android multicast lock). Servers on Linux and
-Windows are not announced: their address is typed.
+Windows are not announced: their address is typed. The Servers page
+searches every five seconds while it is open and asks each server found
+for its greeting (`check`): whether it serves this game build, how long
+connecting took, and what its name stands for, so that a server typed as
+its IP shows under the name it was found by. A Mac's `.local` name stands
+for its IPv6 link-local address too, where a server listening on IPv4
+refuses: the client tries each address, IPv4 first.
 
 Limits: there is no encryption and no access control (on the Internet,
 a private network such as Tailscale gives both); the server must have the
