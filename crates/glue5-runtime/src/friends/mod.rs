@@ -1267,13 +1267,12 @@ impl Service {
                 if time <= f.last_time {
                     return;
                 }
-                // Both started at once: the lower key's handshake goes on.
-                let ours = self.handshakes.iter().find(|(_, (_, o))| *o == Owner::Friend(key)).map(|(i, _)| *i);
-                if ours.is_some() && me < key {
+                // Both started at once, the lower key's handshake goes on:
+                // friends' handshakes are the lower key's to start, the
+                // higher starts one only asking a player met, which has it
+                // as a friend while it no longer has that player.
+                if me < key && self.handshakes.values().any(|(_, o)| *o == Owner::Friend(key)) {
                     return;
-                }
-                if let Some(i) = ours {
-                    self.handshakes.remove(&i);
                 }
                 f.last_time = time;
                 let Some(d) = h.write(&[]) else { return };
@@ -1451,7 +1450,7 @@ impl Service {
         let Some(message) = payload.and_then(|p| serde_json::from_slice::<Message>(&p).ok()) else { return };
         match owner {
             Owner::Friend(key) => self.on_friend(key, message, now, out),
-            Owner::Asker(Some(key)) => self.on_asker(key, message, now, out),
+            Owner::Asker(Some(key)) => self.on_asker(key, message),
             Owner::Asking(id) => self.on_asked(&id, message, now, out),
             Owner::Asker(None) => {}
         }
@@ -1516,7 +1515,7 @@ impl Service {
         }
     }
 
-    fn on_asker(&mut self, key: Key, message: Message, _now: Instant, out: &mut Out) {
+    fn on_asker(&mut self, key: Key, message: Message) {
         let Some(r) = self.requests.get_mut(&key) else { return };
         if let Message::Request { name, id } = message {
             let name = clean_name(&name);
@@ -1530,7 +1529,6 @@ impl Service {
                 r.asked = true;
                 self.generation += 1;
             }
-            let _ = out;
         }
     }
 

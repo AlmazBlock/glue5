@@ -9,7 +9,8 @@
 //! - `HS2` pattern, sender's index, receiver's index, Noise message 2
 //! - `HS3` pattern, sender's index, receiver's index, Noise message 3 (XX)
 //! - `DATA` receiver's index, nonce, ciphertext
-//! - `PROBE` tags (8 bytes each): "is someone with one of these here?"
+//! - `PROBE` the prober's id (8 bytes: its own probes come back to it),
+//!   then tags (8 bytes each): "is someone with one of these here?"
 
 use std::net::SocketAddrV4;
 use std::time::Instant;
