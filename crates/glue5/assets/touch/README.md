@@ -31,6 +31,7 @@ eye). The sets' licenses are credited in the app's Credits page.
 | parachute.png | parachute-fill | Phosphor | MIT |
 | detach.png | scissors-fill | Phosphor | MIT |
 | skip.png | fast-forward-fill | Phosphor | MIT |
+| cinematic.png | film-slate-fill | Phosphor | MIT |
 | up.png, down.png, left.png, right.png | caret-up/down/left/right-fill | Phosphor | MIT |
 | check.png | check-bold | Phosphor | MIT |
 | back.png | arrow-u-up-left-bold | Phosphor | MIT |
@@ -39,6 +40,7 @@ eye). The sets' licenses are credited in the app's Credits page.
 | jump.png | angles-up | [Font Awesome Free](https://fontawesome.com) | CC BY 4.0 |
 | landing-gear.png | plane-arrival | Font Awesome Free | CC BY 4.0 |
 | horn.png | volume-up (rounded) | [Material Symbols](https://fonts.google.com/icons) | Apache 2.0 |
+| duck.png | airline-seat-recline-extra (rounded) | Material Symbols | Apache 2.0 |
 | pad-lb.png, pad-rb.png | keyboard-double-arrow-left/right (rounded) | Material Symbols | Apache 2.0 |
 | behind.png | arrow-back-up-double | [Tabler Icons](https://tabler.io/icons) | MIT |
 | seat.png | steering-wheel-fill | [MingCute](https://www.mingcute.com) | Apache 2.0 |

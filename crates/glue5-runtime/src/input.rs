@@ -239,9 +239,9 @@ const SCAN_EVERY: u32 = 6;
 const FRESH: Duration = Duration::from_millis(250);
 
 static TOUCH_PLAY: AtomicBool = AtomicBool::new(false);
-/// Direct touch (experimental): the game's menus see keyboard and mouse, as
-/// on a computer, so that those made for the mouse take fingers as one.
-static DIRECT: AtomicBool = AtomicBool::new(false);
+/// A script's instructional buttons' bar shows: its menu or scene asks for
+/// buttons.
+static BAR: AtomicBool = AtomicBool::new(false);
 /// When a script last showed its menu's cursor.
 static CURSOR_AT: Mutex<Option<Instant>> = Mutex::new(None);
 /// A screen of the game's own shows its pointer (the browser, a hacking
@@ -341,16 +341,11 @@ struct Signals {
 }
 
 /// The touch controls are in use: the camera turns with the mouse (a
-/// finger's drag) while the engine keeps playing as with a pad, out of the
-/// pause menu (where they act as a mouse).
+/// finger's drag) while the engine keeps playing as with a pad; the menus
+/// made for the mouse see keyboard and mouse, and say when they take it
+/// ([`PlayerContext::cursor`]): fingers act as it there.
 pub fn set_touch_play(on: bool) {
     TOUCH_PLAY.store(on, Ordering::Relaxed);
-}
-
-/// Direct touch (experimental), during touch play: menus see keyboard and
-/// mouse, and say when they take the mouse ([`PlayerContext::cursor`]).
-pub fn set_direct_touch(on: bool) {
-    DIRECT.store(on, Ordering::Relaxed);
 }
 
 /// The pause menu's Targeting Mode (`PREF_TARGET_CONFIG`, in its array of
@@ -438,13 +433,16 @@ pub struct PlayerContext {
     pub character: Character,
     /// The player holds a gun: B reloads (else it strikes).
     pub gun: bool,
-    /// Direct touch: a menu takes the mouse (the pause menu's, or a
-    /// script's that shows its cursor).
+    /// A script's instructional buttons' bar shows (its menu or scene asks
+    /// for buttons).
+    pub bar: bool,
+    /// A menu takes the mouse (the pause menu's, or a script's that shows
+    /// its cursor).
     pub cursor: bool,
     /// The pause menu shows its map.
     pub map: bool,
-    /// Direct touch: a screen of the game's own takes the pointer (the
-    /// browser, a hacking screen): it is all the screen.
+    /// A screen of the game's own takes the pointer (the browser, a
+    /// hacking screen): it is all the screen.
     pub pointer: bool,
 }
 
@@ -510,11 +508,12 @@ pub fn player_context() -> PlayerContext {
             _ => Character::Other,
         },
         gun: GUN.load(Ordering::Relaxed),
-        cursor: DIRECT.load(Ordering::Relaxed)
+        bar: BAR.load(Ordering::Relaxed),
+        cursor: TOUCH_PLAY.load(Ordering::Relaxed)
             && (FRONTEND.load(Ordering::Relaxed)
                 || (!MINIGAME.load(Ordering::Relaxed)
                     && (fresh(*CURSOR_AT.lock().unwrap()) || POINTER.load(Ordering::Relaxed)))),
-        pointer: DIRECT.load(Ordering::Relaxed) && !MINIGAME.load(Ordering::Relaxed) && POINTER.load(Ordering::Relaxed),
+        pointer: TOUCH_PLAY.load(Ordering::Relaxed) && !MINIGAME.load(Ordering::Relaxed) && POINTER.load(Ordering::Relaxed),
         map: MAP.load(Ordering::Relaxed),
     }
 }
@@ -561,6 +560,7 @@ pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     let bar = crate::prompts::script_bar_shown(env);
     let menu = frontend && off & OFF_BY_SCRIPT == 0 && !bar;
     PAUSE_MENU.store(menu, Ordering::Relaxed);
+    BAR.store(bar, Ordering::Relaxed);
     FRONTEND.store(frontend, Ordering::Relaxed);
     MAP.store(frontend && unsafe { orig::pause_menu_in_map(env) } != 0, Ordering::Relaxed);
     let scripted = off & !OFF_BY_PAUSE_MENU != 0;
@@ -571,16 +571,14 @@ pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     POINTER.store(pointer, Ordering::Relaxed);
     let touch_play = TOUCH_PLAY.load(Ordering::Relaxed) && !menu;
     if touch_play {
-        // Direct touch: a script's menu or scene (its buttons' bar, the
-        // player's controls taken), the pause menu, a cursor or pointer
-        // shown: as with keyboard and mouse, so that the screens made for
-        // the mouse show theirs. The touch controls' pad works there too.
-        // Not in a minigame that loaded its own keyboard and mouse scheme
-        // (its controls change with it): the pad, as made for touch.
+        // A script's menu or scene (its buttons' bar, the player's controls
+        // taken), the pause menu, a cursor or pointer shown: as with
+        // keyboard and mouse, so that the screens made for the mouse show
+        // theirs. The touch controls' pad works there too. Not in a
+        // minigame that loaded its own keyboard and mouse scheme (its
+        // controls change with it): the pad, as made for touch.
         let fresh = |t: Option<Instant>| t.is_some_and(|t| t.elapsed() < FRESH);
-        let mouse = DIRECT.load(Ordering::Relaxed)
-            && !minigame
-            && (frontend || bar || scripted || pointer || fresh(*CURSOR_AT.lock().unwrap()));
+        let mouse = !minigame && (frontend || bar || scripted || pointer || fresh(*CURSOR_AT.lock().unwrap()));
         mem.set_i32(LAST_DEVICE, if mouse { KEYBOARD_MOUSE } else { 0 });
     }
     update_targeting(mem, touch_play);

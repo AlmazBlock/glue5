@@ -59,9 +59,6 @@ pub struct Settings {
     /// The aim assist while playing by touch (the game's Targeting Mode,
     /// in place of its menu's).
     pub touch_aim: TouchAim,
-    /// Direct touch (experimental): the game's menus made for the mouse take
-    /// taps and drags (see `touch`).
-    pub touch_direct: bool,
     /// The Taptic Engine taps under pressed touch controls and plays the game's rumble (iPhone).
     pub haptics: bool,
     /// The game starts in the sandbox (the map, no story) rather than the
@@ -222,7 +219,6 @@ impl Default for Settings {
             touch_size: 1.0,
             touch_camera: 1.0,
             touch_aim: TouchAim::LockOn,
-            touch_direct: false,
             haptics: true,
             sandbox: false,
             online: false,

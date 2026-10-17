@@ -39,15 +39,11 @@ const FAILURE_FILE: &str = "last-failure.txt";
 /// How long the pointer waits to be captured once it should be (`App::pointer`).
 const CAPTURE_DELAY: Duration = Duration::from_millis(150);
 
-/// Esc's Windows virtual-key code: back, in the game's menus.
-const VK_ESCAPE: u8 = 0x1B;
-/// The pause menu's touch keys, as the keyboard's (by [`touch::MenuKey`]):
-/// Esc, the arrows (left and right change the value of the row picked),
-/// Enter.
-const MENU_VKS: [u8; 6] = [VK_ESCAPE, 0x25, 0x27, 0x26, 0x28, 0x0D];
-/// With direct touch, Back is Backspace: the scripts' menus take it too
-/// (Esc would open the pause menu over them).
-const DIRECT_VKS: [u8; 6] = [0x08, 0x25, 0x27, 0x26, 0x28, 0x0D];
+/// The menus' touch keys, as the keyboard's (by [`touch::MenuKey`]):
+/// Backspace (back: the scripts' menus take it too, where Esc would open
+/// the pause menu over them), the arrows (left and right change the value
+/// of the row picked), Enter.
+const MENU_VKS: [u8; 6] = [0x08, 0x25, 0x27, 0x26, 0x28, 0x0D];
 
 pub fn run() -> Result<()> {
     // SDL's event wait on Android pumps events, which queues the poll
@@ -534,8 +530,7 @@ impl App {
                 if self.touch_mouse.down {
                     input.mouse_button(mouse::LEFT, false);
                 }
-                let vks = if self.touch.direct { DIRECT_VKS } else { MENU_VKS };
-                for (held, vk) in self.touch_mouse.keys.into_iter().zip(vks) {
+                for (held, vk) in self.touch_mouse.keys.into_iter().zip(MENU_VKS) {
                     if held {
                         input.key(vk, false);
                     }
@@ -544,13 +539,11 @@ impl App {
             self.touch_mouse = Default::default();
         }
         glue5_runtime::input::set_touch_play(show);
-        glue5_runtime::input::set_direct_touch(show && self.settings.touch_direct);
         glue5_runtime::input::set_touch_targeting(self.settings.touch_aim.targeting());
         if show {
             self.touch.haptics = self.settings.haptics;
             self.touch.camera_speed = self.settings.touch_camera;
             self.touch.aim_locked = glue5_runtime::input::aim_locked();
-            self.touch.direct = self.settings.touch_direct;
             let screen = ui::screen_size(&self.window);
             self.touch.layout(screen, ui::safe_rect(&self.window), self.settings.touch_size);
             self.touch.set_context(glue5_runtime::input::player_context());
@@ -584,8 +577,7 @@ impl App {
                 if mouse.wheel != 0 {
                     input.mouse_wheel(mouse.wheel);
                 }
-                let vks = if self.touch.direct { DIRECT_VKS } else { MENU_VKS };
-                for ((held, was), vk) in mouse.keys.into_iter().zip(self.touch_mouse.keys).zip(vks) {
+                for ((held, was), vk) in mouse.keys.into_iter().zip(self.touch_mouse.keys).zip(MENU_VKS) {
                     if held != was {
                         input.key(vk, held);
                     }

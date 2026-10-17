@@ -883,19 +883,6 @@ fn settings_items(
                 "Lock-on: aiming locks on to the nearest target and follows it. Snap: aiming snaps to the target, \
                  then you aim. Slow-down: the camera slows down over targets. Off: free aim",
             );
-            setting(
-                ui,
-                "Direct touch in menus",
-                Control::Toggle,
-                Some("Experimental: tap what you choose, drag to scroll"),
-                |ui| toggle(ui, &mut settings.touch_direct),
-            )
-            .on_hover_text(
-                "The game's screens made for the mouse (the pause menu, shops, the interaction menu, the \
-                 character creator, the phone's browser) take taps and drags as a phone's own screens do: \
-                 tap to choose, drag up or down to scroll, left or right to change a value, drag the map, \
-                 pinch to zoom; their arrows and Select buttons go. Minigames keep the touch controls",
-            );
             if crate::haptics::SUPPORTED {
                 setting(ui, "Haptics", Control::Toggle, None, |ui| toggle(ui, &mut settings.haptics));
             }

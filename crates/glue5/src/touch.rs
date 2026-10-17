@@ -11,22 +11,27 @@
 //!   camera view, the pause menu and the app's settings at the top's middle.
 //! - What the game asks for besides (its instructional buttons, the inputs
 //!   its help text names: [`glue5_runtime::prompts`]) is pressed by the
-//!   button that does it, ringed while asked, or by a button of its own with
-//!   the pad's symbol the game shows beside its words.
-//! - A script's menu or scene (the character creator, a shop, a mission's
-//!   end) has the D-pad, Select and Back, and the game's buttons; drags
-//!   are the sticks. With the phone out, its keys sit beside it and only
-//!   the controls it leaves free stay. Cutscenes have their skip.
-//! - In the pause menu, a finger is the mouse, with keys beside it.
-//! - Direct touch (experimental): the menus made for the mouse (the pause
-//!   menu, and the scripts' that show its cursor: shops, the interaction
-//!   menu, the character creator; the screens with a pointer of their own:
-//!   the browser, the hacking screens) take fingers as on a phone's own
-//!   screens: a tap clicks where it lands, a drag up or down scrolls, left
-//!   or right changes the value of the row picked (its arrows take no
-//!   click), on the map it moves it, two fingers zoom; Back alone stays,
-//!   and the D-pad and Select go. Minigames keep the pad (those that load
-//!   keyboard and mouse controls of their own change with them).
+//!   button that does it, ringed while asked (shown for it if the layout
+//!   keeps it hidden then, as Enter away from a vehicle we saw), or by a
+//!   button of its own: the action's icon where the input says what it does
+//!   (the camera's focus, the headlights), else the pad's symbol the game
+//!   shows beside its words (the scripts' own inputs).
+//! - A script's menu or scene that shows its buttons' bar (a mission's
+//!   end, a minigame) has the D-pad, Select and Back, and the game's
+//!   buttons; drags are the sticks. One that asks for nothing (a death, a
+//!   switch, a scene) has only pause, and what it asks for when it does
+//!   (its skip). With the phone out, its keys sit beside it and only the
+//!   controls it leaves free stay. Cutscenes have their skip while it is
+//!   taken.
+//! - The menus made for the mouse (the pause menu, and the scripts' that
+//!   show its cursor: shops, the interaction menu, the character creator;
+//!   the screens with a pointer of their own: the browser, the hacking
+//!   screens) take fingers as on a phone's own screens: a tap clicks where
+//!   it lands, a drag up or down scrolls, left or right changes the value
+//!   of the row picked (its arrows take no click), on the map it moves it,
+//!   two fingers zoom; the D-pad, Enter and Back keys stay beside them
+//!   (Back alone on a pointer's screen). Minigames keep the pad (those that
+//!   load keyboard and mouse controls of their own change with them).
 //!
 //! They make a [`Gamepad`] (and the camera a mouse's motion): the game plays
 //! as with a controller (its prompts, aim assist).
@@ -139,11 +144,11 @@ macro_rules! icons {
     };
 }
 const ICON_FILES: &[(&str, &[u8])] = icons![
-    "action", "aim", "back", "behind", "bell", "brake", "check", "cover", "crouch", "detach", "dive", "down",
-    "drive-special", "enter", "exit", "fire", "gas", "handbrake", "horn", "jump", "landing-gear", "left", "lights",
-    "melee", "pad-a", "pad-b", "pad-lb", "pad-ls", "pad-lt", "pad-rb", "pad-rs", "pad-rt", "pad-x", "pad-y",
-    "parachute", "pause", "phone", "radio", "reload", "right", "rise", "seat", "settings", "skip", "special",
-    "switch", "throw", "up", "view", "weapons", "yaw-left", "yaw-right",
+    "action", "aim", "back", "behind", "bell", "brake", "check", "cinematic", "cover", "crouch", "detach", "dive",
+    "down", "drive-special", "duck", "enter", "exit", "fire", "gas", "handbrake", "horn", "jump", "landing-gear",
+    "left", "lights", "melee", "pad-a", "pad-b", "pad-lb", "pad-ls", "pad-lt", "pad-rb", "pad-rs", "pad-rt",
+    "pad-x", "pad-y", "parachute", "pause", "phone", "radio", "reload", "right", "rise", "seat", "settings", "skip",
+    "special", "switch", "throw", "up", "view", "weapons", "yaw-left", "yaw-right",
 ];
 
 /// The icons' textures, by name.
@@ -319,9 +324,14 @@ static PARACHUTE: &[Action] = &[
 static CUTSCENE: &[Action] =
     &[primary(Action { input: Some(SKIP_CUTSCENE), ..action("Skip", "skip", 0, MAIN, 30.0) }), PAUSE];
 
-/// A script's menu or scene: the D-pad and Select under the right thumb (the
-/// game's menus are on the left), Back beside them; the drags are the
-/// sticks.
+/// A script's scene that asks for nothing (a death, a character's switch, a
+/// scene the player watches): pause alone; what it asks for when it does
+/// has buttons of its own (a skip), and the sticks where it asks for them.
+static SCENE: &[Action] = &[PAUSE];
+
+/// A script's menu or scene with its buttons' bar: the D-pad and Select
+/// under the right thumb (the game's menus are on the left), Back beside
+/// them; the drags are the sticks.
 static SCRIPTED: &[Action] = &[
     action("▲", "up", button::UP, At::RightBottom(236.0, 190.0), 24.0),
     action("▼", "down", button::DOWN, At::RightBottom(236.0, 86.0), 24.0),
@@ -377,8 +387,7 @@ const GESTURE_CLEAR: f32 = 10.0;
 /// A tap's click or key lasts this long at least: the engine reads the
 /// mouse and keys once a frame.
 const MIN_PRESS: Duration = Duration::from_millis(60);
-/// With direct touch, a finger that moves this many points is a drag, not a
-/// tap.
+/// A finger on a menu that moves this many points is a drag, not a tap.
 const TAP_SLOP: f32 = 10.0;
 /// A sideways drag this many points long presses Left or Right once.
 const SWIPE_STEP: f32 = 48.0;
@@ -393,6 +402,9 @@ const AGAIN_DELAY: Duration = Duration::from_millis(250);
 
 /// The buttons of the game's prompts that no layout's button does.
 const PROMPT_RADIUS: f32 = 22.0;
+
+/// An open wheel's pick: a drag this many points long points the stick.
+const WHEEL_PICK: f32 = 12.0;
 
 /// Past this many stick radii from where it landed, the thumb sprints (on
 /// foot); past this many, the stick follows it.
@@ -484,8 +496,6 @@ pub struct Touch {
     /// The player's aim is locked on to a target: drags push the right
     /// stick instead of turning the camera.
     pub aim_locked: bool,
-    /// Direct touch (the experimental setting): see the module's notes.
-    pub direct: bool,
     /// What the player is doing: the layout follows.
     context: PlayerContext,
     /// What the game asks to press, and where the phone is (points).
@@ -527,8 +537,7 @@ struct TwoFingers {
     gesture: Option<Gesture>,
 }
 
-/// What a mouse finger's drag does, with direct touch (else it drags the
-/// mouse held).
+/// What a mouse finger's drag does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
     /// Turns the wheel: lists scroll.
@@ -560,13 +569,13 @@ impl Touch {
             haptics: false,
             camera_speed: 1.0,
             aim_locked: false,
-            direct: false,
             context: PlayerContext {
                 activity: Activity::OnFoot,
                 vehicle_near: false,
                 phone: false,
                 menu: false,
                 cutscene: false,
+                bar: false,
                 scripted: false,
                 character: Character::Other,
                 gun: false,
@@ -614,23 +623,23 @@ impl Touch {
     }
 
     /// The screen is a menu that takes the mouse, without a touch layout:
-    /// the pause menu; with direct touch, a script's menu showing its cursor
+    /// the pause menu; a script's menu showing its cursor
     /// while the player's controls are off (a shop, the character creator),
     /// or a screen with its own pointer (the browser, a hacking screen).
     fn menu_mode(&self) -> bool {
-        self.context.menu || (self.direct && self.context.cursor && (self.context.scripted || self.context.pointer))
+        self.context.menu || (self.context.cursor && (self.context.scripted || self.context.pointer))
     }
 
-    /// With direct touch, a script's menu shows its cursor over play (the
-    /// interaction menu): fingers off the controls are its mouse.
+    /// A script's menu shows its cursor over play (the interaction menu):
+    /// fingers off the controls are its mouse.
     fn cursor_over_play(&self) -> bool {
-        self.direct && self.context.cursor && !self.menu_mode()
+        self.context.cursor && !self.menu_mode()
     }
 
-    /// The pause menu's keys shown: with direct touch, Back alone (the menu
-    /// takes taps and drags itself).
+    /// The menu's keys shown: the D-pad, Enter and Back beside the menu;
+    /// Back alone on a screen with its own pointer (the browser: no rows).
     fn menu_keys(&self) -> &'static [(MenuKey, Action)] {
-        if self.direct { &MENU_KEYS[..1] } else { &MENU_KEYS }
+        if self.context.pointer && !self.context.menu { &MENU_KEYS[..1] } else { &MENU_KEYS }
     }
 
     /// What the game asks to press now, and where the phone is on the
@@ -651,9 +660,10 @@ impl Touch {
         if self.context.cutscene {
             return Some(CUTSCENE);
         }
-        // A script's menu or scene, unless the phone is out in it.
+        // A script's menu or scene, unless the phone is out in it: the
+        // D-pad and Select when it shows its buttons' bar.
         if self.context.scripted && !self.context.phone {
-            return Some(SCRIPTED);
+            return Some(if self.context.bar { SCRIPTED } else { SCENE });
         }
         Some(match self.context.activity {
             Activity::OnFoot => ON_FOOT,
@@ -674,23 +684,30 @@ impl Touch {
     /// The layout has a stick at rest (a script's scene has its sticks
     /// where the thumbs land, a cutscene none).
     fn has_stick(&self) -> bool {
-        self.touch_layout().is_some() && !self.is(CUTSCENE) && !self.is(SCRIPTED)
+        self.touch_layout().is_some() && !self.is(CUTSCENE) && !self.is(SCRIPTED) && !self.is(SCENE)
+    }
+
+    /// The game asks for a stick (the right one, or the left).
+    fn asks_stick(&self, right: bool) -> bool {
+        self.prompts.iter().any(|p| p.pads.iter().any(|d| matches!(d, Pad::Stick { right: r, .. } if *r == right)))
     }
 
     /// Drags are the right stick, not a mouse's motion: in a script's
-    /// scene, and where the game asks for the right stick.
+    /// menu or scene with its bar, and where the game asks for the right
+    /// stick.
     fn drags_are_stick(&self) -> bool {
-        self.is(SCRIPTED)
-            || self.prompts.iter().any(|p| p.pads.iter().any(|d| matches!(d, Pad::Stick { right: true, .. })))
+        self.is(SCRIPTED) || self.asks_stick(true)
     }
 
     fn on_foot(&self) -> bool {
         self.is(ON_FOOT)
     }
 
-    /// The stick sprints past its ring: on foot, the phone put away.
+    /// The stick sprints past its ring: on foot, the phone put away, no
+    /// menu taking the buttons (A picks in them: the interaction menu, a
+    /// shop's, a screen's pointer).
     fn sprints(&self) -> bool {
-        self.on_foot() && !self.context.phone
+        self.on_foot() && !self.context.phone && !self.context.bar && !self.context.cursor
     }
 
     /// The touch layout's buttons shown now: with the phone out, those it
@@ -699,8 +716,16 @@ impl Touch {
         let phone = self.context.phone && self.has_stick();
         let layout = self.touch_layout().unwrap_or_default();
         layout.iter().filter(move |a| {
-            (!a.near_vehicle || self.context.vehicle_near)
+            (!a.near_vehicle || self.context.vehicle_near || self.asked(a))
                 && (!phone || a.with_phone || a.bits & (button::START | button::SELECT) != 0)
+        })
+    }
+
+    /// The game asks for what `a` does: its input, or its pad button.
+    fn asked(&self, a: &Action) -> bool {
+        self.prompts.iter().any(|p| {
+            (p.input.is_some() && p.input == a.input)
+                || (a.bits != 0 && p.pads.iter().any(|d| matches!(d, Pad::Buttons(b) if *b == a.bits)))
         })
     }
 
@@ -744,9 +769,9 @@ impl Touch {
                 out.push(round(Key::Phone(i), at, a));
             }
         }
-        // The game's prompts: the button that does it is ringed, else one
-        // of its own.
-        let mut own: Vec<(u16, Option<u32>)> = Vec::new();
+        // The game's prompts: the button that does it is ringed (shown for
+        // it if the layout hid it), else one of its own.
+        let mut own: Vec<(u16, Option<u32>, &'static str)> = Vec::new();
         for prompt in &self.prompts {
             let buttons: Vec<u16> =
                 prompt.pads.iter().filter_map(|p| if let Pad::Buttons(b) = p { Some(*b) } else { None }).collect();
@@ -765,15 +790,18 @@ impl Touch {
                 // A stick's prompt: the drags are that stick; an input with
                 // no pad button: pressed itself.
                 if prompt.input.is_some() && prompt.pads.is_empty() {
-                    own.push((0, prompt.input));
+                    own.push((0, prompt.input, prompt_icon(0, prompt.input)));
                 }
                 continue;
             }
+            // One button for one: the action's icon if its input says what
+            // it does. Several (a group): the pad's symbols the game shows.
+            let input = if buttons.len() == 1 { prompt.input } else { None };
             for bits in buttons {
                 // Pressed as the pad's button, which is what the game shows
                 // (its input, if given, may be one of a group's).
-                if !own.iter().any(|(b, _)| *b == bits) {
-                    own.push((bits, None));
+                if !own.iter().any(|(b, ..)| *b == bits) {
+                    own.push((bits, None, prompt_icon(bits, input)));
                 }
             }
         }
@@ -781,11 +809,11 @@ impl Touch {
         out
     }
 
-    /// The game's prompts that no button shows: buttons with the pad's
-    /// symbol (the game shows it beside its words), in a column at the right
-    /// edge above Select in a script's scene, else in a row at the bottom's
-    /// middle.
-    fn prompt_buttons(&self, prompts: Vec<(u16, Option<u32>)>) -> Vec<Button> {
+    /// The game's prompts that no button shows: buttons with the action's
+    /// icon or the pad's symbol ([`prompt_icon`]), in a column at the right
+    /// edge above Select in a script's scene with its bar, else in a row at
+    /// the bottom's middle.
+    fn prompt_buttons(&self, prompts: Vec<(u16, Option<u32>, &'static str)>) -> Vec<Button> {
         let s = self.scale;
         let r = PROMPT_RADIUS * s;
         let step = 2.0 * r + 10.0 * s;
@@ -796,7 +824,7 @@ impl Touch {
             pos2(self.area.center().x - (prompts.len() as f32 - 1.0) * step / 2.0, self.area.max.y - 40.0 * s)
         };
         let mut out = Vec::new();
-        for (bits, input) in prompts {
+        for (bits, input, icon) in prompts {
             if at.y - r < self.area.min.y + 60.0 * s {
                 break;
             }
@@ -804,7 +832,7 @@ impl Touch {
                 key: Key::Prompt { bits, input },
                 at,
                 radius: r,
-                icon: pad_icon(bits, input),
+                icon,
                 bits,
                 input,
                 kind: Kind::Press,
@@ -971,17 +999,12 @@ impl Touch {
                 Finger::Pinch(p)
             }
             None => {
-                // The pointer comes under the finger. With direct touch, the
-                // click waits for it to lift without moving; else it comes
-                // at once and lasts while it is held (a drag drags). A new
-                // gesture drops what was left of a step or a notch.
+                // The pointer comes under the finger; the click waits for it
+                // to lift without moving. A new gesture drops what was left
+                // of a step or a notch.
                 self.mouse_at = Some(p);
                 (self.steps, self.wheel) = (self.steps.trunc(), self.wheel.trunc());
-                let now = Instant::now();
-                if !self.direct {
-                    self.click = Some((now + CLICK_DELAY, now + CLICK_DELAY + MIN_PRESS));
-                }
-                Finger::Mouse { origin: p, at: p, since: now, drag: None }
+                Finger::Mouse { origin: p, at: p, since: Instant::now(), drag: None }
             }
         }
     }
@@ -996,7 +1019,7 @@ impl Touch {
             && at >= tap
         {
             self.tapped = None;
-            if at < tap + Duration::from_millis(500) && self.direct && !self.context.map {
+            if at < tap + Duration::from_millis(500) && !self.context.map {
                 let from = Instant::now() + AGAIN_DELAY;
                 self.click = Some((from, from + MIN_PRESS));
             }
@@ -1006,8 +1029,7 @@ impl Touch {
     /// Takes what the fingers do with the mouse and keys in the pause menu.
     pub fn take_mouse(&mut self) -> Mouse {
         let now = Instant::now();
-        let direct = self.direct;
-        let held = |f: &Finger| matches!(f, Finger::Mouse { drag, .. } if !direct || *drag == Some(Drag::Hold));
+        let held = |f: &Finger| matches!(f, Finger::Mouse { drag: Some(Drag::Hold), .. });
         let pinching = self.fingers.values().any(|f| matches!(f, Finger::Pinch(_)));
         let down = !pinching
             && self.click.is_some_and(|(from, until)| now >= from && (now < until || self.fingers.values().any(held)));
@@ -1033,15 +1055,15 @@ impl Touch {
     pub fn finger_motion(&mut self, id: u64, x: f32, y: f32) {
         let p = pos2(x * self.screen.x, y * self.screen.y);
         if matches!(self.fingers.get(&id), Some(Finger::Mouse { .. } | Finger::Pinch(_))) {
-            let (direct, map, slop) = (self.direct, self.context.map, TAP_SLOP * self.scale);
+            let (map, slop) = (self.context.map, TAP_SLOP * self.scale);
             let (mut scroll, mut swipe) = (0.0, 0.0);
             match self.fingers.get_mut(&id) {
                 Some(Finger::Mouse { origin, at, drag, .. }) => {
-                    // Direct touch: past a tap, the drag scrolls, or moves
-                    // the map with the mouse held.
-                    // The drag counts from where the finger landed.
+                    // Past a tap, the drag scrolls, changes a value, or
+                    // moves the map with the mouse held; it counts from
+                    // where the finger landed.
                     let mut from = *at;
-                    if direct && drag.is_none() && origin.distance(p) > slop {
+                    if drag.is_none() && origin.distance(p) > slop {
                         let d = p - *origin;
                         from = *origin;
                         *drag = Some(if map {
@@ -1061,7 +1083,6 @@ impl Touch {
                         Some(Drag::Swipe) => swipe = p.x - from.x,
                         Some(Drag::Two) => {}
                         Some(Drag::Hold) => self.mouse_at = Some(p),
-                        None if !direct => self.mouse_at = Some(p),
                         None => {}
                     }
                     *at = p;
@@ -1157,9 +1178,9 @@ impl Touch {
     pub fn finger_up(&mut self, id: u64) {
         match self.fingers.remove(&id) {
             Some(Finger::Pinch(_)) => self.two = None,
-            // Direct touch: a tap clicks as it lifts (once the pointer has
-            // been there a moment); the map's drag lets go.
-            Some(Finger::Mouse { since, drag, .. }) if self.direct => match drag {
+            // A tap clicks as it lifts (once the pointer has been there a
+            // moment); the map's drag lets go.
+            Some(Finger::Mouse { since, drag, .. }) => match drag {
                 None => {
                     let from = (since + CLICK_DELAY).max(Instant::now());
                     self.click = Some((from, from + MIN_PRESS));
@@ -1194,6 +1215,14 @@ impl Touch {
         }
         let radius = self.stick_radius();
         let stick = |origin: Pos2, at: Pos2| stick_value((at - origin) / radius);
+        // A wheel picks by direction: a drag a few points long pushes the
+        // stick all the way there (the radio wheel takes nothing under
+        // 60 %).
+        let pick = WHEEL_PICK * self.scale;
+        let toward = move |origin: Pos2, at: Pos2| {
+            let d = at - origin;
+            if d.length() < pick { [0.0, 0.0] } else { stick_value(d.normalized()) }
+        };
         for finger in self.fingers.values() {
             match *finger {
                 Finger::Move { origin, at } => {
@@ -1208,7 +1237,7 @@ impl Touch {
                 Finger::Camera { .. } | Finger::Mouse { .. } | Finger::Pinch(_) | Finger::MenuKey(_) => {}
                 Finger::Button { bits, kind, origin, last, .. } => {
                     if kind == Kind::Wheel {
-                        pad.right = stick(origin, last);
+                        pad.right = toward(origin, last);
                     }
                     pad.buttons |= bits;
                     if bits & button::L2 != 0 {
@@ -1241,7 +1270,7 @@ impl Touch {
                 | Finger::Button { kind: Kind::Press | Kind::Turns, origin, last, .. } = *finger
                     && origin != last
                 {
-                    pad.right = stick(origin, last);
+                    pad.right = toward(origin, last);
                 }
             }
         }
@@ -1356,6 +1385,61 @@ pub fn control_scale(screen: Vec2, size: f32) -> f32 {
 
 /// The icon of the pad's buttons `bits` (the game's prompt shows that
 /// symbol), or of the input pressed itself.
+/// A prompt's button's icon: the action's, where its input says what it
+/// does; else the pad's symbol for `bits` (the scripts' own inputs: the game
+/// names them by that symbol in its words).
+fn prompt_icon(bits: u16, input: Option<u32>) -> &'static str {
+    input.and_then(action_icon).unwrap_or_else(|| pad_icon(bits, input))
+}
+
+/// The icon of an action the game asks for by its input (`rage::InputType`).
+fn action_icon(input: u32) -> Option<&'static str> {
+    Some(match input {
+        0 => "view",                    // NEXT_CAMERA
+        18 => "skip",                   // SKIP_CUTSCENE
+        19 => "switch",                 // CHARACTER_WHEEL
+        22 => "jump",                   // JUMP
+        23 => "enter",                  // ENTER
+        24 | 69 | 92 | 114 => "fire",   // ATTACK, VEH_ATTACK, VEH_PASSENGER_ATTACK, VEH_FLY_ATTACK
+        25 | 68 | 91 => "aim",          // AIM, VEH_AIM, VEH_PASSENGER_AIM
+        26 | 79 => "behind",            // LOOK_BEHIND, VEH_LOOK_BEHIND
+        27 => "phone",                  // PHONE
+        28 | 29 => "special",           // SPECIAL_ABILITY(_SECONDARY)
+        36 => "crouch",                 // DUCK
+        37 | 99 => "weapons",           // SELECT_WEAPON, VEH_SELECT_NEXT_WEAPON
+        44 => "cover",                  // COVER
+        45 => "reload",                 // RELOAD
+        51 | 52 => "action",            // CONTEXT(_SECONDARY)
+        54 | 74 => "lights",            // WEAPON_SPECIAL_TWO (the flashlight), VEH_HEADLIGHT
+        65 => "drive-special",          // VEH_SPECIAL
+        71 | 87 => "gas",               // VEH_ACCELERATE, VEH_FLY_THROTTLE_UP
+        72 | 88 => "brake",             // VEH_BRAKE, VEH_FLY_THROTTLE_DOWN
+        73 => "duck",                   // VEH_DUCK
+        75 => "exit",                   // VEH_EXIT
+        76 => "handbrake",              // VEH_HANDBRAKE
+        80 => "cinematic",              // VEH_CIN_CAM (the camera's focus on a target)
+        85 => "radio",                  // VEH_RADIO_WHEEL
+        86 => "horn",                   // VEH_HORN
+        89 | 152 => "yaw-left",         // VEH_FLY_YAW_LEFT, PARACHUTE_BRAKE_LEFT
+        90 | 153 => "yaw-right",        // VEH_FLY_YAW_RIGHT, PARACHUTE_BRAKE_RIGHT
+        113 => "landing-gear",          // VEH_FLY_UNDERCARRIAGE
+        131 => "rise",                  // VEH_SUB_ASCEND
+        132 => "dive",                  // VEH_SUB_DESCEND
+        140 => "melee",                 // MELEE_ATTACK_LIGHT
+        144 => "parachute",             // PARACHUTE_DEPLOY
+        145 => "detach",                // PARACHUTE_DETACH
+        172 | 188 => "up",              // CELLPHONE_UP, FRONTEND_UP
+        173 | 187 => "down",            // CELLPHONE_DOWN, FRONTEND_DOWN
+        174 | 189 => "left",            // CELLPHONE_LEFT, FRONTEND_LEFT
+        175 | 190 => "right",           // CELLPHONE_RIGHT, FRONTEND_RIGHT
+        176 | 201 | 237 => "check",     // CELLPHONE_SELECT, FRONTEND_ACCEPT, CURSOR_ACCEPT
+        177 | 202 | 238 => "back",      // CELLPHONE_CANCEL, FRONTEND_CANCEL, CURSOR_CANCEL
+        199 | 200 => "pause",           // FRONTEND_PAUSE(_ALTERNATE)
+        _ => return None,
+    })
+}
+
+/// The pad's symbol for `bits`, as the game shows it.
 fn pad_icon(bits: u16, input: Option<u32>) -> &'static str {
     use button::*;
     match bits {

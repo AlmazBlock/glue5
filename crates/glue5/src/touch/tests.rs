@@ -28,6 +28,7 @@ fn context(activity: Activity) -> PlayerContext {
         phone: false,
         menu: false,
         cutscene: false,
+        bar: false,
         scripted: false,
         character: Character::Franklin,
         gun: false,
@@ -154,11 +155,16 @@ fn the_layout_follows_the_player() {
     t.set_context(PlayerContext { cutscene: true, ..context(Activity::Passenger) });
     assert_eq!(layout(&t), Some("Skip"));
     assert!(!t.has_stick());
-    // A script's menu: the D-pad, Select, Back.
-    t.set_context(PlayerContext { scripted: true, ..context(Activity::OnFoot) });
+    // A script's menu with its buttons' bar: the D-pad, Select, Back.
+    t.set_context(PlayerContext { scripted: true, bar: true, ..context(Activity::OnFoot) });
     assert_eq!(layout(&t), Some("▲"));
     let bits: Vec<u16> = t.buttons().iter().map(|b| b.bits).collect();
     assert!(bits.contains(&button::SOUTH) && bits.contains(&button::EAST) && bits.contains(&button::LEFT));
+    // One that asks for nothing (a death, a switch, a scene): pause alone,
+    // no stick.
+    t.set_context(PlayerContext { scripted: true, ..context(Activity::OnFoot) });
+    assert_eq!(t.buttons().iter().map(|b| b.icon).collect::<Vec<_>>(), ["pause"]);
+    assert!(!t.has_stick());
     // The phone's keys join the layout, the buttons the phone uses go.
     t.set_context(PlayerContext { phone: true, ..context(Activity::OnFoot) });
     let bits: Vec<u16> = t.buttons().iter().map(|b| b.bits).collect();
@@ -184,7 +190,7 @@ fn the_layout_follows_the_player() {
 #[test]
 fn the_game_asks_and_a_button_shows_it() {
     let mut t = phone();
-    t.set_context(PlayerContext { scripted: true, ..context(Activity::OnFoot) });
+    t.set_context(PlayerContext { scripted: true, bar: true, ..context(Activity::OnFoot) });
     // The character creator's prompts: Quit (B), Random (X), Turn Head.
     let prompts = vec![
         Prompt { pads: vec![Pad::Buttons(button::EAST)], input: Some(202), label: "Quit".into() },
@@ -222,13 +228,27 @@ fn a_prompt_on_foot_lights_the_button_that_does_it() {
     let buttons = t.buttons();
     assert!(buttons.iter().find(|b| b.bits == button::RIGHT).unwrap().asked);
     assert!(buttons.iter().all(|b| !matches!(b.key, Key::Prompt { .. })));
-    // "Press Y to get up", no vehicle near (Enter hidden): a pill, as Y.
+    // "Press Y to get in" (the prologue's car), no vehicle seen near: Enter,
+    // which the layout hid, shows for it, ringed.
     t.set_context(PlayerContext { vehicle_near: false, ..context(Activity::OnFoot) });
-    t.set_game(vec![Prompt { pads: vec![Pad::Buttons(button::NORTH)], input: Some(23), label: String::new() }], None);
+    t.set_game(vec![Prompt { pads: vec![Pad::Buttons(button::NORTH)], input: Some(204), label: String::new() }], None);
+    let buttons = t.buttons();
+    let enter = buttons.iter().find(|b| b.icon == "enter").expect("Enter shows");
+    assert!(enter.asked && buttons.iter().all(|b| !matches!(b.key, Key::Prompt { .. })));
+    // "Press B to focus on Lamar" in a car (no button does it): its own,
+    // the camera's focus, pressed as B.
+    t.set_context(context(Activity::Driving(Driving::Car)));
+    t.set_game(vec![Prompt { pads: vec![Pad::Buttons(button::EAST)], input: Some(80), label: String::new() }], None);
     let own = t.buttons().into_iter().find(|b| matches!(b.key, Key::Prompt { .. })).unwrap();
-    assert_eq!((own.bits, own.input, own.icon), (button::NORTH, None, "pad-y"));
+    assert_eq!((own.bits, own.input, own.icon), (button::EAST, None, "cinematic"));
     let occupied = t.occupied();
     assert!(occupied.iter().filter(|r| r.intersects(own.rect())).count() == 1, "it is on a control");
+    // A script's own input in its scene (the pad's symbol in the game's
+    // words): that symbol.
+    t.set_context(PlayerContext { scripted: true, ..context(Activity::OnFoot) });
+    t.set_game(vec![Prompt { pads: vec![Pad::Buttons(button::NORTH)], input: Some(225), label: String::new() }], None);
+    let own = t.buttons().into_iter().find(|b| matches!(b.key, Key::Prompt { .. })).unwrap();
+    assert_eq!(own.icon, "pad-y");
 }
 
 #[test]
@@ -266,14 +286,11 @@ fn in_the_pause_menu_fingers_are_the_mouse() {
     assert!((m.at.unwrap().x - x).abs() < 1e-6);
     std::thread::sleep(CLICK_DELAY);
     assert!(t.take_mouse().down);
-    // A drag moves it, button down; a second finger pinches: the wheel.
+    // A second finger pinches: the wheel, no click.
     t.finger_down(1, x, y);
-    let (x2, y2) = at(&t, pos2(450.0, 220.0));
-    t.finger_motion(1, x2, y2);
-    assert!((t.take_mouse().at.unwrap().x - x2).abs() < 1e-6);
-    let (px, py) = at(&t, pos2(450.0, 320.0));
+    let (px, py) = at(&t, pos2(400.0, 320.0));
     t.finger_down(2, px, py);
-    let (px, py) = at(&t, pos2(450.0, 320.0 + 2.0 * PINCH_NOTCH));
+    let (px, py) = at(&t, pos2(400.0, 320.0 + 2.0 * PINCH_NOTCH));
     t.finger_motion(2, px, py);
     let m = t.take_mouse();
     assert_eq!((m.wheel, m.down), (2, false));
@@ -307,9 +324,8 @@ fn in_the_pause_menu_fingers_are_the_mouse() {
 }
 
 #[test]
-fn with_direct_touch_a_menu_takes_taps_and_drags() {
+fn a_menu_takes_taps_and_drags() {
     let mut t = phone();
-    t.direct = true;
     t.set_context(PlayerContext { menu: true, cursor: true, ..context(Activity::OnFoot) });
     // A tap clicks as it lifts, where it landed (the pointer there first).
     let (x, y) = at(&t, pos2(400.0, 200.0));
@@ -380,29 +396,29 @@ fn with_direct_touch_a_menu_takes_taps_and_drags() {
     assert!(m.down && (m.at.unwrap().x - x2).abs() < 1e-6 && m.wheel == 0);
     t.finger_up(1);
     assert!(!t.take_mouse().down);
-    // Back alone stays.
-    assert_eq!(t.occupied().len(), 1);
+    // Its keys stay beside it.
+    assert_eq!(t.occupied().len(), MENU_KEYS.len());
 }
 
 #[test]
-fn with_direct_touch_a_scripts_cursor_menu_drops_the_pad() {
+fn a_scripts_cursor_menu_drops_the_pad() {
     let mut t = phone();
-    t.direct = true;
     // A shop's menu (the player's controls taken) with its cursor: no
-    // layout, Back alone; a finger is its mouse.
-    t.set_context(PlayerContext { scripted: true, cursor: true, ..context(Activity::OnFoot) });
-    assert!(t.buttons().is_empty() && t.occupied().len() == 1);
+    // layout, the menu's keys; a finger is its mouse.
+    t.set_context(PlayerContext { scripted: true, bar: true, cursor: true, ..context(Activity::OnFoot) });
+    assert!(t.buttons().is_empty() && t.occupied().len() == MENU_KEYS.len());
     let (x, y) = at(&t, pos2(150.0, 120.0));
     t.finger_down(1, x, y);
     t.finger_up(1);
     std::thread::sleep(CLICK_DELAY);
     assert!(t.take_mouse().down && t.gamepad().buttons == 0);
-    // Without its cursor (a scene, not a menu for the mouse): the D-pad.
-    t.set_context(PlayerContext { scripted: true, ..context(Activity::OnFoot) });
+    // Without its cursor (a scene with its bar, not a menu for the mouse):
+    // the D-pad.
+    t.set_context(PlayerContext { scripted: true, bar: true, ..context(Activity::OnFoot) });
     assert!(t.is(SCRIPTED));
     // The interaction menu over play: the stick and buttons stay, a finger
     // elsewhere is the menu's mouse, not the camera.
-    t.set_context(PlayerContext { cursor: true, ..context(Activity::OnFoot) });
+    t.set_context(PlayerContext { bar: true, cursor: true, ..context(Activity::OnFoot) });
     assert!(t.on_foot());
     let (sx, sy) = at(&t, t.pos(MOVE_REST));
     t.finger_down(2, sx, sy);
@@ -416,14 +432,33 @@ fn with_direct_touch_a_scripts_cursor_menu_drops_the_pad() {
     let m = t.take_mouse();
     assert!(m.down && (m.at.unwrap().x - x).abs() < 1e-6);
     assert_eq!(t.take_look(), (0, 0));
+    // The stick pushed far walks there, but does not sprint: A would pick
+    // in the menu.
+    let (sx, sy) = at(&t, t.pos(MOVE_REST) + vec2(3.0 * t.stick_radius(), 0.0));
+    t.finger_motion(2, sx, sy);
+    assert_eq!(t.gamepad().buttons & button::SOUTH, 0);
     // A screen with its own pointer (the browser): all the screen, though
-    // the player's controls are not taken.
+    // the player's controls are not taken; Back alone.
     t.set_context(PlayerContext { cursor: true, pointer: true, ..context(Activity::OnFoot) });
     assert!(t.buttons().is_empty() && t.occupied().len() == 1);
-    // Without direct touch, the same menu is the D-pad's.
-    t.direct = false;
-    t.set_context(PlayerContext { scripted: true, cursor: true, ..context(Activity::OnFoot) });
-    assert!(t.is(SCRIPTED));
+}
+
+#[test]
+fn a_skippable_scene_always_shows_its_skip() {
+    let mut t = phone();
+    // A cutscene while it takes the skip, the player's controls taken or
+    // not, with a bar or not.
+    for (scripted, bar) in [(false, false), (true, false), (true, true)] {
+        t.set_context(PlayerContext { cutscene: true, scripted, bar, ..context(Activity::OnFoot) });
+        assert!(t.buttons().iter().any(|b| b.icon == "skip"), "{scripted} {bar}");
+    }
+    // A script's scene that waits for the skip (no cutscene of the
+    // engine's), with or without its bar.
+    for bar in [false, true] {
+        t.set_context(PlayerContext { scripted: true, bar, ..context(Activity::OnFoot) });
+        t.set_game(vec![Prompt { pads: Vec::new(), input: Some(SKIP_CUTSCENE), label: String::new() }], None);
+        assert!(t.buttons().iter().any(|b| b.icon == "skip"), "{bar}");
+    }
 }
 
 #[test]
@@ -620,4 +655,25 @@ fn a_thumb_drifting_off_the_axis_keeps_its_reach() {
     assert!(near(at(90.0, 1.0), [0.0, 1.0]));
     assert!(near(at(45.0, 1.0), [1.0, 1.0]));
     assert_eq!(stick_value(Vec2::ZERO), [0.0, 0.0]);
+}
+
+#[test]
+fn in_a_car_the_radio_wheel_picks_with_the_other_thumb() {
+    let mut t = phone();
+    t.set_context(context(Activity::Driving(Driving::Car)));
+    let radio = spot(&t, "Radio");
+    let (x, y) = at(&t, radio);
+    t.finger_down(1, x, y);
+    // The right thumb, on the gas or anywhere free, dragged right.
+    for (id, from) in [(2, spot(&t, "Gas")), (3, pos2(560.0, 120.0))] {
+        let (x, y) = at(&t, from);
+        t.finger_down(id, x, y);
+        // A short drag: the wheel takes the stick from 60 % on.
+        let (x, y) = at(&t, from + vec2(2.0 * WHEEL_PICK, 0.0));
+        t.finger_motion(id, x, y);
+        let pad = t.gamepad();
+        assert!(pad.buttons & button::LEFT != 0, "the radio's button is held");
+        assert!(pad.right[0] > 0.99, "{id}: the wheel picks to the right: {:?}", pad.right);
+        t.finger_up(id);
+    }
 }

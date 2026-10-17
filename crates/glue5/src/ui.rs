@@ -906,6 +906,7 @@ mod tests {
                             phone,
                             menu: false,
                             cutscene: false,
+                            bar: false,
                             scripted: false,
                             character: Character::Other,
                             gun: false,
