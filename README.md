@@ -217,10 +217,10 @@ up the system keyboard on touch devices.
 The start page shows the game files, Story mode, GTA Online, Sandbox (the
 whole map, free roam, no missions) and Settings; the last mode played comes
 first. App settings cover resolution, upscaling, VSync, frame rate, touch
-controls, low memory, the game folder and GTA Online's name and private
-lobby. During play, open them with F1, the ⚙ button on
-touch screens, or by holding Back + Start on a controller. Use the D-pad or arrow keys to
-navigate, A or Enter to select, and B or Esc to go back.
+controls, low memory, the game folder and GTA Online's name. During play,
+open them with F1, the ⚙ button on touch screens, or by holding Back +
+Start on a controller. Use the D-pad or arrow keys to navigate, A or Enter
+to select, and B or Esc to go back.
 
 Esc / Start opens the game's own menu. Graphics quality is configured in
 Settings › Graphics and saved in `settings.xml`. Confirming a change that
@@ -232,8 +232,10 @@ the app restarts directly into the game. On a phone, reopen the app.
 GTA Online's freemode runs without Rockstar's services and without a
 server of ours. GTA ONLINE on the start page puts the player in the lobby
 of everyone playing, where the game's own matchmaking finds or hosts a
-session; Settings › Game › Private lobby takes a code instead, to play with
-whoever enters the same one. The name other players see is in the same tab.
+public session. The pause menu's other sessions (invite only, crew,
+closed friends, solo) are hosted in a lobby of their own, new each time,
+reached only through an invite or, for a closed friends session, by
+friends. The name other players see is in Settings › Game.
 
 - The lobby is a virtual LAN the engine plays on as on a real one
   (`vnet.rs`): its sockets carry their datagrams over one UDP socket per
@@ -248,15 +250,24 @@ whoever enters the same one. The name other players see is in the same tab.
 
 ### Friends
 
-Friends (♡ on the start page, or Settings › Game › Friends) see when the
-other plays, join each other in GTA Online and invite each other from the
-game's own menus, still with no server of ours (`friends/`).
+Friends see when the other plays, join each other in GTA Online and
+invite each other, from the game's own menus too, still with no server of
+ours (`friends/`). As Social Club's overlay did, the app's Friends page
+(♡ on the start page, Home, or Back + RB on a controller) has the
+friends, the friend requests, the game invites and the players to ask,
+and notifications come up at the top right: a friend online or offline,
+a request, a request accepted, an invite (Settings › Game turns them
+off).
 
 - Each player has a key pair made on the device and a friend code
   (16 characters, 75 random bits and a check character) to give out.
   Asking with a code reaches its owner, who says yes or no; a new code
-  retires the old one. The key, the code and the friends are in
-  `friends.json` in the user directory (readable by the player only).
+  retires the old one. A player met online can be asked without one,
+  from the page's players met: the players of a lobby tell each other
+  their key, and a request without a code is answered only while its
+  sender is in the same lobby. The key, the code, the friends and the
+  players met are in `friends.json` in the user directory (readable by the
+  player only).
 - Friends meet on the DHT and the local network under a key only the two
   of them can compute (from their keys' Diffie-Hellman secret, changing
   every 6 hours), then talk over a Noise channel (`IK`, or `XXpsk0` with a
@@ -266,9 +277,11 @@ game's own menus, still with no server of ours (`friends/`).
   of the same lobby does.
 - In the game, the friends are the pause menu's; their invites (to a
   session, to a job) and answers travel over the channel, accepted only
-  from that friend; "Join" on a friend's card, or on the app's Friends
-  page, takes the player into the friend's lobby (introduced by it) and
-  session.
+  from that friend. A friend tells the others its session only when they
+  may join it (public, or closed friends); an invite carries a private
+  one. "Join" on a friend's card or on the app's page, accepting an
+  invite, and the pause menu's "Join Friends" take the player into the
+  friend's lobby (introduced by it) and session.
 
 ## Renderer
 
