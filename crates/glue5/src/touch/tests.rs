@@ -677,3 +677,27 @@ fn in_a_car_the_radio_wheel_picks_with_the_other_thumb() {
         t.finger_up(id);
     }
 }
+
+#[test]
+fn in_first_person_the_buttons_press_where_the_game_maps_them() {
+    let mut t = phone();
+    t.set_context(context(Activity::OnFoot));
+    // First person (standard_fps.meta): sprint on L3, duck on A.
+    t.set_pad_map(vec![(SPRINT, button::L3), (36, button::SOUTH), (22, button::WEST)]);
+    let o = t.pos(MOVE_REST);
+    let (x, y) = at(&t, o);
+    t.finger_down(1, x, y);
+    let (x, y) = at(&t, o + vec2(0.0, -2.0 * t.stick_radius()));
+    t.finger_motion(1, x, y);
+    let pad = t.gamepad();
+    assert_eq!(pad.buttons & (button::L3 | button::SOUTH), button::L3, "the stick sprints with L3, does not duck");
+    t.finger_up(1);
+    let (x, y) = at(&t, spot(&t, "Crouch"));
+    t.finger_down(2, x, y);
+    assert_eq!(t.gamepad().buttons, button::SOUTH, "Crouch presses A");
+    t.finger_up(2);
+    // Third person: the layouts' own buttons.
+    t.set_pad_map(Vec::new());
+    t.finger_down(3, x, y);
+    assert_eq!(t.gamepad().buttons, button::L3);
+}

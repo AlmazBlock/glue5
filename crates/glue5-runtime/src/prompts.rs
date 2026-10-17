@@ -320,6 +320,32 @@ unsafe fn input_by_name(env: *mut Env, name: &str) -> Option<u32> {
     (input < INPUTS).then_some(input)
 }
 
+/// The inputs the touch controls' buttons stand for on foot, and the
+/// stick's sprint: the game's control layout may move their pad buttons
+/// (first person swaps sprint and duck; the southpaw and trigger-swap
+/// schemes move others).
+const MAPPED: [u32; 10] = [
+    21, // SPRINT
+    22, // JUMP
+    23, // ENTER
+    24, // ATTACK
+    25, // AIM
+    36, // DUCK
+    37, // SELECT_WEAPON
+    44, // COVER
+    51, // CONTEXT
+    58, // THROW_GRENADE
+];
+
+/// The pad buttons of [`MAPPED`] now.
+static PAD_MAP: Mutex<Vec<(u32, u16)>> = Mutex::new(Vec::new());
+
+/// The pad button each of the touch buttons' inputs is on now, with the
+/// control layout in use (as `(input, buttons)`).
+pub fn pad_map() -> Vec<(u32, u16)> {
+    PAD_MAP.lock().unwrap().clone()
+}
+
 /// Runs `f` with `size` zeroed bytes of the game's stack.
 unsafe fn with_stack<R>(env: *mut Env, size: u64, f: impl FnOnce(u64) -> R) -> Option<R> {
     let top = unsafe { exports::emscripten_stack_get_current(env) }.ok()?;
@@ -398,6 +424,14 @@ pub(crate) unsafe fn update(env: *mut Env, touch_play: bool, code_bar: bool) {
     let mem = unsafe { Mem::of(env) };
     let mut prompts = Vec::new();
     if touch_play {
+        let map = MAPPED
+            .iter()
+            .filter_map(|&input| match unsafe { input_pad(env, input) } {
+                Some(Pad::Buttons(bits)) => Some((input, bits)),
+                _ => None,
+            })
+            .collect();
+        *PAD_MAP.lock().unwrap() = map;
         // The scripts' bars drawn last frame; the code's: the one laid out
         // last.
         let drawn = script_bars(mem);

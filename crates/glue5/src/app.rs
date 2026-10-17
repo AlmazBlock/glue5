@@ -550,6 +550,7 @@ impl App {
             // What the game asks to press, where its phone is.
             let phone = glue5_runtime::input::phone_rect(screen.x / screen.y.max(1.0));
             self.touch.set_game(glue5_runtime::prompts::prompts(), phone);
+            self.touch.set_pad_map(glue5_runtime::prompts::pad_map());
             self.touch.menu_went_deeper(glue5_runtime::input::menu_went_deeper());
             glue5_runtime::input::set_gamepad(0, self.touch.gamepad());
             for input in self.touch.take_inputs() {

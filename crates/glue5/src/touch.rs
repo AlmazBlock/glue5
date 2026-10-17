@@ -77,6 +77,10 @@ struct Action {
     /// Its icon's name, or two names joined by `+` (side by side).
     icon: &'static str,
     bits: u16,
+    /// The game's input it does on foot: it presses the pad button the
+    /// game maps that to now (first person and the other control schemes
+    /// move some), `bits` while it is not known.
+    does: Option<u32>,
     /// The game's input it presses instead of pad buttons.
     input: Option<u32>,
     at: At,
@@ -105,6 +109,7 @@ const fn action(label: &'static str, icon: &'static str, bits: u16, at: At, radi
         label,
         icon,
         bits,
+        does: None,
         input: None,
         at,
         radius,
@@ -113,6 +118,10 @@ const fn action(label: &'static str, icon: &'static str, bits: u16, at: At, radi
         primary: false,
         with_phone: false,
     }
+}
+
+const fn does(input: u32, a: Action) -> Action {
+    Action { does: Some(input), ..a }
 }
 
 const fn turns(a: Action) -> Action {
@@ -204,19 +213,19 @@ const SIXTH: At = At::RightBottom(282.0, 128.0);
 
 /// On foot (the stick sprints past its ring).
 static ON_FOOT: &[Action] = &[
-    primary(turns(action("Fire", "fire", button::R2, At::RightBottom(78.0, 166.0), 34.0))),
-    turns(action("Aim", "aim", button::L2, At::RightBottom(176.0, 104.0), 30.0)),
-    action("Jump", "jump", button::WEST, At::RightBottom(64.0, 64.0), 28.0),
-    near_vehicle(action("Enter", "enter", button::NORTH, At::RightBottom(180.0, 214.0), 28.0)),
+    does(24, primary(turns(action("Fire", "fire", button::R2, At::RightBottom(78.0, 166.0), 34.0)))),
+    does(25, turns(action("Aim", "aim", button::L2, At::RightBottom(176.0, 104.0), 30.0))),
+    does(22, action("Jump", "jump", button::WEST, At::RightBottom(64.0, 64.0), 28.0)),
+    does(23, near_vehicle(action("Enter", "enter", button::NORTH, At::RightBottom(180.0, 214.0), 28.0))),
     action("Melee\nReload", "melee", button::EAST, At::RightBottom(268.0, 52.0), 24.0),
-    action("Cover", "cover", button::R1, At::RightBottom(78.0, 262.0), 24.0),
-    action("Action", "action", button::RIGHT, At::RightBottom(274.0, 136.0), 24.0),
+    does(44, action("Cover", "cover", button::R1, At::RightBottom(78.0, 262.0), 24.0)),
+    does(51, action("Action", "action", button::RIGHT, At::RightBottom(274.0, 136.0), 24.0)),
     PHONE,
-    wheel(action("Weapons", "weapons", button::L1, LEFT_1, 24.0)),
+    does(37, wheel(action("Weapons", "weapons", button::L1, LEFT_1, 24.0))),
     action("Special", "special", button::L3 | button::R3, LEFT_2, 22.0),
-    action("Crouch", "crouch", button::L3, LEFT_3, 22.0),
+    does(36, action("Crouch", "crouch", button::L3, LEFT_3, 22.0)),
     SWITCH,
-    action("Throw", "throw", button::LEFT, LEFT_5, 22.0),
+    does(58, action("Throw", "throw", button::LEFT, LEFT_5, 22.0)),
     VIEW,
     PAUSE,
 ];
@@ -406,6 +415,9 @@ const PROMPT_RADIUS: f32 = 22.0;
 /// An open wheel's pick: a drag this many points long points the stick.
 const WHEEL_PICK: f32 = 12.0;
 
+/// The game's sprint (`INPUT_SPRINT`): A, but L3 in first person.
+const SPRINT: u32 = 21;
+
 /// Past this many stick radii from where it landed, the thumb sprints (on
 /// foot); past this many, the stick follows it.
 const SPRINT_REACH: f32 = 1.3;
@@ -500,6 +512,9 @@ pub struct Touch {
     context: PlayerContext,
     /// What the game asks to press, and where the phone is (points).
     prompts: Vec<Prompt>,
+    /// The pad button each input of the layouts' buttons is on now
+    /// ([`glue5_runtime::prompts::pad_map`]).
+    pad_map: Vec<(u32, u16)>,
     phone: Option<Rect>,
     /// The camera's turn since the last [`Touch::take_look`], in mouse
     /// counts.
@@ -584,6 +599,7 @@ impl Touch {
                 pointer: false,
             },
             prompts: Vec::new(),
+            pad_map: Vec::new(),
             phone: None,
             look: Vec2::ZERO,
             locked_drag: Vec2::ZERO,
@@ -640,6 +656,22 @@ impl Touch {
     /// Back alone on a screen with its own pointer (the browser: no rows).
     fn menu_keys(&self) -> &'static [(MenuKey, Action)] {
         if self.context.pointer && !self.context.menu { &MENU_KEYS[..1] } else { &MENU_KEYS }
+    }
+
+    /// The pad button each input of the layouts' buttons is on now, as the
+    /// game's control layout maps it (as `(input, buttons)`).
+    pub fn set_pad_map(&mut self, map: Vec<(u32, u16)>) {
+        self.pad_map = map;
+    }
+
+    /// The pad buttons the game's `input` is on now, if known.
+    fn mapped(&self, input: u32) -> Option<u16> {
+        self.pad_map.iter().find(|(i, _)| *i == input).map(|(_, bits)| *bits)
+    }
+
+    /// The pad buttons `a` presses: where the game maps what it does now.
+    fn bits_of(&self, a: &Action) -> u16 {
+        a.does.and_then(|i| self.mapped(i)).unwrap_or(a.bits)
     }
 
     /// What the game asks to press now, and where the phone is on the
@@ -717,7 +749,7 @@ impl Touch {
         let layout = self.touch_layout().unwrap_or_default();
         layout.iter().filter(move |a| {
             (!a.near_vehicle || self.context.vehicle_near || self.asked(a))
-                && (!phone || a.with_phone || a.bits & (button::START | button::SELECT) != 0)
+                && (!phone || a.with_phone || self.bits_of(a) & (button::START | button::SELECT) != 0)
         })
     }
 
@@ -725,7 +757,7 @@ impl Touch {
     fn asked(&self, a: &Action) -> bool {
         self.prompts.iter().any(|p| {
             (p.input.is_some() && p.input == a.input)
-                || (a.bits != 0 && p.pads.iter().any(|d| matches!(d, Pad::Buttons(b) if *b == a.bits)))
+                || (self.bits_of(a) != 0 && p.pads.iter().any(|d| matches!(d, Pad::Buttons(b) if *b == self.bits_of(a))))
         })
     }
 
@@ -737,7 +769,7 @@ impl Touch {
             at,
             radius: a.radius * s,
             icon: a.icon,
-            bits: a.bits,
+            bits: self.bits_of(a),
             input: a.input,
             kind: a.kind,
             primary: a.primary,
@@ -1227,10 +1259,11 @@ impl Touch {
             match *finger {
                 Finger::Move { origin, at } => {
                     pad.left = stick(origin, at);
-                    // On foot, a thumb pushed past the ring sprints (A held);
-                    // not with the phone out, where A selects.
+                    // On foot, a thumb pushed past the ring sprints (A held,
+                    // L3 in first person); not with the phone out, where A
+                    // selects.
                     if self.sprints() && (at - origin).length() > SPRINT_REACH * radius {
-                        pad.buttons |= button::SOUTH;
+                        pad.buttons |= self.mapped(SPRINT).unwrap_or(button::SOUTH);
                     }
                 }
                 Finger::Look { origin, at } => pad.right = stick(origin, at),
