@@ -266,15 +266,26 @@ impl Cache {
         let end = off + data.len() as u64;
         if end >= off + BLOCK || end == s.size {
             let last = if end == s.size { (end - 1) / BLOCK } else { end / BLOCK - 1 };
-            let added = set_range(&s.present, off / BLOCK, last);
+            let added = self.mark(id, off / BLOCK, last);
             self.used.fetch_add(added * BLOCK, Ordering::Relaxed);
         }
         self.touch(s);
+        Ok(())
+    }
+
+    /// Marks blocks `first..=last` of file `id` present (its data written)
+    /// and the file written to, both at once for [`Cache::save`]: a block
+    /// it finds present has its file on the list it takes after, and synced
+    /// before the index that says so. Returns how many were not present.
+    fn mark(&self, id: u32, first: u64, last: u64) -> u64 {
+        let s = &self.slots[id as usize];
+        let mut dirty = self.dirty.lock().unwrap();
+        let added = set_range(&s.present, first, last);
         if !s.dirty.swap(true, Ordering::AcqRel) {
-            self.dirty.lock().unwrap().push(id);
+            dirty.push(id);
         }
         self.changed.store(true, Ordering::Release);
-        Ok(())
+        added
     }
 
     /// Stores the whole file `id` (from a pack), without keeping it open.
@@ -291,14 +302,10 @@ impl Cache {
         };
         sys::write_all_at(&f, data, 0)?;
         if s.size > 0 {
-            let added = set_range(&s.present, 0, s.blocks() - 1);
+            let added = self.mark(id, 0, s.blocks() - 1);
             self.used.fetch_add((added * BLOCK).min(s.size), Ordering::Relaxed);
         }
         self.touch(s);
-        if !s.dirty.swap(true, Ordering::AcqRel) {
-            self.dirty.lock().unwrap().push(id);
-        }
-        self.changed.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -343,16 +350,43 @@ impl Cache {
         if !self.changed.swap(false, Ordering::AcqRel) {
             return Ok(());
         }
-        let dirty = std::mem::take(&mut *self.dirty.lock().unwrap());
-        for &id in &dirty {
-            self.slots[id as usize].dirty.store(false, Ordering::Release);
+        // The bits, then the files written to (see `mark`): what a write
+        // marks after the bits were read waits for the next save.
+        let index = self.index();
+        let dirty = {
+            let mut list = self.dirty.lock().unwrap();
+            for &id in list.iter() {
+                self.slots[id as usize].dirty.store(false, Ordering::Release);
+            }
+            std::mem::take(&mut *list)
+        };
+        let result = self.write_index(&dirty, &index);
+        if result.is_err() {
+            // Synced or not, they are synced again before the next index.
+            let mut list = self.dirty.lock().unwrap();
+            for &id in &dirty {
+                if !self.slots[id as usize].dirty.swap(true, Ordering::AcqRel) {
+                    list.push(id);
+                }
+            }
+            self.changed.store(true, Ordering::Release);
         }
+        result
+    }
+
+    /// Syncs the files written to, then writes `index` (their data first).
+    fn write_index(&self, dirty: &[u32], index: &[u8]) -> io::Result<()> {
         // A file not kept open is opened again just to be synced (a sync
         // flushes the file, whichever handle asks), for writing: Windows
-        // flushes no file opened only to be read (access denied).
+        // flushes no file opened only to be read (access denied). One gone
+        // meanwhile (emptied) has nothing to sync.
         let sync = |id: &u32| match self.slots[*id as usize].file.get() {
             Some(f) => sys::sync_data(f),
-            None => OpenOptions::new().read(true).write(true).open(self.path(*id)).and_then(|f| sys::sync_data(&f)),
+            None => match OpenOptions::new().read(true).write(true).open(self.path(*id)) {
+                Ok(f) => sys::sync_data(&f),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            },
         };
         // A pack writes thousands of files: synced side by side, each only to
         // the drive (one full flush of the drive's cache, the index's, below
@@ -366,11 +400,21 @@ impl Cache {
             jobs.into_iter().try_for_each(|j| j.join().unwrap_or(Ok(())))
         })?;
         #[cfg(target_vendor = "apple")]
-        for &id in &dirty {
+        for &id in dirty {
             if let Err(e) = self.keep_sparse(id) {
                 log::debug!("stream cache: {}: {e}", self.slots[id as usize].path);
             }
         }
+        let tmp = self.root.join("index.tmp");
+        let mut f = File::create(&tmp)?;
+        f.write_all(index)?;
+        // The data before the index that says it is there.
+        sys::sync_full(&f)?;
+        fs::rename(&tmp, self.root.join("index"))
+    }
+
+    /// The index as saved: every file's bitmap.
+    fn index(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(64 + self.slots.len() * 64);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
@@ -387,12 +431,7 @@ impl Cache {
                 out.extend_from_slice(&w.load(Ordering::Acquire).to_le_bytes());
             }
         }
-        let tmp = self.root.join("index.tmp");
-        let mut f = File::create(&tmp)?;
-        f.write_all(&out)?;
-        // The data before the index that says it is there.
-        sys::sync_full(&f)?;
-        fs::rename(&tmp, self.root.join("index"))
+        out
     }
 
     /// Frees what the file system allocated for blocks that are not here.
@@ -666,6 +705,28 @@ mod tests {
         assert!(!c.has(0, 0, 0) && c.complete(2));
         assert_eq!(c.evict(1), 10);
         assert!(!c.complete(2));
+        let _ = clear(&root);
+    }
+
+    /// A save that fails leaves its work to the next one.
+    #[cfg(unix)]
+    #[test]
+    fn saves_again_after_a_failed_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("glue5-cache-failed-{}", std::process::id()));
+        let _ = clear(&root);
+        let catalog = Catalog::new("x".into(), vec![Entry { path: "data/a.rpf".into(), size: 2 * BLOCK, mtime: 1 }], 1);
+        {
+            let c = Cache::open(&root, &catalog).unwrap();
+            c.write(0, 0, &vec![3u8; BLOCK as usize]).unwrap();
+            // No index can be written meanwhile.
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+            assert!(c.save().is_err());
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+            c.save().unwrap();
+        }
+        let c = Cache::open(&root, &catalog).unwrap();
+        assert!(c.has(0, 0, 0));
         let _ = clear(&root);
     }
 
