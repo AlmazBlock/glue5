@@ -512,3 +512,18 @@ fn a_friend_cannot_take_another_s_gamer_id() {
     a.s.meet(&[(card(&c, 4000), c.addr), (card(&d, 4000), d.addr)], now, &mut Out::default());
     assert_eq!(a.s.met_gamer(4000), None);
 }
+
+#[test]
+fn game_events_as_large_as_the_game_s_arrive() {
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    befriend(&mut a, &mut b, true, &mut now);
+    let long = format!("{{\"x\":\"{}\"}}", "a".repeat(1000));
+    let mut out = Out::default();
+    assert!(a.s.send_game(2000, &long, now, &mut out));
+    let from = a.addr;
+    run(&mut [&mut a, &mut b], out, from, &mut now, 2, &keep);
+    assert_eq!(b.s.events.drain(..).map(|e| e.text).collect::<Vec<_>>(), [long]);
+    // One that a datagram cannot carry (its quotes escaped): not sent.
+    assert!(!a.s.send_game(2000, &"\"".repeat(1000), now, &mut Out::default()));
+}

@@ -278,13 +278,18 @@ impl Friend {
     }
 
     /// Sends a message that is acknowledged (sent again until it is):
-    /// false if the friend is not connected.
+    /// false if the friend is not connected, or if the message does not fit
+    /// in a datagram.
     fn send_reliably(&mut self, message: impl FnOnce(u32) -> Message, now: Instant, out: &mut Out) -> bool {
         let Some(t) = self.transport.as_mut() else { return false };
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1).max(1);
         let Ok(d) = serde_json::to_vec(&message(seq)) else { return false };
-        out.push(t.addr, t.seal(&d, now));
+        let Some(sealed) = t.seal(&d, now) else {
+            log::warn!("friends: a message of {} bytes not sent: too long", d.len());
+            return false;
+        };
+        out.send.push((t.addr, sealed));
         self.outbox.push((seq, d, now, 0));
         true
     }
@@ -1384,7 +1389,7 @@ impl Service {
                 }
             }
             Message::Game { seq, text } => {
-                if !f.first_time(seq, out) || text.len() > MAX_TEXT {
+                if !f.first_time(seq, out) || text.len() > game::MAX_EVENT {
                     return;
                 }
                 log::info!("friends: a game event from {}", f.name);
@@ -1484,8 +1489,11 @@ impl Service {
     }
 
     /// Sends the game's event to the friend with gamer id `id`; false if no
-    /// such friend is connected.
+    /// such friend is connected, or if the event is too long.
     fn send_game(&mut self, id: u64, text: &str, now: Instant, out: &mut Out) -> bool {
+        if text.len() > game::MAX_EVENT {
+            return false;
+        }
         let Some(f) = self.friend_of(id) else { return false };
         f.send_reliably(|seq| Message::Game { seq, text: text.to_owned() }, now, out)
     }

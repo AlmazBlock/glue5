@@ -61,8 +61,8 @@ const DISPATCHER: u64 = 29510448;
 const LOCAL_GAMER: u64 = 15219624;
 /// An `rlGamerHandle`: id, service (3: Social Club), local index.
 const HANDLE_SIZE: u64 = 16;
-/// The largest presence message.
-const MAX_EVENT: usize = 1024;
+/// The largest presence message, sent to friends or from them.
+pub(super) const MAX_EVENT: usize = 1024;
 /// The events a friend may send: an invite, its cancellation, the answer to
 /// one, a follow invite.
 const EVENTS: &[&str] = &["ginv", "ginvc", "grep", "finv"];
@@ -641,7 +641,12 @@ pub(crate) unsafe extern "C" fn presence_send(env: *mut Env, event: u64, handles
 /// the gamers, not to Social Club.
 pub(crate) unsafe extern "C" fn presence_post(env: *mut Env, handles: u64, count: u32, message: u64) {
     let m = unsafe { Mem::of(env) };
-    let text = bounded_str(m, message, MAX_EVENT);
+    // Whole or not at all (cut, it would not parse).
+    let text = bounded_str(m, message, MAX_EVENT + 1);
+    if text.len() > MAX_EVENT {
+        log::warn!("friends: the game's event is too long ({} bytes or more): not sent", text.len());
+        return;
+    }
     let ids: Vec<u64> = (0..u64::from(count.min(32))).map(|i| m.u64(handles + i * HANDLE_SIZE)).collect();
     let sent = super::send_game_event(&ids, &text);
     let kind = serde_json::from_str::<serde_json::Value>(&text)
