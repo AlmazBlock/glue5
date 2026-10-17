@@ -484,3 +484,31 @@ fn a_file_that_cannot_be_read_is_kept() {
     assert_eq!(std::fs::read(&kept[0]).unwrap(), b"{ not json");
     assert!(serde_json::from_slice::<Store>(&std::fs::read(dir.join(FILE)).unwrap()).is_ok_and(|s| s.key.is_some()));
 }
+
+#[test]
+fn a_friend_cannot_take_another_s_gamer_id() {
+    let mut now = Instant::now();
+    let (mut a, mut v, mut m) = (Player::new("Ann", 1), Player::new("Vic", 2), Player::new("Mal", 3));
+    befriend(&mut a, &mut v, true, &mut now);
+    befriend(&mut a, &mut m, true, &mut now);
+    assert_eq!((a.s.friends[&v.key()].id, a.s.friends[&m.key()].id), (2000, 3000));
+    // Mal says he has Vic's id: not taken.
+    m.s.local.id = 2000;
+    let from = m.addr;
+    run(&mut [&mut a, &mut m], Out::default(), from, &mut now, 2, &keep);
+    assert_eq!(a.s.friends[&m.key()].id, 3000);
+    let mut out = Out::default();
+    assert!(a.s.send_game(2000, "{}", now, &mut out));
+    assert!(out.send.iter().all(|(to, _)| *to == v.addr));
+    // Vic installed again, with a new id: taken.
+    v.s.local.id = 2500;
+    let from = v.addr;
+    run(&mut [&mut a, &mut v], Out::default(), from, &mut now, 2, &keep);
+    assert_eq!(a.s.friends[&v.key()].id, 2500);    // Two players met say they have one id: neither is asked by it.
+    let card = |p: &Player, gamer| crate::p2p::Card { gamer, key: p.key(), name: p.s.local.name.clone() };
+    let (c, d) = (Player::new("Carl", 4), Player::new("Dan", 5));
+    a.s.meet(&[(card(&c, 4000), c.addr)], now, &mut Out::default());
+    assert_eq!(a.s.met_gamer(4000), Some(c.key()));
+    a.s.meet(&[(card(&c, 4000), c.addr), (card(&d, 4000), d.addr)], now, &mut Out::default());
+    assert_eq!(a.s.met_gamer(4000), None);
+}

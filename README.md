@@ -290,7 +290,8 @@ off).
   of the same lobby does.
 - In the game, the friends are the pause menu's; their invites (to a
   session, to a job) and answers travel over the channel, accepted only
-  from that friend. A friend tells the others its session only when they
+  from that friend. The game knows a friend by its gamer id, which each
+  player says itself: one that another friend has is not taken. A friend tells the others its session only when they
   may join it (public, or closed friends); an invite carries a private
   one. "Join" on a friend's card or on the app's page, accepting an
   invite, and the pause menu's "Join Friends" take the player into the

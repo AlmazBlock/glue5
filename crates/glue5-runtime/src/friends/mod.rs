@@ -457,9 +457,9 @@ pub(crate) struct Service {
     /// ids).
     joins: VecDeque<u64>,
     /// Players met in lobbies, the latest first, and the ones in them now
-    /// (their keys and addresses).
+    /// (their keys, addresses and gamer ids).
     recent: Vec<Recent>,
-    met: Vec<(Key, SocketAddrV4)>,
+    met: Vec<(Key, SocketAddrV4, u64)>,
     /// The newest handshake time from each player met who asked.
     stranger_times: HashMap<Key, u64>,
     /// Whether friends may join this player's session without an invite (a
@@ -679,6 +679,7 @@ impl Service {
         if key == *identity.public() || self.friends.len() >= MAX_FRIENDS {
             return false;
         }
+        let id = if self.id_taken(id, &key) { 0 } else { id };
         self.blocked.remove(&key);
         self.meetings = Meetings::default();
         self.friends.entry(key).or_insert(Friend {
@@ -700,6 +701,20 @@ impl Service {
         });
         self.generation += 1;
         true
+    }
+
+    /// Whether gamer id `id` is someone else's than friend `key`'s: another
+    /// friend's, or this player's. A gamer id is what a player says it is,
+    /// and the game knows friends by it (their events, invites, "is a
+    /// friend"): a friend does not get one another has, while the other
+    /// has it (an id changes when the game is installed again).
+    fn id_taken(&self, id: u64, key: &Key) -> bool {
+        id != 0 && (id == self.local.id || self.friends.values().any(|f| f.id == id && f.key != *key))
+    }
+
+    /// The friend with gamer id `id` (none for 0: not told yet).
+    fn friend_of(&mut self, id: u64) -> Option<&mut Friend> {
+        self.friends.values_mut().find(|f| f.id == id && id != 0)
     }
 
     fn drop_channel(&mut self, transport: Option<Transport>) {
@@ -915,7 +930,7 @@ impl Service {
         let me = *self.identity.as_ref().unwrap().public();
         let today = unix();
         let mut changed = false;
-        self.met = players.iter().map(|(c, a)| (c.key, *a)).collect();
+        self.met = players.iter().map(|(c, a)| (c.key, *a, c.gamer)).collect();
         for (card, addr) in players {
             if card.key == me || self.friends.contains_key(&card.key) {
                 continue;
@@ -947,6 +962,14 @@ impl Service {
             self.generation += 1;
             self.save();
         }
+    }
+
+    /// The player met in a lobby now (and kept as one met) with gamer id
+    /// `id`: none when another one met now says it has the same.
+    fn met_gamer(&self, id: u64) -> Option<Key> {
+        let mut keys = self.met.iter().filter(|(.., g)| *g == id && id != 0).map(|(k, ..)| *k);
+        let key = keys.next()?;
+        (keys.all(|k| k == key) && self.recent.iter().any(|r| r.key == key)).then_some(key)
     }
 
     /// The tags this player looks for: friends not connected, codes asked.
@@ -1181,7 +1204,7 @@ impl Service {
     /// come from that address) asking to be friends; anyone else is not
     /// answered.
     fn stranger_asks(&mut self, key: Key, mut h: Handshake, time: u64, from: SocketAddrV4, now: Instant, out: &mut Out) {
-        let met = self.met.contains(&(key, from));
+        let met = self.met.iter().any(|(k, a, _)| *k == key && *a == from);
         if !met || self.blocked.contains(&key) || self.stranger_times.get(&key).is_some_and(|t| time <= *t) {
             return;
         }
@@ -1341,12 +1364,18 @@ impl Service {
         match message {
             Message::Presence(p) => {
                 let p = p.bounded();
+                let taken = self.id_taken(p.id, &key);
+                let Some(f) = self.friends.get_mut(&key) else { return };
                 if f.presence.as_ref() != Some(&p) {
                     if !p.name.is_empty() && p.name != f.name {
                         f.name = p.name.clone();
                     }
-                    let id_changed = p.id != f.id;
-                    f.id = p.id;
+                    let id_changed = p.id != f.id && !taken;
+                    if id_changed {
+                        f.id = p.id;
+                    } else if taken {
+                        log::warn!("friends: {} says it has another's gamer id", f.name);
+                    }
                     f.presence = Some(p);
                     self.generation += 1;
                     if id_changed {
@@ -1457,16 +1486,22 @@ impl Service {
     /// Sends the game's event to the friend with gamer id `id`; false if no
     /// such friend is connected.
     fn send_game(&mut self, id: u64, text: &str, now: Instant, out: &mut Out) -> bool {
-        let Some(f) = self.friends.values_mut().find(|f| f.id == id) else { return false };
+        let Some(f) = self.friend_of(id) else { return false };
         f.send_reliably(|seq| Message::Game { seq, text: text.to_owned() }, now, out)
     }
 
-    /// Invites the friend with gamer id `id` to this player's session: its
-    /// lobby and session go with it when the presence does not tell them.
+    /// Invites the friend with gamer id `id` to this player's session.
     fn send_invite(&mut self, id: u64, lobby: Option<String>, now: Instant, out: &mut Out) -> bool {
+        let Some(key) = self.friend_of(id).map(|f| f.key) else { return false };
+        self.invite(&key, lobby, now, out)
+    }
+
+    /// Invites friend `key` to this player's session: its lobby and session
+    /// go with it when the presence does not tell them.
+    fn invite(&mut self, key: &Key, lobby: Option<String>, now: Instant, out: &mut Out) -> bool {
         let session = if self.joinable { None } else { self.local.session.clone() };
         let lobby = if self.joinable { None } else { lobby };
-        let Some(f) = self.friends.values_mut().find(|f| f.id == id) else { return false };
+        let Some(f) = self.friends.get_mut(key) else { return false };
         log::info!("friends: inviting {}", f.name);
         f.send_reliably(|seq| Message::Invite { seq, lobby, session }, now, out)
     }
@@ -1745,7 +1780,7 @@ pub fn snapshot() -> Snapshot {
                     .map(|r| RecentInfo {
                         key: crypto::hex(&r.key),
                         name: r.name.clone(),
-                        here: s.met.iter().any(|(k, _)| *k == r.key),
+                        here: s.met.iter().any(|(k, ..)| *k == r.key),
                         asked: s.asked.iter().any(|a| a.player.as_ref().is_some_and(|(k, _)| *k == r.key)),
                     })
                     .collect()
@@ -1885,10 +1920,7 @@ pub fn follow(key: &str) {
 pub fn invite(key: &str) {
     let Some(key) = crypto::unhex::<32>(key) else { return };
     let lobby = game_lobby();
-    with(|s, out| {
-        let id = s.friends.get(&key).map_or(0, |f| f.id);
-        s.send_invite(id, lobby, Instant::now(), out);
-    });
+    with(|s, out| s.invite(&key, lobby, Instant::now(), out));
 }
 
 /// The lobby this player's session is in: a friend's it joined, or its
@@ -1942,7 +1974,7 @@ pub(crate) fn game_friends() -> Vec<GameFriend> {
 }
 
 pub(crate) fn is_friend(id: u64) -> bool {
-    id != 0 && with(|s, _| s.friends.values().any(|f| f.id == id)).unwrap_or(false)
+    with(|s, _| s.friend_of(id).is_some()).unwrap_or(false)
 }
 
 /// Sends the game's event to the friends among `ids`: how many it went to.
@@ -1963,7 +1995,7 @@ pub(crate) fn set_session(session: Option<String>) {
 /// The session a friend (gamer id) plays in, as it says or as its invite
 /// does.
 pub(crate) fn session_of(id: u64) -> Option<String> {
-    with(|s, _| s.friends.values().find(|f| f.id == id)?.session()).flatten()
+    with(|s, _| s.friend_of(id)?.session()).flatten()
 }
 
 /// Gets ready to join a friend (gamer id): its lobbies, its players
@@ -1972,7 +2004,7 @@ pub(crate) fn session_of(id: u64) -> Option<String> {
 /// (the friend's lobby is the friend's to share).
 pub(crate) fn reach(id: u64, joining: bool) {
     let target = with(|s, _| {
-        let f = s.friends.values().find(|f| f.id == id)?;
+        let f = s.friend_of(id)?;
         let addr = f.transport.as_ref()?.addr;
         let mut lobbies = f.presence.as_ref().filter(|p| p.playing == Playing::Online)?.lobbies.clone();
         lobbies.extend(f.invited.as_ref().and_then(|i| i.lobby.clone()));
@@ -1992,7 +2024,7 @@ pub(crate) fn reach(id: u64, joining: bool) {
 /// Asks a player met (by its gamer id, as the game's player list names it)
 /// to be friends: false when it is not one met (another kind of player).
 pub(crate) fn ask_gamer(id: u64) -> bool {
-    let key = with(|s, _| s.recent.iter().find(|r| r.id == id && s.met.iter().any(|(k, _)| *k == r.key)).map(|r| r.key));
+    let key = with(|s, _| s.met_gamer(id));
     match key.flatten() {
         Some(key) => {
             ask_player(&crypto::hex(&key));
@@ -2040,7 +2072,7 @@ pub(crate) fn session_changed() {
 /// Whether friend `id` (gamer id) invited this player to its session a few
 /// minutes ago at most.
 pub(crate) fn invited_by(id: u64) -> bool {
-    with(|s, _| s.friends.values().any(|f| f.id == id && f.invited.as_ref().is_some_and(|i| i.at.elapsed() < INVITED)))
+    with(|s, _| s.friend_of(id).is_some_and(|f| f.invited.as_ref().is_some_and(|i| i.at.elapsed() < INVITED)))
         .unwrap_or(false)
 }
 
