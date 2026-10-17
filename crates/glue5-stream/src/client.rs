@@ -135,6 +135,9 @@ pub struct Client {
     fill: AtomicBool,
     complete: AtomicBool,
     no_room: AtomicBool,
+    /// Emptying files made no room the last time: none is emptied until the
+    /// volume has room again.
+    no_gain: AtomicBool,
     /// A copy from an earlier run was tried without the server.
     tried_offline: AtomicBool,
     /// The boot set's progress, counted at most twice a second (the UI asks
@@ -247,6 +250,7 @@ impl Client {
             fill: AtomicBool::new(false),
             complete: AtomicBool::new(false),
             no_room: AtomicBool::new(false),
+            no_gain: AtomicBool::new(false),
             tried_offline: AtomicBool::new(false),
             boot: Mutex::new(None),
         });
@@ -866,7 +870,7 @@ impl Client {
             && !self.fill.load(Ordering::Acquire)
             && !self.complete.load(Ordering::Acquire)
         {
-            r.cache.evict(FLOOR + ROOM);
+            self.empty(r, FLOOR + ROOM);
             result = r.cache.write(id, off, data);
         }
         if let Err(e) = result {
@@ -937,10 +941,27 @@ impl Client {
         if self.fill.load(Ordering::Acquire) || self.complete.load(Ordering::Acquire) {
             return;
         }
-        if let Some(free) = r.cache.free_space()
-            && free < FLOOR
+        match r.cache.free_space() {
+            Some(free) if free < FLOOR => self.empty(r, FLOOR + ROOM - free),
+            _ => self.no_gain.store(false, Ordering::Release),
+        }
+    }
+
+    /// Empties files for `want` bytes, unless that made no room the last
+    /// time: something else fills the volume, or the system keeps the space
+    /// (snapshots); emptying on would give away the whole copy, the packs
+    /// too, for nothing.
+    fn empty(&self, r: &Ready, want: u64) {
+        if self.no_gain.load(Ordering::Acquire) {
+            return;
+        }
+        let before = r.cache.free_space();
+        if r.cache.evict(want) > 0
+            && let (Some(before), Some(after)) = (before, r.cache.free_space())
+            && after <= before
         {
-            r.cache.evict(FLOOR + ROOM - free);
+            log::warn!("stream cache: emptying files made no room: none emptied until the volume has room again");
+            self.no_gain.store(true, Ordering::Release);
         }
     }
 
