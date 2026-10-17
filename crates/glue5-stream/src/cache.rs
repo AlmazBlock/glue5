@@ -75,6 +75,8 @@ struct Slot {
     touched: AtomicU32,
     /// One of a pack's files: every start needs it (without the server too).
     pack: bool,
+    /// Holds a part of the boot set: every start reads it.
+    boot: AtomicBool,
     dirty: AtomicBool,
 }
 
@@ -123,6 +125,7 @@ impl Cache {
                 last_used: AtomicU32::new(last_used),
                 touched: AtomicU32::new(0),
                 pack: crate::pack::kind_of(catalog, slots.len()).is_some(),
+                boot: AtomicBool::new(false),
                 dirty: AtomicBool::new(false),
             };
             used += slot.bytes();
@@ -488,15 +491,24 @@ impl Cache {
         s.touched.store(ms + 1, Ordering::Relaxed);
     }
 
+    /// File `id` holds a part of the boot set: it is emptied after the
+    /// others (see [`Cache::evict`]).
+    pub fn keep_longer(&self, id: u32) {
+        self.slots[id as usize].boot.store(true, Ordering::Relaxed);
+    }
+
     /// Empties the files used longest ago until `want` bytes are freed:
     /// those of earlier runs first, then this run's, least recently used
-    /// first; the packs' files last (every start needs them, and a start
-    /// without the server cannot have them again). Returns the bytes freed.
+    /// first; the boot set's files after them (every start reads them, and
+    /// they are read first: least recently used, they went first), the
+    /// packs' files last (every start needs them, and a start without the
+    /// server cannot have them again). Returns the bytes freed.
     pub fn evict(&self, want: u64) -> u64 {
         let mut order: Vec<u32> = (0..self.slots.len() as u32).filter(|&i| self.slots[i as usize].bytes() > 0).collect();
         order.sort_by_key(|&i| {
             let s = &self.slots[i as usize];
-            (s.pack, s.last_used.load(Ordering::Relaxed), s.touched.load(Ordering::Relaxed))
+            let tier = if s.pack { 2 } else { s.boot.load(Ordering::Relaxed) as u8 };
+            (tier, s.last_used.load(Ordering::Relaxed), s.touched.load(Ordering::Relaxed))
         });
         // Their blocks go first, readers and writers kept away until the
         // files are emptied.
@@ -728,6 +740,30 @@ mod tests {
         assert!(!c.has(0, 0, 0) && c.complete(2));
         assert_eq!(c.evict(1), 10);
         assert!(!c.complete(2));
+        let _ = clear(&root);
+    }
+
+    /// The boot set's files go after the run's others, though read first.
+    #[test]
+    fn evicts_the_boot_set_after_the_others() {
+        let root = std::env::temp_dir().join(format!("glue5-cache-boot-{}", std::process::id()));
+        let _ = clear(&root);
+        let entries = vec![
+            Entry { path: "data/x64/boot.rpf".into(), size: 2 * BLOCK, mtime: 1 },
+            Entry { path: "data/x64/other.rpf".into(), size: 2 * BLOCK, mtime: 1 },
+            Entry { path: "data/common/data/c.xml".into(), size: 10, mtime: 1 },
+        ];
+        let c = Cache::open(&root, &Catalog::new("x".into(), entries, 3)).unwrap();
+        c.keep_longer(0);
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        c.write_whole(2, b"<c>hi</c>!").unwrap();
+        c.write(0, 0, &vec![1; 2 * BLOCK as usize]).unwrap();
+        pause();
+        c.write(1, 0, &vec![2; 2 * BLOCK as usize]).unwrap();
+        assert_eq!(c.evict(1), 2 * BLOCK);
+        assert!(c.has(0, 0, 1) && !c.has(1, 0, 0) && c.complete(2));
+        assert_eq!(c.evict(1), 2 * BLOCK);
+        assert!(!c.has(0, 0, 0) && c.complete(2));
         let _ = clear(&root);
     }
 

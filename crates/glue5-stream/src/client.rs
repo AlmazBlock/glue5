@@ -752,6 +752,7 @@ impl Client {
         let mut boot_runs: HashMap<u32, Vec<usize>> = HashMap::new();
         for (k, &(id, _, _)) in boot.iter().enumerate() {
             boot_runs.entry(id).or_default().push(k);
+            cache.keep_longer(id);
         }
         let ready = Ready {
             catalog,
