@@ -98,14 +98,23 @@ struct Args {
     /// No rendering at all.
     #[arg(long)]
     no_gpu: bool,
-    /// The game directory.
-    #[arg(long, value_name = "DIR", env = "GLUE5_GAME_DIR")]
-    game: PathBuf,
+    /// The game directory (not with --server).
+    #[arg(long, value_name = "DIR", env = "GLUE5_GAME_DIR", required_unless_present = "server")]
+    game: Option<PathBuf>,
     /// Stream the game from a server (host or host:port, see glue5-serve)
     /// instead of --game; the copy is kept in the user directory's
     /// `stream`, and is used again by the next run.
     #[arg(long, value_name = "ADDR")]
     server: Option<String>,
+}
+
+/// Ends the run: the stream's index saved first (the next run starts from
+/// what this one received).
+fn quit(stream: Option<&glue5_stream::Client>, code: i32) -> ! {
+    if let Some(client) = stream {
+        client.flush();
+    }
+    std::process::exit(code)
 }
 
 fn parse_size(size: &str) -> Result<(u32, u32)> {
@@ -157,7 +166,7 @@ fn main() -> Result<()> {
         _ => None,
     };
     let user_dir = args.user_dir.unwrap_or_else(|| std::env::temp_dir().join("glue5-headless"));
-    let (mut game_dir, low) = (args.game, args.low);
+    let (mut game_dir, low) = (args.game.unwrap_or_default(), args.low);
     let stream = match args.server {
         Some(server) => {
             let client = glue5_stream::Client::start(glue5_stream::Options {
@@ -219,7 +228,7 @@ fn main() -> Result<()> {
     let game = glue5_runtime::start(
         glue5_runtime::Config {
             game_dir,
-            stream,
+            stream: stream.clone(),
             user_dir,
             width: args.size.0,
             height: args.size.1,
@@ -283,18 +292,18 @@ fn main() -> Result<()> {
         let buttons = presses.iter().filter(|(at, _)| (*at..at + HOLD).contains(&t)).fold(0, |b, (_, bits)| b | bits);
         input::set_gamepad(0, Gamepad { connected: true, buttons, right: spin, ..Default::default() });
         if args.run_for.is_some_and(|limit| t >= limit) {
-            std::process::exit(0);
+            quit(stream.as_deref(), 0);
         }
         if let Some(exit) = glue5_runtime::exit::requested() {
             log::info!("the engine asked for {exit:?} at {t:.1} s");
-            std::process::exit(0);
+            quit(stream.as_deref(), 0);
         }
         if glue5_runtime::tour::finished() {
             log::info!("tour: done at {t:.1} s");
-            std::process::exit(0);
+            quit(stream.as_deref(), 0);
         }
         if glue5_runtime::exit::failed().is_some() {
-            std::process::exit(1);
+            quit(stream.as_deref(), 1);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
