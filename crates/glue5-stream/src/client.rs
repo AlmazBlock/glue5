@@ -862,19 +862,31 @@ impl Client {
                     read_exact_retrying(&mut reader, &mut buf[..h.len as usize], SILENCE)?;
                     last_data = Instant::now();
                     self.stats.received.fetch_add(h.len as u64, Ordering::Relaxed);
-                    if crc(&buf[..h.len as usize]) != h.crc {
-                        // Not kept: the request is asked again when it ends.
-                        log::warn!("stream: a damaged chunk of request {} (offset {}): asked again", h.req, h.off);
-                        corrupt.push(h.req);
+                    // The header has no checksum of its own: a chunk is kept
+                    // only within its request's file and range (one stored
+                    // elsewhere would stay wrong in the copy). One of a request
+                    // that ended was answered twice (asked again at a
+                    // reconnect): not needed.
+                    let fits = self.inflight.lock().unwrap().reqs.get(&h.req).map(|q| {
+                        let end = ((q.last + 1) * BLOCK).min(r.cache.size(q.file));
+                        q.file == h.file && h.off >= q.first * BLOCK && h.off.checked_add(h.len as u64).is_some_and(|e| e <= end)
+                    });
+                    if fits.is_none() {
                         continue;
                     }
-                    if (h.file as usize) < r.cache.len() {
-                        self.store(r, h.file, h.off, &buf[..h.len as usize]);
-                        since_check += h.len as u64;
-                        if since_check >= 64 << 20 {
-                            since_check = 0;
-                            self.make_room(r);
+                    if crc(&buf[..h.len as usize]) != h.crc || fits == Some(false) {
+                        // Not kept: the request is asked again when it ends.
+                        log::warn!("stream: a damaged chunk of request {} (offset {}): asked again", h.req, h.off);
+                        if !corrupt.contains(&h.req) {
+                            corrupt.push(h.req);
                         }
+                        continue;
+                    }
+                    self.store(r, h.file, h.off, &buf[..h.len as usize]);
+                    since_check += h.len as u64;
+                    if since_check >= 64 << 20 {
+                        since_check = 0;
+                        self.make_room(r);
                     }
                 }
                 END => {

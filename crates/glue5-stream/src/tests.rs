@@ -553,6 +553,41 @@ fn a_quiet_connection_is_not_taken_for_dead() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// A chunk whose header was damaged on the way (it has no checksum of its
+/// own) is not stored where the header says, outside its request.
+#[test]
+fn keeps_no_chunk_outside_its_request() {
+    let dir = temp("misplaced");
+    let data = noise(1 << 20, 23);
+    fs::create_dir_all(dir.join("data")).unwrap();
+    fs::write(dir.join("data/a.rpf"), &data).unwrap();
+    fs::create_dir_all(dir.join(format!("b/{BUILD}/shaders"))).unwrap();
+    fs::write(dir.join(format!("b/{BUILD}/shaders/index.json")), b"{}").unwrap();
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    // The first chunk of a.rpf comes with another offset.
+    let once = AtomicBool::new(false);
+    let tamper: Tamper = Arc::new(move |h: &mut Header| {
+        if h.kind == DATA && h.file == 0 && h.off == 0 && !once.swap(true, Ordering::AcqRel) {
+            h.off = 128 << 10;
+        }
+    });
+    let proxy = Proxy::start(server.addr(), Some(tamper));
+    let root = temp("misplaced-copy");
+    let client = Client::start(Options { server: proxy.addr.to_string(), root: root.clone(), build: BUILD.into(), low_memory: false });
+    wait_ready(&client);
+    assert_eq!(client.find("data/a.rpf"), Some(0));
+    let mut buf = vec![0u8; 4096];
+    assert_eq!(client.read(0, 0, &mut buf), Some(4096));
+    assert_eq!(&buf[..], &data[..4096]);
+    assert_eq!(client.read(0, 128 << 10, &mut buf), Some(4096));
+    assert_eq!(&buf[..], &data[128 << 10..][..4096]);
+    client.stop();
+    drop(proxy);
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn checks_a_server_before_it_is_chosen() {
     let dir = temp("check");
