@@ -687,6 +687,22 @@ impl Service {
         let id = if self.id_taken(id, &key) { 0 } else { id };
         self.blocked.remove(&key);
         self.meetings = Meetings::default();
+        // Its request and this player's to it are answered (both asked at
+        // once, and one said yes).
+        if let Some(r) = self.requests.remove(&key) {
+            self.channels.remove(&r.transport.index);
+        }
+        let mut answered = Vec::new();
+        self.asked.retain_mut(|a| {
+            let theirs = a.player.as_ref().is_some_and(|(k, _)| *k == key) || a.transport.as_ref().is_some_and(|t| t.remote_key == key);
+            if theirs {
+                answered.extend(a.transport.take());
+            }
+            !theirs
+        });
+        for t in answered {
+            self.channels.remove(&t.index);
+        }
         self.friends.entry(key).or_insert(Friend {
             key,
             shared,

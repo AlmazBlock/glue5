@@ -527,3 +527,26 @@ fn game_events_as_large_as_the_game_s_arrive() {
     // One that a datagram cannot carry (its quotes escaped): not sent.
     assert!(!a.s.send_game(2000, &"\"".repeat(1000), now, &mut Out::default()));
 }
+
+#[test]
+fn asking_each_other_at_once_leaves_no_request() {
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    let ask = |asker: &mut Player, owner: &mut Player, now: &mut Instant| {
+        asker.s.asked.push(Ask::new(owner.code(), None));
+        let mut out = Out::default();
+        asker.s.found(crypto::code_key(&owner.code()), owner.addr, *now, &mut out);
+        let from = asker.addr;
+        run(&mut [&mut *asker, &mut *owner], out, from, now, 4, &keep);
+        assert!(owner.s.requests.get(&asker.key()).is_some_and(|r| r.asked));
+    };
+    ask(&mut a, &mut b, &mut now);
+    ask(&mut b, &mut a, &mut now);
+    let mut out = Out::default();
+    a.s.answer(&b.key(), true, now, &mut out);
+    let from = a.addr;
+    run(&mut [&mut a, &mut b], out, from, &mut now, 4, &keep);
+    assert!(a.connected_to(&b) && b.connected_to(&a));
+    assert!(a.s.requests.is_empty() && a.s.asked.is_empty());
+    assert!(b.s.requests.is_empty() && b.s.asked.is_empty());
+}
