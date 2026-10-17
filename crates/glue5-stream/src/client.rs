@@ -853,7 +853,7 @@ impl Client {
                     if h.len > CHUNK {
                         bail!("a chunk of {} bytes", h.len);
                     }
-                    read_exact_retrying(&mut reader, &mut buf[..h.len as usize])?;
+                    read_exact_retrying(&mut reader, &mut buf[..h.len as usize], SILENCE)?;
                     last_data = Instant::now();
                     self.stats.received.fetch_add(h.len as u64, Ordering::Relaxed);
                     if crc(&buf[..h.len as usize]) != h.crc {
@@ -1253,19 +1253,23 @@ fn next_header(r: &mut impl Read) -> io::Result<Option<Header>> {
         }
         Err(e) => return Err(e),
     }
-    read_exact_retrying(r, &mut b[1..])?;
+    read_exact_retrying(r, &mut b[1..], SILENCE)?;
     Ok(Some(Header::decode(&b)))
 }
 
-/// `read_exact` through the reader's timeouts (a chunk may arrive slowly).
-fn read_exact_retrying(r: &mut impl Read, mut buf: &mut [u8]) -> io::Result<()> {
-    let started = Instant::now();
+/// `read_exact` through the reader's timeouts (a chunk may arrive slowly):
+/// fails after `silence` without a byte.
+fn read_exact_retrying(r: &mut impl Read, mut buf: &mut [u8], silence: Duration) -> io::Result<()> {
+    let mut last = Instant::now();
     while !buf.is_empty() {
         match r.read(buf) {
             Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-            Ok(n) => buf = &mut buf[n..],
+            Ok(n) => {
+                buf = &mut buf[n..];
+                last = Instant::now();
+            }
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {
-                if started.elapsed() > SILENCE {
+                if last.elapsed() > silence {
                     return Err(e);
                 }
             }
@@ -1273,6 +1277,30 @@ fn read_exact_retrying(r: &mut impl Read, mut buf: &mut [u8]) -> io::Result<()> 
         }
     }
     Ok(())
+}
+
+/// A chunk that comes slowly, but comes, is taken whole (a link of a few
+/// KB/s takes longer than the silence for 64 KB); one that stops is not.
+#[test]
+fn takes_a_slow_chunk() {
+    // A byte every 30 ms, timeouts in between.
+    struct Slow(Instant);
+    impl Read for Slow {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            thread::sleep(Duration::from_millis(10));
+            if self.0.elapsed() < Duration::from_millis(30) {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            self.0 = Instant::now();
+            buf[0] = 1;
+            Ok(1)
+        }
+    }
+    let mut buf = [0u8; 10];
+    read_exact_retrying(&mut Slow(Instant::now()), &mut buf, Duration::from_millis(100)).unwrap();
+    assert_eq!(buf, [1; 10]);
+    let mut slower = Slow(Instant::now() + Duration::from_millis(200));
+    assert!(read_exact_retrying(&mut slower, &mut buf, Duration::from_millis(100)).is_err());
 }
 
 #[test]
