@@ -7,6 +7,9 @@
 //!   friends and players menus, made to fail, are mended (`MENU_PATCHES`,
 //!   `card_data_init`), and what they wait for from Rockstar (crews, stats)
 //!   comes at once, empty;
+//! - "Send Friend Request" on a player asks it (a player met, p2p.rs), and
+//!   "Join Friends" finds the friends' sessions in their presence, as
+//!   Social Club's presence queries did;
 //! - each player tells its friends its session (the engine publishes it to
 //!   Social Club only, and not on a LAN); joining a friend's session (the
 //!   app's "Join", a friend's invite) goes the way the pause menu's "Join"
@@ -19,6 +22,8 @@
 //!   the friends' channel, and the ones a friend sends come in where Social
 //!   Club's would (`ProcessGameEvent`), once checked: only invites and their
 //!   answers, really from that friend.
+//!
+//! Which lobby the player's session is in, for its kind, is online.rs's.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -40,6 +45,8 @@ const RELATIONSHIP_FRIEND: u32 = 32;
 const FRIEND_FLAGS: u64 = 68;
 const FRIEND_IN_SESSION: u64 = 376;
 const FRIEND_NAME: usize = 32;
+/// `InviteFlags::IF_AllowPrivate`: an invite's, into a private session.
+const IF_ALLOW_PRIVATE: u32 = 32;
 /// `netStatus`: state (3: succeeded), result.
 const SUCCEEDED: u32 = 3;
 /// `CNetworkSession*`, and its game `snSession*`.
@@ -170,6 +177,9 @@ pub(crate) unsafe fn update(env: *mut Env) {
         let id = session.as_ref().map(|(id, _)| *id);
         if state.session.map(|(s, _)| s) != id {
             state.session = id.map(|id| (id, now));
+            if id.is_some() {
+                super::session_changed();
+            }
         }
         super::set_session(session.map(|(_, t)| t));
     }
@@ -177,10 +187,11 @@ pub(crate) unsafe fn update(env: *mut Env) {
     if let Some(id) = super::following() {
         unsafe { follow(env, &mut state, id, now) };
     }
-    // Friends' invites to their sessions: the game asks whether to join.
-    let invites = super::take_invites();
+    // Friends' sessions the player chose to join: the game asks whether to
+    // leave this one.
+    let joins = super::take_joins();
     if let Some((ours, _)) = state.session {
-        for id in invites {
+        for id in joins {
             unsafe { join(env, ours, id, true, false) };
         }
     }
@@ -254,10 +265,12 @@ unsafe fn join(env: *mut Env, ours: u64, id: u64, ask: bool, confirmed: bool) ->
                 return None;
             }
             log::info!("friends: joining a friend's session{}", if confirmed { "" } else { " (if the player says so)" });
-            super::reach(id);
+            super::reach(id, true);
             m.set_u64(handle, id);
             m.set_u8(handle + 8, 3);
-            orig::join_request(env, info, LOCAL_GAMER, handle, 0);
+            // Invited, into a private session too, as an accepted invite is.
+            let flags = if super::invited_by(id) { IF_ALLOW_PRIVATE } else { 0 };
+            orig::join_request(env, info, LOCAL_GAMER, handle, flags);
             if confirmed {
                 // Asked for by the player: no "join?" alert.
                 orig::invite_auto_confirm(env);
@@ -484,6 +497,79 @@ pub(crate) unsafe extern "C" fn clan_primary(
     1
 }
 
+/// Hook for `CLiveManager::AddFriend(rlGamerHandle const&, char const*)`
+/// (the message is gone from the compiled function): "Send Friend
+/// Request" on a player of the session, which Social Club's overlay took:
+/// a friend request to it, when it is a player met.
+pub(crate) unsafe extern "C" fn add_friend(env: *mut Env, handle: u64) -> u32 {
+    let m = unsafe { Mem::of(env) };
+    let sent = handle != 0 && super::ask_gamer(m.u64(handle));
+    log::info!("friends: a friend request from the game's menu{}", if sent { "" } else { ": not a player met" });
+    sent as u32
+}
+
+/// Hook for `rage::rlPresence::Query(int, char const*, char const*, int,
+/// int, char*, unsigned int, char**, unsigned int*, unsigned int*,
+/// netStatus*)` (the offset is gone from the compiled function): Social
+/// Club's queries of presence; "SessionByGamerHandle" is how "Join
+/// Friends" (and a public session's matchmaking, first) finds friends'
+/// sessions: answered from the friends' presence, as Social Club would,
+/// `{"_id": <handle>, "gsinfo": <session info>}` per friend whose session
+/// may be joined, its lobby reached.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe extern "C" fn presence_query(
+    env: *mut Env,
+    gamer: u32,
+    name: u64,
+    params: u64,
+    count: u32,
+    buf: u64,
+    size: u32,
+    records: u64,
+    found: u64,
+    total: u64,
+    status: u64,
+) -> u32 {
+    let m = unsafe { Mem::of(env) };
+    if name == 0 || bounded_str(m, name, 64) != "SessionByGamerHandle" {
+        return unsafe { orig::presence_query(env, gamer, name, params, count, buf, size, records, found, total, status) };
+    }
+    // `@ghandle,"SC <id>","SC <id>"...`: the friends asked about.
+    let params = if params != 0 { bounded_str(m, params, 4096) } else { String::new() };
+    log::debug!("friends: the game's query for sessions: {params}");
+    let (mut at, end, mut n) = (buf, buf + u64::from(size), 0u64);
+    // For "Join Friends", the session joined is a friend's.
+    let joining = super::finding_friends();
+    for handle in params.split(',').filter(|h| !h.starts_with('@')).map(|h| h.trim().trim_matches('"')) {
+        if n >= u64::from(count) || records == 0 {
+            break;
+        }
+        let Some(id) = handle.rsplit(' ').next().and_then(|id| id.parse::<u64>().ok()) else { continue };
+        let Some(session) = super::session_of(id) else { continue };
+        let record = serde_json::json!({ "_id": handle, "gsinfo": session }).to_string();
+        if at + record.len() as u64 + 1 > end {
+            break;
+        }
+        super::reach(id, joining);
+        m.bytes_mut(at, record.len()).copy_from_slice(record.as_bytes());
+        m.set_u8(at + record.len() as u64, 0);
+        m.set_u64(records + n * 8, at);
+        at += record.len() as u64 + 1;
+        n += 1;
+    }
+    log::info!("friends: the game looks for friends' sessions: {n}");
+    for out in [found, total] {
+        if out != 0 {
+            m.set_u32(out, n as u32);
+        }
+    }
+    if status != 0 {
+        m.set_u32(status, SUCCEEDED);
+        m.set_u32(status + 4, 0);
+    }
+    1
+}
+
 /// Hook for `rage::rlFriendsManager::IsFriendsWith(int, rlGamerHandle
 /// const&)`: the invites a player gets are from friends.
 pub(crate) unsafe extern "C" fn friends_with(env: *mut Env, gamer: u32, handle: u64) -> u32 {
@@ -614,7 +700,7 @@ pub(crate) unsafe extern "C" fn session_by_gamer(
         m.set_u32(status + 4, 0);
     }
     log::info!("friends: joining a friend from its card");
-    super::reach(id);
+    super::reach(id, true);
     1
 }
 
@@ -636,7 +722,7 @@ pub(crate) unsafe extern "C" fn invite_accept(
 ) {
     let m = unsafe { Mem::of(env) };
     if inviter != 0 {
-        super::reach(m.u64(inviter));
+        super::reach(m.u64(inviter), true);
     }
     unsafe { orig::invite_accept(env, info, gamer, inviter, a, b, c, d, e, f) }
 }
@@ -644,6 +730,8 @@ pub(crate) unsafe extern "C" fn invite_accept(
 pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.friends_read = Some(friends_read);
     hooks.friends_with = Some(friends_with);
+    hooks.add_friend = Some(add_friend);
+    hooks.presence_query = Some(presence_query);
     hooks.profile_stats_read = Some(profile_stats_read);
     hooks.card_data_init = Some(card_data_init);
     hooks.clan_service_ready = Some(clan_service_ready);

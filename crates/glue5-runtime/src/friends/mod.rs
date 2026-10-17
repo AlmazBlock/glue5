@@ -104,9 +104,33 @@ pub(crate) struct Presence {
     /// The lobbies it plays in, which a friend can join ("" is everyone's).
     #[serde(default)]
     pub lobbies: Vec<String>,
-    /// The game's session, as the engine writes its info (game.rs).
+    /// The game's session, as the engine writes its info (game.rs), and
+    /// who may join it.
     #[serde(default)]
     pub session: Option<String>,
+    #[serde(default)]
+    pub kind: SessionKind,
+}
+
+/// GTA Online's sessions, as its pause menu offers them: who may join.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionKind {
+    /// Anyone (matchmaking).
+    #[default]
+    Public,
+    /// Friends, without an invite.
+    Friends,
+    /// Invited players only (invite only, crew).
+    Closed,
+    /// The player alone.
+    Solo,
+}
+
+impl SessionKind {
+    /// Whether friends join it without an invite.
+    pub fn joinable(self) -> bool {
+        matches!(self, SessionKind::Public | SessionKind::Friends)
+    }
 }
 
 impl Presence {
@@ -142,8 +166,16 @@ enum Message {
     /// one), its sequence number.
     Game { seq: u32, text: String },
     /// "Join me": an invite to the sender's session in GTA Online (the
-    /// platform's invites, which Social Club's overlay showed).
-    Invite { seq: u32 },
+    /// platform's invites, which Social Club's overlay showed), with its
+    /// lobby and session when its presence does not tell them (a session
+    /// for invited players only).
+    Invite {
+        seq: u32,
+        #[serde(default)]
+        lobby: Option<String>,
+        #[serde(default)]
+        session: Option<String>,
+    },
     Ack { seq: u32 },
     Ping,
 }
@@ -165,6 +197,9 @@ struct Store {
     /// Friend codes this player asked with, not answered yet.
     #[serde(default)]
     asked: Vec<String>,
+    /// Players met in lobbies.
+    #[serde(default)]
+    recent: Vec<StoredFriend>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -207,15 +242,31 @@ struct Friend {
     next_seq: u32,
     /// Game messages from it already passed on (repeated ones are not).
     seen: VecDeque<u32>,
-    /// When it last invited this player to its session.
-    invited: Option<Instant>,
+    /// Its invite to its session, the latest.
+    invited: Option<Invited>,
     /// Addresses tried for it, when.
     contacted: HashMap<SocketAddrV4, Instant>,
+}
+
+/// An invite from a friend to its session.
+struct Invited {
+    at: Instant,
+    /// Where to join it, when the friend's presence does not say.
+    lobby: Option<String>,
+    session: Option<String>,
 }
 
 impl Friend {
     fn connected(&self) -> bool {
         self.transport.is_some()
+    }
+
+    /// The session it plays in, as it says (when friends may join it) or
+    /// as its invite does.
+    fn session(&self) -> Option<String> {
+        self.transport.as_ref()?;
+        let told = self.presence.as_ref().filter(|p| p.playing == Playing::Online).and_then(|p| p.session.clone());
+        told.or_else(|| self.invited.as_ref().filter(|i| i.at.elapsed() < INVITED)?.session.clone())
     }
 
     /// Sends a message that is acknowledged (sent again until it is):
@@ -255,23 +306,85 @@ struct Request {
     asked: bool,
 }
 
-/// A request this player made with a friend's code.
+/// A request this player made: with a friend code, or to a player met in a
+/// lobby (whose key its card gave).
 struct Ask {
-    code: String,
+    /// The code, or the player's key (hex).
+    id: String,
+    /// The player met: its key and name.
+    player: Option<(Key, String)>,
     transport: Option<Transport>,
     asked: Option<Instant>,
     declined: bool,
     contacted: HashMap<SocketAddrV4, Instant>,
 }
 
+impl Ask {
+    fn new(id: String, player: Option<(Key, String)>) -> Ask {
+        Ask { id, player, transport: None, asked: None, declined: false, contacted: HashMap::new() }
+    }
+
+    /// The friend code asked with.
+    fn code(&self) -> Option<&str> {
+        self.player.is_none().then_some(self.id.as_str())
+    }
+}
+
+/// A player met in a lobby.
+struct Recent {
+    key: Key,
+    name: String,
+    /// Its gamer id.
+    id: u64,
+    /// When it was last met (seconds since 1970).
+    seen: u64,
+}
+
+impl Recent {
+    fn from_stored(r: &StoredFriend) -> Option<Recent> {
+        Some(Recent { key: crypto::unhex(&r.key)?, name: clean_name(&r.name), id: r.id, seen: r.since })
+    }
+}
+
+/// When the start's summary is told.
+const SUMMARY: Duration = Duration::from_secs(20);
+
+/// How long the game takes to join a friend's session, at most.
+const JOINING: Duration = Duration::from_secs(120);
+
+/// How long a new friend is new (seconds): no "online" notice.
+const JUST_MADE: u64 = 10;
+
+/// Players met kept, at most.
+const MAX_RECENT: usize = 50;
+
+/// What the application tells the player, as Social Club's notifications
+/// did: the friend's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// At the start, once friends had the time to be found: how many are
+    /// online, how many ask to be friends.
+    Summary { online: usize, requests: usize },
+    /// A friend started playing (not the ones there at the start).
+    Online(String),
+    /// A friend stopped.
+    Offline(String),
+    /// Someone asks to be friends.
+    Request(String),
+    /// A friend invites this player to its session.
+    Invite(String),
+    /// A player asked said yes.
+    Accepted(String),
+}
+
 /// Who a channel or handshake is with.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Owner {
     Friend(Key),
-    /// Someone asking with this player's code (its key once known).
+    /// Someone asking this player (its key once known).
     Asker(Option<Key>),
-    /// The owner of a code this player asks with.
-    Code(String),
+    /// Someone this player asks (`Ask::id`).
+    Asking(String),
 }
 
 /// An event for the game: a friend's invite and the like.
@@ -307,9 +420,31 @@ pub(crate) struct Service {
     events: VecDeque<GameEvent>,
     /// A friend to join in its session (game.rs), since when.
     follow: Option<(Key, Instant)>,
-    /// Friends who invited this player to their sessions, for the game
-    /// (gamer ids).
-    invites: VecDeque<u64>,
+    /// Friends whose sessions the player chose to join, for the game (gamer
+    /// ids).
+    joins: VecDeque<u64>,
+    /// Players met in lobbies, the latest first, and the ones in them now
+    /// (their keys and addresses).
+    recent: Vec<Recent>,
+    met: Vec<(Key, SocketAddrV4)>,
+    /// The newest handshake time from each player met who asked.
+    stranger_times: HashMap<Key, u64>,
+    /// Whether friends may join this player's session without an invite (a
+    /// public or friends' session), and the name its card was last given.
+    joinable: bool,
+    card: Option<String>,
+    /// The friend's lobby whose session this player joined, where its
+    /// invites lead (its own lobby otherwise); the one whose session the
+    /// game is joining, since when; whether the game looks for a friend's
+    /// session to join ("Join Friends").
+    joined: Option<String>,
+    joining: Option<(String, Instant)>,
+    finding: bool,
+    /// What happened that the player should know, for the application, and
+    /// whether the summary of the start was told.
+    notices: VecDeque<Notice>,
+    started: Instant,
+    summarized: bool,
     /// Bumped at every change the application shows.
     generation: u64,
 }
@@ -360,7 +495,18 @@ impl Service {
             swept: None,
             events: VecDeque::new(),
             follow: None,
-            invites: VecDeque::new(),
+            joins: VecDeque::new(),
+            recent: store.recent.iter().filter_map(Recent::from_stored).collect(),
+            met: Vec::new(),
+            stranger_times: HashMap::new(),
+            joinable: true,
+            card: None,
+            joined: None,
+            joining: None,
+            finding: false,
+            notices: VecDeque::new(),
+            started: Instant::now(),
+            summarized: false,
             generation: 1,
         };
         for f in store.friends {
@@ -370,7 +516,7 @@ impl Service {
         }
         for code in store.asked {
             if let Some(code) = crypto::parse_code(&code) {
-                service.asked.push(Ask { code, transport: None, asked: None, declined: false, contacted: HashMap::new() });
+                service.asked.push(Ask::new(code, None));
             }
         }
         service
@@ -386,7 +532,12 @@ impl Service {
                 .map(|f| StoredFriend { key: crypto::hex(&f.key), name: f.name.clone(), id: f.id, since: f.since })
                 .collect(),
             blocked: self.blocked.iter().map(|k| crypto::hex(k)).collect(),
-            asked: self.asked.iter().filter(|a| !a.declined).map(|a| a.code.clone()).collect(),
+            asked: self.asked.iter().filter(|a| !a.declined).filter_map(|a| Some(a.code()?.to_owned())).collect(),
+            recent: self
+                .recent
+                .iter()
+                .map(|r| StoredFriend { key: crypto::hex(&r.key), name: r.name.clone(), id: r.id, since: r.seen })
+                .collect(),
         };
         let path = self.dir.join(FILE);
         let temp = self.dir.join(format!("{FILE}.new"));
@@ -463,10 +614,14 @@ impl Service {
 
     // ---- what the player tells ----
 
+    /// This player as told to friends: where to join it only when they may
+    /// without an invite.
     fn presence_for_friends(&self, lobbies: Vec<String>) -> Presence {
         let mut p = self.local.clone();
-        p.lobbies = if p.playing == Playing::Online { lobbies } else { Vec::new() };
-        if p.playing != Playing::Online {
+        let open = p.playing == Playing::Online && self.joinable;
+        // The game's lobby, not friends' visited (theirs to share).
+        p.lobbies = if open { lobbies.into_iter().take(1).collect() } else { Vec::new() };
+        if !open {
             p.session = None;
         }
         p
@@ -488,15 +643,38 @@ impl Service {
         if let Some(code) = &self.code {
             keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_CONNECTED }));
         }
-        for a in self.asked.iter().filter(|a| a.transport.is_none() && !a.declined) {
-            keys.push((crypto::code_key(&a.code), dht::Options { announce: false, refresh: LOOKUP_ALONE }));
+        for code in self.asked.iter().filter(|a| a.transport.is_none() && !a.declined).filter_map(Ask::code) {
+            keys.push((crypto::code_key(code), dht::Options { announce: false, refresh: LOOKUP_ALONE }));
         }
         keys
     }
 
-    pub(crate) fn tick(&mut self, now: Instant, lobbies: Vec<String>, port: u16, out: &mut Out) {
+    pub(crate) fn tick(
+        &mut self,
+        now: Instant,
+        lobbies: Vec<String>,
+        players: &[(crate::p2p::Card, SocketAddrV4)],
+        port: u16,
+        out: &mut Out,
+    ) {
         if self.identity.is_none() {
             return;
+        }
+        // The card the players met see.
+        if self.card.as_deref() != Some(self.local.name.as_str()) {
+            let key = *self.identity.as_ref().unwrap().public();
+            crate::p2p::set_card(crate::p2p::Card { gamer: self.local.id, key, name: self.local.name.clone() });
+            self.card = Some(self.local.name.clone());
+        }
+        self.meet(players, now, out);
+        // The friends found by then, and the requests.
+        if !self.summarized && now - self.started > SUMMARY {
+            self.summarized = true;
+            let online = self.friends.values().filter(|f| f.connected()).count();
+            let requests = self.requests.values().filter(|r| r.asked).count();
+            if online + requests > 0 {
+                self.notices.push_back(Notice::Summary { online, requests });
+            }
         }
         // Handshakes not answered.
         self.handshakes.retain(|_, (h, _)| now - h.started < HANDSHAKE);
@@ -513,6 +691,7 @@ impl Service {
             let Some(t) = f.transport.as_mut() else { continue };
             if now - t.heard > SILENCE {
                 log::info!("friends: {} is offline", f.name);
+                self.notices.push_back(Notice::Offline(f.name.clone()));
                 f.presence = None;
                 f.presence_sent = None;
                 let t = f.transport.take();
@@ -603,6 +782,46 @@ impl Service {
         }
     }
 
+    /// The players met in the lobbies: kept as recent players, and reached
+    /// when asked.
+    fn meet(&mut self, players: &[(crate::p2p::Card, SocketAddrV4)], now: Instant, out: &mut Out) {
+        let me = *self.identity.as_ref().unwrap().public();
+        let today = unix();
+        let mut changed = false;
+        self.met = players.iter().map(|(c, a)| (c.key, *a)).collect();
+        for (card, addr) in players {
+            if card.key == me || self.friends.contains_key(&card.key) {
+                continue;
+            }
+            let name = clean_name(&card.name);
+            match self.recent.iter().position(|r| r.key == card.key) {
+                Some(i) => {
+                    let r = &mut self.recent[i];
+                    // Kept again at most every few minutes.
+                    if today.saturating_sub(r.seen) > 300 || r.name != name {
+                        r.seen = today;
+                        r.name = name;
+                        r.id = card.gamer;
+                        changed = true;
+                    }
+                }
+                None => {
+                    self.recent.insert(0, Recent { key: card.key, name, id: card.gamer, seen: today });
+                    changed = true;
+                }
+            }
+            if let Some(i) = self.asked.iter().position(|a| a.player.as_ref().is_some_and(|(k, _)| *k == card.key)) {
+                self.ask_at(i, *addr, now, out);
+            }
+        }
+        if changed {
+            self.recent.sort_by_key(|r| std::cmp::Reverse(r.seen));
+            self.recent.truncate(MAX_RECENT);
+            self.generation += 1;
+            self.save();
+        }
+    }
+
     /// The tags this player looks for: friends not connected, codes asked.
     fn wanted_tags(&self, unix: u64) -> Vec<Tag> {
         if !self.active() {
@@ -611,7 +830,9 @@ impl Service {
         let epoch = crypto::epoch(unix);
         let mut tags: Vec<Tag> =
             self.friends.values().filter(|f| !f.connected()).map(|f| crypto::meeting_tag(&f.shared, epoch)).collect();
-        tags.extend(self.asked.iter().filter(|a| a.transport.is_none() && !a.declined).map(|a| crypto::code_tag(&a.code)));
+        tags.extend(
+            self.asked.iter().filter(|a| a.transport.is_none() && !a.declined).filter_map(Ask::code).map(crypto::code_tag),
+        );
         tags
     }
 
@@ -632,7 +853,7 @@ impl Service {
             self.contact(k, addr, false, now, out);
             return;
         }
-        if let Some(i) = self.asked.iter().position(|a| crypto::code_key(&a.code) == key) {
+        if let Some(i) = self.asked.iter().position(|a| a.code().is_some_and(|c| crypto::code_key(c) == key)) {
             self.ask_at(i, addr, now, out);
         }
     }
@@ -666,18 +887,24 @@ impl Service {
         }
     }
 
-    /// Asks a code's owner, found at `addr`.
+    /// Asks a code's owner, or a player met, found at `addr`.
     fn ask_at(&mut self, i: usize, addr: SocketAddrV4, now: Instant, out: &mut Out) {
         let Some(identity) = self.identity.as_ref() else { return };
         let a = &mut self.asked[i];
-        let busy = self.handshakes.values().any(|(_, o)| *o == Owner::Code(a.code.clone()));
+        let busy = self.handshakes.values().any(|(_, o)| *o == Owner::Asking(a.id.clone()));
         if busy || a.transport.is_some() || a.declined || a.contacted.get(&addr).is_some_and(|t| now - *t < CONTACT) {
             return;
         }
         a.contacted.insert(addr, now);
         a.contacted.retain(|_, t| now - *t < CONTACT * 4);
-        if let Some((h, d)) = Handshake::code(identity, &a.code, addr, now) {
-            self.handshakes.insert(h.index, (h, Owner::Code(a.code.clone())));
+        let handshake = match &a.player {
+            // Its key is known: the friends' handshake, which it answers
+            // for a player of its lobbies.
+            Some((key, _)) => Handshake::friend(identity, key, &unix_ms().to_be_bytes(), addr, now),
+            None => Handshake::code(identity, &a.id, addr, now),
+        };
+        if let Some((h, d)) = handshake {
+            self.handshakes.insert(h.index, (h, Owner::Asking(a.id.clone())));
             out.send.push((addr, d));
         }
     }
@@ -752,7 +979,7 @@ impl Service {
             }
         }
         // The owner of a code asked.
-        if let Some(i) = self.asked.iter().position(|a| tags.contains(&crypto::code_tag(&a.code))) {
+        if let Some(i) = self.asked.iter().position(|a| a.code().is_some_and(|c| tags.contains(&crypto::code_tag(c)))) {
             self.ask_at(i, from, now, out);
         }
     }
@@ -765,8 +992,11 @@ impl Service {
                 let Some((mut h, payload)) = Handshake::answer(identity, pattern, None, index, msg, from, now) else { return };
                 let Some(key) = h.remote_key() else { return };
                 let me = *identity.public();
-                let Some(f) = self.friends.get_mut(&key) else { return };
                 let Ok(time) = <[u8; 8]>::try_from(payload.as_slice()).map(u64::from_be_bytes) else { return };
+                let Some(f) = self.friends.get_mut(&key) else {
+                    self.stranger_asks(key, h, time, from, now, out);
+                    return;
+                };
                 if time <= f.last_time {
                     return;
                 }
@@ -799,6 +1029,29 @@ impl Service {
         }
     }
 
+    /// The friends' handshake from someone who is no friend: a player met in
+    /// one of this player's lobbies (its card has the key, its greetings
+    /// come from that address) asking to be friends; anyone else is not
+    /// answered.
+    fn stranger_asks(&mut self, key: Key, mut h: Handshake, time: u64, from: SocketAddrV4, now: Instant, out: &mut Out) {
+        let met = self.met.contains(&(key, from));
+        if !met || self.blocked.contains(&key) || self.stranger_times.get(&key).is_some_and(|t| time <= *t) {
+            return;
+        }
+        if !self.requests.contains_key(&key) && self.requests.len() >= MAX_REQUESTS {
+            return;
+        }
+        self.stranger_times.insert(key, time);
+        let Some(d) = h.write(&[]) else { return };
+        out.send.push((from, d));
+        let Some(t) = h.into_transport(now) else { return };
+        self.channels.insert(t.index, Owner::Asker(Some(key)));
+        let request = Request { name: String::new(), id: 0, transport: t, asked: false };
+        if let Some(old) = self.requests.insert(key, request) {
+            self.channels.remove(&old.transport.index);
+        }
+    }
+
     /// Message 2 or 3.
     fn on_next(&mut self, from: SocketAddrV4, sender: u32, receiver: u32, msg: &[u8], now: Instant, out: &mut Out) {
         let Some((mut h, owner)) = self.handshakes.remove(&receiver) else { return };
@@ -818,17 +1071,20 @@ impl Service {
         let Some(t) = h.into_transport(now) else { return };
         match owner {
             Owner::Friend(k) if k == key => self.open_friend(key, t, now, out),
-            Owner::Code(code) => {
-                // The owner of the code: a friend already, or asked now.
+            Owner::Asking(id) => {
+                // The one asked: a friend already, or asked now.
                 if self.friends.contains_key(&key) {
-                    self.asked.retain(|a| a.code != code);
+                    self.asked.retain(|a| a.id != id);
                     self.open_friend(key, t, now, out);
                     self.save();
                     return;
                 }
-                let Some(a) = self.asked.iter_mut().find(|a| a.code == code && a.transport.is_none()) else { return };
-                log::info!("friends: reached the owner of a code");
-                self.channels.insert(t.index, Owner::Code(code));
+                let Some(a) = self.asked.iter_mut().find(|a| a.id == id && a.transport.is_none()) else { return };
+                if a.player.as_ref().is_some_and(|(k, _)| *k != key) {
+                    return;
+                }
+                log::info!("friends: reached the one asked");
+                self.channels.insert(t.index, Owner::Asking(id));
                 a.asked = None;
                 a.transport = Some(t);
                 self.generation += 1;
@@ -861,6 +1117,11 @@ impl Service {
         let Some(f) = self.friends.get_mut(&key) else { return };
         if f.transport.is_none() {
             log::info!("friends: {} is online", f.name);
+            // Not the friends there at the start, all at once (the summary),
+            // nor one just made (its request's notices tell it).
+            if self.summarized && unix().saturating_sub(f.since) > JUST_MADE {
+                self.notices.push_back(Notice::Online(f.name.clone()));
+            }
         }
         self.channels.insert(t.index, Owner::Friend(key));
         let previous = f.previous.take();
@@ -886,8 +1147,8 @@ impl Service {
                 t.and_then(|t| t.open(d, from, now))
             }
             Owner::Asker(Some(key)) => self.requests.get_mut(key).and_then(|r| r.transport.open(d, from, now)),
-            Owner::Code(code) => {
-                self.asked.iter_mut().find(|a| a.code == *code).and_then(|a| a.transport.as_mut()).and_then(|t| t.open(d, from, now))
+            Owner::Asking(id) => {
+                self.asked.iter_mut().find(|a| a.id == *id).and_then(|a| a.transport.as_mut()).and_then(|t| t.open(d, from, now))
             }
             Owner::Asker(None) => None,
         };
@@ -895,7 +1156,7 @@ impl Service {
         match owner {
             Owner::Friend(key) => self.on_friend(key, message, now, out),
             Owner::Asker(Some(key)) => self.on_asker(key, message, now, out),
-            Owner::Code(code) => self.on_owner(&code, message, now, out),
+            Owner::Asking(id) => self.on_asked(&id, message, now, out),
             Owner::Asker(None) => {}
         }
     }
@@ -926,16 +1187,16 @@ impl Service {
                 self.events.push_back(GameEvent { from: f.id, name: f.name.clone(), text });
                 self.events.truncate(32);
             }
-            Message::Invite { seq } => {
-                if !f.first_time(seq, out) || f.invited.is_some_and(|t| now - t < INVITE_AGAIN) {
+            Message::Invite { seq, lobby, session } => {
+                if !f.first_time(seq, out) || f.invited.as_ref().is_some_and(|i| now - i.at < INVITE_AGAIN) {
                     return;
                 }
                 log::info!("friends: {} invites this player", f.name);
-                f.invited = Some(now);
+                let bounded = |t: Option<String>, max| t.filter(|t: &String| t.len() <= max);
+                f.invited =
+                    Some(Invited { at: now, lobby: bounded(lobby, MAX_NAME), session: bounded(session, MAX_TEXT) });
+                self.notices.push_back(Notice::Invite(f.name.clone()));
                 self.generation += 1;
-                if self.local.playing == Playing::Online && !self.invites.contains(&f.id) {
-                    self.invites.push_back(f.id);
-                }
             }
             Message::Ack { seq } => f.outbox.retain(|(s, ..)| *s != seq),
             Message::Removed => {
@@ -957,6 +1218,9 @@ impl Service {
         let Some(r) = self.requests.get_mut(&key) else { return };
         if let Message::Request { name, id } = message {
             let name = clean_name(&name);
+            if !r.asked {
+                self.notices.push_back(Notice::Request(name.clone()));
+            }
             if !r.asked || r.name != name {
                 log::info!("friends: {name} asks to be friends");
                 r.name = name;
@@ -968,8 +1232,8 @@ impl Service {
         }
     }
 
-    fn on_owner(&mut self, code: &str, message: Message, now: Instant, out: &mut Out) {
-        let Some(i) = self.asked.iter().position(|a| a.code == code) else { return };
+    fn on_asked(&mut self, id: &str, message: Message, now: Instant, out: &mut Out) {
+        let Some(i) = self.asked.iter().position(|a| a.id == id) else { return };
         match message {
             Message::Accept { name, id } => {
                 let mut a = self.asked.remove(i);
@@ -978,6 +1242,7 @@ impl Service {
                 self.channels.remove(&t.index);
                 if self.add_friend(key, &name, id, unix()) {
                     log::info!("friends: {} said yes", clean_name(&name));
+                    self.notices.push_back(Notice::Accepted(clean_name(&name)));
                     self.open_friend(key, t, now, out);
                 }
                 self.save();
@@ -1021,11 +1286,14 @@ impl Service {
         f.send_reliably(|seq| Message::Game { seq, text: text.to_owned() }, now, out)
     }
 
-    /// Invites the friend with gamer id `id` to this player's session.
-    fn send_invite(&mut self, id: u64, now: Instant, out: &mut Out) -> bool {
+    /// Invites the friend with gamer id `id` to this player's session: its
+    /// lobby and session go with it when the presence does not tell them.
+    fn send_invite(&mut self, id: u64, lobby: Option<String>, now: Instant, out: &mut Out) -> bool {
+        let session = if self.joinable { None } else { self.local.session.clone() };
+        let lobby = if self.joinable { None } else { lobby };
         let Some(f) = self.friends.values_mut().find(|f| f.id == id) else { return false };
         log::info!("friends: inviting {}", f.name);
-        f.send_reliably(|seq| Message::Invite { seq }, now, out)
+        f.send_reliably(|seq| Message::Invite { seq, lobby, session }, now, out)
     }
 }
 
@@ -1076,11 +1344,12 @@ fn with<R>(f: impl FnOnce(&mut Service, &mut Out) -> R) -> Option<R> {
 /// Every quarter of a second, on the network thread.
 pub(crate) fn tick(p2p: &crate::p2p::P2p, now: Instant) {
     let lobbies = p2p.lobbies();
+    let players = p2p.players();
     let mut out = Out::default();
     let wanted = {
         let mut service = SERVICE.lock().unwrap();
         let Some(s) = service.as_mut() else { return };
-        s.tick(now, lobbies, p2p.port(), &mut out);
+        s.tick(now, lobbies, &players, p2p.port(), &mut out);
         s.lookups(unix())
     };
     send(p2p, out);
@@ -1149,6 +1418,11 @@ pub fn set_name(name: &str) {
 /// What the player is doing.
 pub(crate) fn set_playing(playing: Playing) {
     with(|s, _| {
+        // Online, the player has its key, as it had a Social Club account:
+        // the players it meets can ask it to be friends.
+        if playing == Playing::Online {
+            s.identity();
+        }
         s.local.playing = playing;
         if playing != Playing::Online {
             s.local.session = None;
@@ -1164,16 +1438,32 @@ pub struct FriendInfo {
     pub name: String,
     /// What it is doing, when connected.
     pub playing: Option<Playing>,
-    /// The lobby to join it in (playing GTA Online).
+    /// Who may join its session (playing GTA Online).
+    pub kind: Option<SessionKind>,
+    /// The lobby to join it in (its session open to friends, or invited).
     pub lobby: Option<String>,
     /// It invited this player to its session (a few minutes ago at most).
     pub invited: bool,
 }
 
-/// A code this player asked with.
+/// A player met in a lobby, who is no friend.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecentInfo {
+    pub key: String,
+    pub name: String,
+    /// In one of this player's lobbies now.
+    pub here: bool,
+    /// Asked to be friends already.
+    pub asked: bool,
+}
+
+/// A request this player made.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AskedInfo {
-    pub code: String,
+    /// What `cancel` takes.
+    pub id: String,
+    /// The code (with dashes), or the player's name.
+    pub label: String,
     /// The owner was reached and asked.
     pub reached: bool,
     pub declined: bool,
@@ -1188,6 +1478,8 @@ pub struct Snapshot {
     /// Requests to this player: key, name.
     pub requests: Vec<(String, String)>,
     pub asked: Vec<AskedInfo>,
+    /// Players met in lobbies (not friends), the latest first.
+    pub recent: Vec<RecentInfo>,
 }
 
 /// A number that changes with what `snapshot` shows.
@@ -1202,12 +1494,17 @@ pub fn snapshot() -> Snapshot {
             .values()
             .map(|f| {
                 let presence = f.transport.as_ref().and(f.presence.as_ref());
+                let online = presence.filter(|p| p.playing == Playing::Online);
+                let invite = f.invited.as_ref().filter(|i| presence.is_some() && i.at.elapsed() < INVITED);
                 FriendInfo {
                     key: crypto::hex(&f.key),
                     name: if f.name.is_empty() { "?".into() } else { f.name.clone() },
                     playing: presence.map(|p| p.playing),
-                    lobby: presence.filter(|p| p.playing == Playing::Online).and_then(|p| p.lobbies.first().cloned()),
-                    invited: presence.is_some() && f.invited.is_some_and(|t| t.elapsed() < INVITED),
+                    kind: online.map(|p| p.kind),
+                    lobby: online
+                        .and_then(|p| p.lobbies.first().cloned())
+                        .or_else(|| invite.and_then(|i| i.lobby.clone())),
+                    invited: invite.is_some(),
                 }
             })
             .collect();
@@ -1223,8 +1520,25 @@ pub fn snapshot() -> Snapshot {
             asked: s
                 .asked
                 .iter()
-                .map(|a| AskedInfo { code: crypto::format_code(&a.code), reached: a.transport.is_some(), declined: a.declined })
+                .map(|a| AskedInfo {
+                    id: a.id.clone(),
+                    label: a.player.as_ref().map_or_else(|| crypto::format_code(&a.id), |(_, name)| name.clone()),
+                    reached: a.transport.is_some(),
+                    declined: a.declined,
+                })
                 .collect(),
+            recent: {
+                s.recent
+                    .iter()
+                    .filter(|r| !s.friends.contains_key(&r.key))
+                    .map(|r| RecentInfo {
+                        key: crypto::hex(&r.key),
+                        name: r.name.clone(),
+                        here: s.met.iter().any(|(k, _)| *k == r.key),
+                        asked: s.asked.iter().any(|a| a.player.as_ref().is_some_and(|(k, _)| *k == r.key)),
+                    })
+                    .collect()
+            },
         }
     })
     .unwrap_or_default()
@@ -1269,13 +1583,13 @@ pub fn ask(code: &str) -> Result<(), AddError> {
         if s.code.as_deref() == Some(code.as_str()) {
             return Err(AddError::Own);
         }
-        if let Some(a) = s.asked.iter_mut().find(|a| a.code == code) {
+        if let Some(a) = s.asked.iter_mut().find(|a| a.id == code) {
             if !a.declined {
                 return Err(AddError::Asked);
             }
             a.declined = false;
         } else {
-            s.asked.push(Ask { code, transport: None, asked: None, declined: false, contacted: HashMap::new() });
+            s.asked.push(Ask::new(code, None));
         }
         s.generation += 1;
         s.save();
@@ -1286,11 +1600,27 @@ pub fn ask(code: &str) -> Result<(), AddError> {
     Ok(())
 }
 
-/// Stops asking with a code (or forgets a no).
-pub fn cancel(code: &str) {
-    let Some(code) = crypto::parse_code(code) else { return };
+/// Asks a player met in a lobby (by its key) to be friends; it says yes
+/// or no, while it plays in one of this player's lobbies.
+pub fn ask_player(key: &str) {
+    let Some(key) = crypto::unhex::<32>(key) else { return };
     with(|s, _| {
-        if let Some(i) = s.asked.iter().position(|a| a.code == code) {
+        let Some(name) = s.recent.iter().find(|r| r.key == key).map(|r| r.name.clone()) else { return };
+        if s.friends.contains_key(&key) || s.asked.iter().any(|a| a.player.as_ref().is_some_and(|(k, _)| *k == key)) {
+            return;
+        }
+        s.blocked.remove(&key);
+        s.asked.push(Ask::new(crypto::hex(&key), Some((key, name))));
+        s.generation += 1;
+    });
+}
+
+/// Stops asking (a code, or a player's key as `AskedInfo::id` gives it),
+/// or forgets a no.
+pub fn cancel(id: &str) {
+    let id = crypto::parse_code(id).unwrap_or_else(|| id.to_owned());
+    with(|s, _| {
+        if let Some(i) = s.asked.iter().position(|a| a.id == id) {
             let a = s.asked.remove(i);
             s.drop_channel(a.transport);
             s.generation += 1;
@@ -1305,6 +1635,35 @@ pub fn answer(key: &str, yes: bool) {
     with(|s, out| s.answer(&key, yes, Instant::now(), out));
 }
 
+/// Joins a friend's session (by its key) from GTA Online: the game asks
+/// whether to leave this one (game.rs).
+pub fn join(key: &str) {
+    let Some(key) = crypto::unhex::<32>(key) else { return };
+    with(|s, _| {
+        if let Some(f) = s.friends.get(&key)
+            && !s.joins.contains(&f.id)
+        {
+            s.joins.push_back(f.id);
+        }
+    });
+}
+
+/// Forgets a friend's invite.
+pub fn ignore_invite(key: &str) {
+    let Some(key) = crypto::unhex::<32>(key) else { return };
+    with(|s, _| {
+        if let Some(f) = s.friends.get_mut(&key) {
+            f.invited = None;
+            s.generation += 1;
+        }
+    });
+}
+
+/// What happened since the last call that the player should know.
+pub fn take_notices() -> Vec<Notice> {
+    with(|s, _| s.notices.drain(..).collect()).unwrap_or_default()
+}
+
 /// Joins a friend (by its key) playing GTA Online: in the game's session
 /// it plays in, once this player's game is in GTA Online (game.rs).
 pub fn follow(key: &str) {
@@ -1316,10 +1675,17 @@ pub fn follow(key: &str) {
 /// its game asks it whether to join.
 pub fn invite(key: &str) {
     let Some(key) = crypto::unhex::<32>(key) else { return };
+    let lobby = game_lobby();
     with(|s, out| {
         let id = s.friends.get(&key).map_or(0, |f| f.id);
-        s.send_invite(id, Instant::now(), out);
+        s.send_invite(id, lobby, Instant::now(), out);
     });
+}
+
+/// The lobby this player's session is in: a friend's it joined, or its
+/// own.
+fn game_lobby() -> Option<String> {
+    with(|s, _| s.joined.clone()).flatten().or_else(|| crate::p2p::get().and_then(|p| p.lobbies().into_iter().next()))
 }
 
 /// No longer friends (the friend is told when connected).
@@ -1352,12 +1718,11 @@ pub(crate) fn game_friends() -> Vec<GameFriend> {
             .values()
             .filter(|f| f.id != 0)
             .map(|f| {
-                let presence = f.transport.as_ref().and(f.presence.as_ref());
                 GameFriend {
                     name: f.name.clone(),
                     id: f.id,
-                    online: presence.is_some(),
-                    in_session: presence.is_some_and(|p| p.playing == Playing::Online && p.session.is_some()),
+                    online: f.transport.is_some() && f.presence.is_some(),
+                    in_session: f.session().is_some(),
                 }
             })
             .collect();
@@ -1386,29 +1751,45 @@ pub(crate) fn set_session(session: Option<String>) {
     with(|s, _| s.local.session = session);
 }
 
-/// The session a friend (gamer id) plays in, if it says.
+/// The session a friend (gamer id) plays in, as it says or as its invite
+/// does.
 pub(crate) fn session_of(id: u64) -> Option<String> {
-    with(|s, _| {
-        let f = s.friends.values().find(|f| f.id == id)?;
-        f.transport.as_ref()?;
-        f.presence.as_ref().filter(|p| p.playing == Playing::Online)?.session.clone()
-    })
-    .flatten()
+    with(|s, _| s.friends.values().find(|f| f.id == id)?.session()).flatten()
 }
 
 /// Gets ready to join a friend (gamer id): its lobbies, its players
-/// introduced by it.
-pub(crate) fn reach(id: u64) {
+/// introduced by it. Joining it there (`joining`), the session it gets
+/// into is no longer one this player's friends may join without an invite
+/// (the friend's lobby is the friend's to share).
+pub(crate) fn reach(id: u64, joining: bool) {
     let target = with(|s, _| {
         let f = s.friends.values().find(|f| f.id == id)?;
         let addr = f.transport.as_ref()?.addr;
-        let p = f.presence.as_ref().filter(|p| p.playing == Playing::Online)?;
-        Some((addr, p.lobbies.clone()))
+        let mut lobbies = f.presence.as_ref().filter(|p| p.playing == Playing::Online)?.lobbies.clone();
+        lobbies.extend(f.invited.as_ref().and_then(|i| i.lobby.clone()));
+        Some((addr, lobbies))
     })
     .flatten();
     let (Some((addr, lobbies)), Some(p2p)) = (target, crate::p2p::get()) else { return };
+    let ours = p2p.lobbies().into_iter().next();
+    if joining && let Some(theirs) = lobbies.first().filter(|l| Some(*l) != ours.as_ref()) {
+        with(|s, _| s.joining = Some((theirs.clone(), Instant::now())));
+    }
     for lobby in lobbies {
         p2p.visit_lobby(&lobby, addr);
+    }
+}
+
+/// Asks a player met (by its gamer id, as the game's player list names it)
+/// to be friends: false when it is not one met (another kind of player).
+pub(crate) fn ask_gamer(id: u64) -> bool {
+    let key = with(|s, _| s.recent.iter().find(|r| r.id == id && s.met.iter().any(|(k, _)| *k == r.key)).map(|r| r.key));
+    match key.flatten() {
+        Some(key) => {
+            ask_player(&crypto::hex(&key));
+            true
+        }
+        None => false,
     }
 }
 
@@ -1428,13 +1809,59 @@ pub(crate) fn following() -> Option<u64> {
 /// Invites the friends among `ids` (gamer ids) to this player's session:
 /// how many it went to.
 pub(crate) fn send_invites(ids: &[u64]) -> usize {
-    with(|s, out| ids.iter().filter(|id| s.send_invite(**id, Instant::now(), out)).count()).unwrap_or(0)
+    let lobby = game_lobby();
+    with(|s, out| ids.iter().filter(|id| s.send_invite(**id, lobby.clone(), Instant::now(), out)).count())
+        .unwrap_or(0)
 }
 
-/// The friends (gamer ids) who invited this player to their sessions since
+/// The game is in a new session: a friend's being joined, in the friend's
+/// lobby, is shared only through invites.
+pub(crate) fn session_changed() {
+    with(|s, _| {
+        let Some((lobby, since)) = s.joining.take() else { return };
+        if since.elapsed() < JOINING {
+            log::info!("friends: in a friend's session");
+            s.local.kind = SessionKind::Closed;
+            s.joinable = false;
+            s.joined = Some(lobby);
+        }
+    });
+}
+
+/// Whether friend `id` (gamer id) invited this player to its session a few
+/// minutes ago at most.
+pub(crate) fn invited_by(id: u64) -> bool {
+    with(|s, _| s.friends.values().any(|f| f.id == id && f.invited.as_ref().is_some_and(|i| i.at.elapsed() < INVITED)))
+        .unwrap_or(false)
+}
+
+/// The game looks for a friend's session to join.
+pub(crate) fn find_friends() {
+    with(|s, _| s.finding = true);
+}
+
+pub(crate) fn finding_friends() -> bool {
+    with(|s, _| s.finding).unwrap_or(false)
+}
+
+/// The friends (gamer ids) whose sessions the player chose to join since
 /// the last call.
-pub(crate) fn take_invites() -> Vec<u64> {
-    with(|s, _| s.invites.drain(..).collect()).unwrap_or_default()
+pub(crate) fn take_joins() -> Vec<u64> {
+    with(|s, _| s.joins.drain(..).collect()).unwrap_or_default()
+}
+
+/// How this player's session is joined (the game's choice of session).
+pub(crate) fn set_session_kind(kind: SessionKind) {
+    with(|s, _| {
+        s.joined = None;
+        s.joining = None;
+        s.finding = false;
+        if s.local.kind != kind {
+            log::info!("friends: in a {kind:?} session");
+        }
+        s.local.kind = kind;
+        s.joinable = kind.joinable();
+    });
 }
 
 pub(crate) fn stop_following() {

@@ -67,8 +67,11 @@ pub enum Action {
     FindGame,
     /// The game's graphics settings back to the engine's defaults.
     ResetGraphics,
-    /// Join a friend (by its key) playing GTA Online in `lobby`.
+    /// Join a friend (by its key) playing GTA Online in `lobby`, from the
+    /// start page.
     JoinFriend { key: String, lobby: String },
+    /// Back to the game from the friends (a join asked for).
+    CloseFriends,
     /// Delete the stream's copy of the game.
     ClearCopy,
     /// Look for servers on the network.
@@ -131,7 +134,7 @@ pub struct Status<'a> {
     pub benchmark: Option<&'a crate::benchmark::Results>,
     /// The game running is GTA Online.
     pub online: bool,
-    /// Friends asking to be friends, waiting for an answer.
+    /// Friend requests and game invites waiting for an answer.
     pub friend_requests: usize,
     /// Where the game's files come from (the setting).
     pub source: crate::settings::Source,
@@ -192,7 +195,26 @@ pub struct Ui {
     /// only for input or for this).
     repaint_at: Option<Instant>,
     perf: perf::PerfHud,
+    /// Notifications over everything (Social Club's overlay showed them),
+    /// the oldest first, and where they were last drawn (to tap them).
+    toasts: std::collections::VecDeque<Toast>,
+    toast_area: Option<Rect>,
 }
+
+/// A notification: as Social Club's, a title, a name and a line; the
+/// friends' tab it opens; until when it shows.
+struct Toast {
+    toast: friends::Toast,
+    since: Instant,
+    until: Instant,
+}
+
+/// How long a notification shows (each one more after the ones before),
+/// how many at most, how wide, how long it fades.
+const TOAST_FOR: Duration = Duration::from_millis(3500);
+const TOASTS: usize = 3;
+const TOAST_WIDTH: f32 = 300.0;
+const TOAST_FADE: f32 = 0.35;
 
 impl Ui {
     pub fn new(overlay: glue5_gpu::Overlay) -> Self {
@@ -219,6 +241,8 @@ impl Ui {
             gear: None,
             repaint_at: Some(Instant::now()),
             perf: Default::default(),
+            toasts: Default::default(),
+            toast_area: None,
         }
     }
 
@@ -238,6 +262,44 @@ impl Ui {
     }
 
     /// The settings (from the game or the start page); again, back.
+    /// A friends' notification, over the game or the pages.
+    pub fn notify(&mut self, notice: &glue5_runtime::friends::Notice) {
+        let now = Instant::now();
+        while self.toasts.len() >= TOASTS {
+            self.toasts.pop_front();
+        }
+        // After the ones before it: they go one at a time.
+        let after = self.toasts.back().map_or(now, |t| t.until.max(now));
+        let toast = friends::toast(notice);
+        self.toasts.push_back(Toast { toast, since: now, until: after + TOAST_FOR });
+        self.repaint();
+    }
+
+    /// The friends (the Home key, Back + RB); again, back.
+    pub fn toggle_friends(&mut self) {
+        if self.page == Some(Page::Friends) {
+            self.back();
+        } else {
+            self.show(Some(Page::Friends));
+        }
+    }
+
+    /// The friends at the tab of the notification at the top (tapped).
+    pub fn open_toast(&mut self) {
+        if let Some(t) = self.toasts.back() {
+            self.friends.tab = t.toast.tab;
+        }
+        self.toasts.clear();
+        self.show(Some(Page::Friends));
+    }
+
+    /// Whether a finger at `x`, `y` (0..1, as SDL gives them) is on a
+    /// notification.
+    pub fn toast_hit(&self, x: f32, y: f32, window: &Window) -> bool {
+        let size = screen_size(window);
+        self.toast_area.is_some_and(|r| r.contains(pos2(x * size.x, y * size.y)))
+    }
+
     pub fn toggle_settings(&mut self) {
         if self.page == Some(Page::Settings) {
             self.back();
@@ -444,10 +506,16 @@ impl Ui {
             self.perf.hide();
         }
         let banner = status.banner.filter(|_| self.page.is_none());
+        let now = Instant::now();
+        self.toasts.retain(|t| now < t.until);
+        if self.toasts.is_empty() {
+            self.toast_area = None;
+        }
         if self.page.is_none()
             && touch.is_none()
             && gear.is_none()
             && banner.is_none()
+            && self.toasts.is_empty()
             && (!hud || !self.perf.due(settings.overlay_detail))
         {
             if self.drawn && !hud {
@@ -493,6 +561,12 @@ impl Ui {
         }
         if let Some(text) = banner {
             draw_banner(&ctx, safe, text);
+        }
+        // Under the settings button when it shows.
+        let below = if self.gear.is_some() { (GEAR_AT.y + GEAR_RADIUS) * settings.touch_size + 8.0 } else { 12.0 };
+        self.toast_area = draw_toasts(&ctx, safe, below, &self.toasts, now);
+        if !self.toasts.is_empty() {
+            self.repaint_in(Duration::from_millis(33));
         }
         if self.page.is_some() && status.started.is_none() {
             theme::backdrop(&ctx, self.background.as_ref());
@@ -548,6 +622,39 @@ impl Ui {
         }
         actions
     }
+}
+
+/// The notifications, at the safe area's top right (`below` its top), the
+/// newest at the bottom, fading in and out: where they are, if any.
+fn draw_toasts(
+    ctx: &egui::Context,
+    safe: Rect,
+    below: f32,
+    toasts: &std::collections::VecDeque<Toast>,
+    now: Instant,
+) -> Option<Rect> {
+    if toasts.is_empty() {
+        return None;
+    }
+    let scale = theme::layout_scale(safe);
+    let width = (TOAST_WIDTH * scale).min(safe.width() - 32.0);
+    let response = egui::Area::new(Id::new("toasts"))
+        .order(Order::Tooltip)
+        .fixed_pos(pos2(safe.right() - width - 16.0, safe.top() + below))
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.y = 8.0 * scale;
+            for t in toasts {
+                let shown = now.duration_since(t.since).as_secs_f32();
+                let left = t.until.saturating_duration_since(now).as_secs_f32();
+                ui.scope(|ui| {
+                    ui.multiply_opacity((shown.min(left) / TOAST_FADE).clamp(0.0, 1.0));
+                    friends::draw_toast(ui, &t.toast, width);
+                });
+            }
+        });
+    Some(response.response.rect)
 }
 
 /// A line at the top of the game, centred: what it waits for.

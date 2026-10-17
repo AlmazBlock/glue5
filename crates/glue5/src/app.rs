@@ -396,6 +396,11 @@ impl App {
                 self.ui.toggle_settings();
                 return false;
             }
+            // A notification tapped: the friends, at its tab.
+            if self.ui.toast_hit(x, y, &self.window) {
+                self.ui.open_toast();
+                return false;
+            }
             self.touch_input = true;
             // A tap above the on-screen keyboard puts it away (it covers the
             // touch controls, and a phone's has no key to hide it).
@@ -406,6 +411,13 @@ impl App {
         }
         if let Event::KeyDown { scancode: Some(Scancode::F1), repeat: false, .. } = event {
             self.ui.toggle_settings();
+            return false;
+        }
+        // Home, as it opened Social Club's overlay: the friends.
+        if let Event::KeyDown { scancode: Some(Scancode::Home), repeat: false, .. } = event
+            && !self.ui.wants_text()
+        {
+            self.ui.toggle_friends();
             return false;
         }
         if self.ui.is_open() {
@@ -504,6 +516,9 @@ impl App {
         if report.menu {
             self.ui.toggle_settings();
         }
+        if report.friends {
+            self.ui.toggle_friends();
+        }
         for nav in report.nav {
             self.ui.nav(nav);
         }
@@ -541,7 +556,10 @@ impl App {
                 mode: self.mode,
                 benchmark: self.benchmark.as_ref(),
                 online: self.game.is_some() && self.mode == Mode::Online,
-                friend_requests: glue5_runtime::friends::snapshot().requests.len(),
+                friend_requests: {
+                    let friends = glue5_runtime::friends::snapshot();
+                    friends.requests.len() + friends.friends.iter().filter(|f| f.invited).count()
+                },
                 source: self.settings.source,
                 stream: stream.as_ref().map(|(server, status)| (*server, status)),
                 sharing: self.sharing.as_ref().map(crate::sharing::Sharing::state),
@@ -585,8 +603,10 @@ impl App {
                         self.settings.sandbox = false;
                         self.settings.online = true;
                         self.play()?;
-                    } else if self.mode == Mode::Online {
-                        glue5_runtime::friends::follow(&key);
+                    }
+                }
+                Action::CloseFriends => {
+                    if self.ui.page() == Some(Page::Friends) {
                         self.ui.back();
                     }
                 }
@@ -614,6 +634,12 @@ impl App {
             }
             if page_before == Some(Page::Settings) {
                 self.settings.save(&self.user_dir);
+            }
+        }
+        // What friends do, as notifications (unless hidden).
+        for notice in glue5_runtime::friends::take_notices() {
+            if self.settings.friend_notices {
+                self.ui.notify(&notice);
             }
         }
         // The name friends see follows the player's.
@@ -742,7 +768,7 @@ impl App {
                 max_fps: s.max_fps,
                 online: (self.mode == Mode::Online).then(|| glue5_runtime::Online {
                     name: s.online_name.trim().into(),
-                    lobby: self.join.take().unwrap_or_else(|| s.lobby()),
+                    lobby: self.join.take().unwrap_or_default(),
                 }),
                 language: preferred_language(),
             },

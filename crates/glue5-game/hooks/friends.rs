@@ -32,6 +32,11 @@
     // The platform's invites to a session (the pause menu's, a script's),
     // which travel between friends instead.
     ("session_invites", "CNetworkSession::SendInvites(rage::rlGamerHandle const*, unsigned int, char const*, char const*, rage::netStatus*)"),
+    // "Send Friend Request" (the players list, NETWORK_ADD_FRIEND).
+    ("add_friend", "CLiveManager::AddFriend(rage::rlGamerHandle const&, char const*)"),
+    // Friends' sessions, which "Join Friends" and the public matchmaking
+    // look for.
+    ("presence_query", "rage::rlPresence::Query(int, char const*, char const*, int, int, char*, unsigned int, char**, unsigned int*, unsigned int*, rage::netStatus*)"),
     // Joining a friend: its session, asked for by its card's "Join"; an
     // invite accepted; joining from the host.
     ("session_by_gamer", "rage::rlPresenceQuery::GetSessionByGamerHandle(int, rage::rlGamerHandle*, unsigned int, rage::rlSessionQueryData*, unsigned int, unsigned int*, rage::netStatus*)"),

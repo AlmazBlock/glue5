@@ -7,6 +7,11 @@
     ("rl_pc_initialized", "rage::rlPc::IsInitialized()"),
     ("live_manager_init", "CLiveManager::Init(unsigned int)"),
     ("live_manager_update", "CLiveManager::Update(unsigned int)"),
+    // Sessions hosted (with their kind: public, invite only, friends, solo)
+    // and looked for: the lobby they are in.
+    ("session_host_config", "CNetworkSession::HostSession(NetworkGameConfig&, unsigned int)"),
+    ("freeroam_matchmaking", "CNetworkSession::DoFreeroamMatchmaking(int, int, unsigned int, unsigned int)"),
+    ("friend_matchmaking", "CNetworkSession::DoFriendMatchmaking(int, int, unsigned int, unsigned int)"),
     // Called once: the network's settings from the tunables (their defaults).
     ("network_tunables_read", "CNetworkTunablesListener::OnTunablesRead()"),
     ("presence_online", "rage::rlPresence::IsOnline(int)"),

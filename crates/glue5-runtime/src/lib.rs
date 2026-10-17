@@ -127,8 +127,9 @@ pub struct Config {
 pub struct Online {
     /// The player's name, as the others see it (16 characters at most).
     pub name: String,
-    /// A private lobby's code; empty: the lobby of everyone, where the
-    /// game's matchmaking puts the player in a session.
+    /// The lobby to start in: empty, everyone's, where the game's
+    /// matchmaking puts the player in a session; a friend's, to join it
+    /// there. The session's kind moves the player on (`online.rs`).
     pub lobby: String,
 }
 

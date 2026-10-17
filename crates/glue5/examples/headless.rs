@@ -70,8 +70,9 @@ struct Args {
     /// GTA Online, as this player name.
     #[arg(long, value_name = "NAME")]
     online: Option<String>,
-    /// With --online: a private lobby instead of everyone.
-    #[arg(long, value_name = "CODE", requires = "online", default_value = "")]
+    /// With --online: the lobby to start in instead of everyone's (until
+    /// the game hosts or looks for a session).
+    #[arg(long, value_name = "NAME", requires = "online", default_value = "")]
     lobby: String,
     /// The game's benchmark (a fly-through of the map; the run ends with
     /// it, results in the user directory).
@@ -267,6 +268,9 @@ fn main() -> Result<()> {
             input.focus(true); // without focus the engine ignores input
             focused = true;
         }
+        for notice in glue5_runtime::friends::take_notices() {
+            log::info!("friends: notice {notice:?}");
+        }
         if let Some(input) = game.input() {
             for (at, vk, down, hold) in &mut keys {
                 let held = (*at..*at + *hold).contains(&t);
@@ -310,7 +314,7 @@ fn command(line: &str, t: f64, game: &Game, presses: &mut Vec<(f64, u16)>, keys:
         ["friends", ..] => friends(&line.split_whitespace().collect::<Vec<_>>()[1..])?,
         _ => bail!(
             "expected `press <button>`, `key <key>`, `hold <key> <s>`, `text <text>`, `size <w>x<h>` or \
-             `friends code|ask <code>|accept|list|join <name>|invite <name>`"
+             `friends code|ask <code>|accept|list|join|invite|play|add <name>`"
         ),
     }
     Ok(())
@@ -332,7 +336,17 @@ fn friends(words: &[&str]) -> Result<()> {
             let f = friends::snapshot().friends.into_iter().find(|f| f.name == *name).context("no such friend")?;
             friends::invite(&f.key);
         }
-        _ => bail!("friends code|ask <code>|accept|list|join <name>|invite <name>"),
+        // A friend's invite accepted, or its session joined, from the game.
+        ["play", name] => {
+            let f = friends::snapshot().friends.into_iter().find(|f| f.name == *name).context("no such friend")?;
+            friends::join(&f.key);
+        }
+        // A player met in a session asked.
+        ["add", name] => {
+            let r = friends::snapshot().recent.into_iter().find(|r| r.name == *name).context("no such player")?;
+            friends::ask_player(&r.key);
+        }
+        _ => bail!("friends code|ask <code>|accept|list|join <name>|invite <name>|play <name>|add <name>"),
     }
     Ok(())
 }

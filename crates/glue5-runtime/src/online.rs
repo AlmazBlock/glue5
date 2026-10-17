@@ -194,6 +194,69 @@ unsafe fn tunables_requested(env: *mut Env) {
     }
 }
 
+/// `CNetworkSession`'s host flags (its `LogHostFlags`).
+const HF_IS_PRIVATE: u32 = 1;
+const HF_SINGLEPLAYER_ONLY: u32 = 4;
+const HF_CLOSED: u32 = 8;
+const HF_CLOSED_FRIENDS: u32 = 16;
+const HF_CLOSED_CREW: u32 = 32;
+
+/// Hook for `CNetworkSession::HostSession(NetworkGameConfig&, unsigned
+/// int)`, which every session the game hosts goes through (a job's
+/// excepted): the lobby it is in follows its kind, as the pause menu's
+/// sessions are. A public one in everyone's; the others (invite only,
+/// crew, closed friends, solo) in a new private lobby, whose key is the
+/// only way in: friends get it with an invite, or from the presence for a
+/// friends' session; nobody for a solo one.
+pub(crate) unsafe extern "C" fn session_host_config(env: *mut Env, session: u64, config: u64, flags: u32) -> u32 {
+    use crate::friends::SessionKind;
+    let kind = if flags & HF_SINGLEPLAYER_ONLY != 0 {
+        SessionKind::Solo
+    } else if flags & HF_CLOSED_FRIENDS != 0 {
+        SessionKind::Friends
+    } else if flags & (HF_IS_PRIVATE | HF_CLOSED | HF_CLOSED_CREW) != 0 {
+        SessionKind::Closed
+    } else {
+        SessionKind::Public
+    };
+    in_lobby_for(kind);
+    unsafe { orig::session_host_config(env, session, config, flags) }
+}
+
+/// Hook for `CNetworkSession::DoFreeroamMatchmaking(int, int, unsigned int,
+/// unsigned int)`: looking for a public session, in everyone's lobby.
+pub(crate) unsafe extern "C" fn freeroam_matchmaking(env: *mut Env, session: u64, mode: u32, max: u32, flags: u32) -> u32 {
+    in_lobby_for(crate::friends::SessionKind::Public);
+    unsafe { orig::freeroam_matchmaking(env, session, mode, max, flags) }
+}
+
+/// Hook for `CNetworkSession::DoFriendMatchmaking(int, int, unsigned int,
+/// unsigned int)`: "Join Friends", into a friend's session, found in the
+/// friends' presence (friends/game.rs): the friend's lobby is the
+/// friend's to share.
+pub(crate) unsafe extern "C" fn friend_matchmaking(env: *mut Env, session: u64, mode: u32, max: u32, flags: u32) -> u32 {
+    crate::friends::find_friends();
+    unsafe { orig::friend_matchmaking(env, session, mode, max, flags) }
+}
+
+/// Moves the player to the lobby for a session of `kind`: everyone's (the
+/// friend's, while one is followed there), or a new private one.
+fn in_lobby_for(kind: crate::friends::SessionKind) {
+    crate::friends::set_session_kind(kind);
+    let Some(p2p) = crate::p2p::get() else { return };
+    if kind == crate::friends::SessionKind::Public {
+        if crate::friends::following().is_none() {
+            p2p.switch_lobby("");
+        }
+    } else {
+        // Its key, the way in: 128 bits from the system (as long a name as
+        // friends take).
+        let mut key = [0u8; 16];
+        getrandom::fill(&mut key).expect("the system's random numbers");
+        p2p.switch_lobby(&key.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
+}
+
 /// Hook for `CLiveManager::BailOnMultiplayer(eBailReason, int)`: the
 /// browser build has no network hardware (`netHardware::IsAvailable()` is
 /// false there, folded into the callers), so every session ends at once
@@ -569,6 +632,9 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.rl_offline_name = Some(offline_name);
     hooks.live_manager_init = Some(live_manager_init);
     hooks.live_manager_update = Some(live_manager_update);
+    hooks.session_host_config = Some(session_host_config);
+    hooks.freeroam_matchmaking = Some(freeroam_matchmaking);
+    hooks.friend_matchmaking = Some(friend_matchmaking);
     hooks.bail_on_multiplayer = Some(bail_on_multiplayer);
     hooks.rl_pc_initialized = Some(rl_pc_initialized);
     hooks.ros_privilege = Some(ros_privilege);

@@ -305,9 +305,8 @@ fn focus_ring(ui: &egui::Ui, rect: Rect, radius: f32) {
     ui.painter().rect_stroke(rect.expand(gap), radius + gap, stroke, StrokeKind::Outside);
 }
 
-/// GTA Online, open: everyone's lobby or a private one with its code, the
-/// player's name, and Play, faded in by `shown`. Its top closes it (`open`
-/// false). True when Play is pressed.
+/// GTA Online, open: the player's name, and Play, faded in by `shown`. Its
+/// top closes it (`open` false). True when Play is pressed.
 fn online_card(
     ui: &mut egui::Ui,
     id: Id,
@@ -342,12 +341,12 @@ fn online_card(
                     })
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 10.0 * scale;
-                        lobby_controls(ui, settings);
+                        let what = "Sessions with the players online, matched automatically; invite-only, friend \
+                                    and solo sessions from the game's pause menu, and your friends from ♡ Friends.";
+                        ui.label(RichText::new(what).size(12.0 * scale).color(theme::MUTED));
+                        text_field(ui, "Name", &mut settings.online_name, "Player", 16);
                         ui.add_space(2.0 * scale);
-                        let private = settings.online_private;
-                        let ready = !private || !settings::lobby_key(&settings.online_lobby).is_empty();
-                        let label = if private { "PLAY PRIVATE" } else { "PLAY" };
-                        play = ui.add_enabled_ui(ready, |ui| play_button(ui, label)).inner.clicked();
+                        play = play_button(ui, "PLAY").clicked();
                     });
             });
         });
@@ -356,40 +355,6 @@ fn online_card(
         ui.scroll_to_rect(card.response.rect, None);
     }
     play
-}
-
-/// Everyone's lobby or a private one; the private one's code, which a new
-/// one replaces; the player's name.
-fn lobby_controls(ui: &mut egui::Ui, settings: &mut Settings) {
-    let scale = theme::density(ui);
-    let lobbies = [(false, "PUBLIC"), (true, "PRIVATE")];
-    if segmented(ui, &mut settings.online_private, &lobbies, 38.0 * scale)
-        && settings.online_private
-        && settings::lobby_key(&settings.online_lobby).is_empty()
-    {
-        settings.online_lobby = settings::new_lobby_code();
-    }
-    let what = if settings.online_private {
-        "Only the players with the same code: share it with your friends."
-    } else {
-        "Anyone playing now, matched automatically."
-    };
-    ui.label(RichText::new(what).size(12.0 * scale).color(theme::MUTED));
-    if settings.online_private {
-        ui.horizontal(|ui| {
-            let button = 92.0 * scale;
-            let field = ui.available_width() - button - ui.spacing().item_spacing.x;
-            ui.allocate_ui(vec2(field, 44.0 * scale), |ui| {
-                text_field(ui, "Code", &mut settings.online_lobby, "K7Q-29F", 11)
-            });
-            let new = egui::Button::new(RichText::new("⟳  New").size(14.0 * scale)).corner_radius((12.0 * scale) as u8);
-            if focus(ui.add_sized([button, 44.0 * scale], new)).on_hover_text("A new code").clicked() {
-                settings.online_lobby = settings::new_lobby_code();
-            }
-        });
-        settings.online_lobby.make_ascii_uppercase();
-    }
-    text_field(ui, "Name", &mut settings.online_name, "Player", 16);
 }
 
 /// The white button that starts the game.
@@ -894,14 +859,16 @@ fn settings_items(
                 });
             }
             let asking = match status.friend_requests {
-                0 => "Your code, your friends, joining them".to_owned(),
-                1 => "Someone asks to be your friend".to_owned(),
-                n => format!("{n} players ask to be your friends"),
+                0 => "Home or Back + RB: your friends, requests, invites".to_owned(),
+                n => format!("{n} waiting: friend requests, game invites"),
             };
             setting(ui, "Friends", Control::Action, Some(&asking), |ui| {
                 if action_button(ui, "Open").clicked() {
                     *go = Some(Some(Page::Friends));
                 }
+            });
+            setting(ui, "Friends' notifications", Control::Toggle, Some("Online, requests, invites"), |ui| {
+                toggle(ui, &mut settings.friend_notices);
             });
             let version = concat!("Glue 5 ", env!("CARGO_PKG_VERSION"), " and the projects it builds on");
             setting(ui, "Credits", Control::Action, Some(version), |ui| {
@@ -1207,11 +1174,8 @@ mod tests {
         assert_eq!(ctx.memory(|m| m.focused()), Some(Id::new(("mode", "GTA ONLINE"))));
         assert!(!settings.online_name.is_empty());
 
-        // Down to the lobbies, right to the private one: a code is made up.
-        // Then down to Play, which starts.
-        let mut keys = vec![egui::Key::ArrowDown, egui::Key::ArrowRight, egui::Key::Enter];
-        keys.extend([egui::Key::ArrowDown; 3]);
-        keys.push(egui::Key::Enter);
+        // Down past the name to Play, which starts.
+        let keys = vec![egui::Key::ArrowDown, egui::Key::ArrowDown, egui::Key::Enter];
         for k in keys.into_iter().map(Some).chain([None]) {
             let raw = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))),
@@ -1226,8 +1190,6 @@ mod tests {
             .textures_delta
             .clear();
         }
-        assert!(settings.online_private);
-        assert_eq!(crate::settings::lobby_key(&settings.online_lobby).len(), 6, "{}", settings.online_lobby);
         assert_eq!(chosen, Some(Mode::Online));
     }
 

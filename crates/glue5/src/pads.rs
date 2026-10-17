@@ -55,6 +55,8 @@ pub struct Pads {
 pub struct Report {
     /// Back + Start held: open the settings.
     pub menu: bool,
+    /// Back + RB held, as it opened Social Club's overlay: the friends.
+    pub friends: bool,
     /// Navigation in the application's page (only while one is open).
     pub nav: Vec<Nav>,
 }
@@ -63,8 +65,10 @@ struct Slot {
     pad: sdl3::gamepad::Gamepad,
     id: JoystickId,
     rumble: (u16, u16),
-    /// Since when Back + Start are held, and whether that hold has fired.
+    /// Since when Back + Start (or Back + RB) are held, and whether that
+    /// hold has fired.
     combo: Option<(Instant, bool)>,
+    friends_combo: Option<(Instant, bool)>,
 }
 
 impl Pads {
@@ -82,7 +86,7 @@ impl Pads {
         match self.subsystem.open(id) {
             Ok(pad) => {
                 log::info!("gamepad {}: {}", free, pad.name().unwrap_or_default());
-                self.slots[free] = Some(Slot { pad, id, rumble: (0, 0), combo: None });
+                self.slots[free] = Some(Slot { pad, id, rumble: (0, 0), combo: None, friends_combo: None });
             }
             Err(e) => log::warn!("cannot open gamepad: {e}"),
         }
@@ -149,15 +153,19 @@ impl Pads {
                 input::set_gamepad(i, state);
             }
 
-            let combo = button::SELECT | button::START;
-            if state.buttons & combo == combo {
-                let (since, fired) = slot.combo.get_or_insert_with(|| (Instant::now(), false));
-                if !*fired && since.elapsed() >= MENU_HOLD {
-                    *fired = true;
-                    report.menu = true;
+            for (combo, held, fire) in [
+                (button::SELECT | button::START, &mut slot.combo, &mut report.menu),
+                (button::SELECT | button::R1, &mut slot.friends_combo, &mut report.friends),
+            ] {
+                if state.buttons & combo == combo {
+                    let (since, fired) = held.get_or_insert_with(|| (Instant::now(), false));
+                    if !*fired && since.elapsed() >= MENU_HOLD {
+                        *fired = true;
+                        *fire = true;
+                    }
+                } else {
+                    *held = None;
                 }
-            } else {
-                slot.combo = None;
             }
 
             let rumble = input::rumble(i);

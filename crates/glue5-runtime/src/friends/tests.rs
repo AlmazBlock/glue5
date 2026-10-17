@@ -69,7 +69,7 @@ fn run(players: &mut [&mut Player], first: Out, from: SocketAddrV4, now: &mut In
         *now += Duration::from_millis(250);
         for p in players.iter_mut() {
             let mut out = Out::default();
-            p.s.tick(*now, Vec::new(), p.addr.port(), &mut out);
+            p.s.tick(*now, Vec::new(), &[], p.addr.port(), &mut out);
             queue.extend(out.send.into_iter().map(|(t, d)| (p.addr, t, d)));
         }
     }
@@ -81,7 +81,7 @@ fn keep(_: &[u8]) -> bool {
 
 /// `b` asks `a` with `a`'s code, found on the DHT; `a` answers.
 fn befriend(a: &mut Player, b: &mut Player, yes: bool, now: &mut Instant) {
-    b.s.asked.push(Ask { code: a.code(), transport: None, asked: None, declined: false, contacted: HashMap::new() });
+    b.s.asked.push(Ask::new(a.code(), None));
     let mut out = Out::default();
     b.s.found(crypto::code_key(&a.code()), a.addr, *now, &mut out);
     let from = b.addr;
@@ -223,26 +223,66 @@ fn friends_go_offline_when_silent() {
     let mut out = Out::default();
     for _ in 0..(SILENCE.as_millis() / 250 + 4) {
         now += Duration::from_millis(250);
-        a.s.tick(now, Vec::new(), 1, &mut out);
+        a.s.tick(now, Vec::new(), &[], 1, &mut out);
     }
     assert!(!a.s.friends[&b.key()].connected());
 }
 
 #[test]
-fn invites_reach_a_friend_playing_once() {
+fn invites_come_as_notices_once() {
     let mut now = Instant::now();
     let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
     befriend(&mut a, &mut b, true, &mut now);
-    b.s.local.playing = Playing::Online;
+    b.s.notices.clear();
+    // From a session for invited players only: its lobby and session go too.
+    a.s.joinable = false;
+    a.s.local.session = Some("SESSION".into());
     for _ in 0..2 {
         let mut out = Out::default();
-        assert!(a.s.send_invite(2000, now, &mut out));
+        assert!(a.s.send_invite(2000, Some("LOBBY".into()), now, &mut out));
         let from = a.addr;
         run(&mut [&mut a, &mut b], out, from, &mut now, 2, &keep);
     }
     // The second one, so soon: not again.
-    assert_eq!(b.s.invites.drain(..).collect::<Vec<_>>(), [1000]);
-    assert!(b.s.friends[&a.key()].invited.is_some());
+    assert_eq!(b.s.notices.drain(..).collect::<Vec<_>>(), [Notice::Invite("Ann".into())]);
+    let invited = b.s.friends[&a.key()].invited.as_ref().unwrap();
+    assert_eq!((invited.lobby.as_deref(), invited.session.as_deref()), (Some("LOBBY"), Some("SESSION")));
     // Not a friend's id: nothing sent.
-    assert!(!a.s.send_invite(7, now, &mut Out::default()));
+    assert!(!a.s.send_invite(7, None, now, &mut Out::default()));
+}
+
+#[test]
+fn players_met_ask_each_other() {
+    let mut now = Instant::now();
+    let (mut a, mut c) = (Player::new("Ann", 1), Player::new("Carl", 3));
+    let card = |p: &Player| crate::p2p::Card { gamer: p.s.local.id, key: p.key(), name: p.s.local.name.clone() };
+    let (ca, cc) = (card(&a), card(&c));
+    // They meet in a lobby: each one's card and address.
+    let mut out = Out::default();
+    a.s.meet(&[(cc.clone(), c.addr)], now, &mut out);
+    c.s.meet(&[(ca.clone(), a.addr)], now, &mut out);
+    assert_eq!(a.s.recent.len(), 1);
+    // Ann asks Carl; Carl says yes.
+    a.s.asked.push(Ask::new(crypto::hex(&c.key()), Some((c.key(), "Carl".into()))));
+    let mut out = Out::default();
+    a.s.meet(&[(cc, c.addr)], now, &mut out);
+    let from = a.addr;
+    run(&mut [&mut a, &mut c], out, from, &mut now, 4, &keep);
+    assert_eq!(c.s.notices.drain(..).collect::<Vec<_>>(), [Notice::Request("Ann".into())]);
+    let mut out = Out::default();
+    (a.s.summarized, c.s.summarized) = (true, true);
+    c.s.answer(&a.key(), true, now, &mut out);
+    let from = c.addr;
+    run(&mut [&mut a, &mut c], out, from, &mut now, 4, &keep);
+    assert!(a.connected_to(&c) && c.connected_to(&a));
+    // Said once: no "online" for a friend just made.
+    assert_eq!(a.s.notices.drain(..).collect::<Vec<_>>(), [Notice::Accepted("Carl".into())]);
+    assert!(c.s.notices.is_empty());
+    // Someone not met (no card from that address): not answered.
+    let mut d = Player::new("Dan", 4);
+    let (h, first) = Handshake::friend(d.s.identity.as_ref().unwrap(), &c.key(), &unix_ms().to_be_bytes(), c.addr, now).unwrap();
+    d.s.handshakes.insert(h.index, (h, Owner::Asking("x".into())));
+    let mut answer = Out::default();
+    c.s.receive(d.addr, first[3], &first[4..], now, &mut answer);
+    assert!(answer.send.is_empty());
 }
