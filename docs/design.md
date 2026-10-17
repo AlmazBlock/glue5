@@ -166,7 +166,10 @@ those it expects (`strStreamingLoader`). glue5 hands it the manifest
 `glue5-runtime/src/stream.rs`): a read the device's copy holds is a
 positioned read from it in the calling thread, as fast as a local folder;
 a missing one asks the server and waits for its blocks only. The
-announcements become prefetch requests. Streaming in the VFS instead would
+announcements become prefetch requests, and so does what follows a file
+played over time (music and radio, read in pieces 20 ms or more apart;
+not small pieces read back to back: read ahead, they fetched 520 MB in a
+cold run, 340 MB of it never read). Streaming in the VFS instead would
 get no announcements (they need the HTTP device) and one round trip per
 read of the streamer's single reader.
 
@@ -230,6 +233,19 @@ announcing them at the request would have saved a fifth of their waiting
 in the fly-through (8.6 s of 41), not worth a hook on the engine's request
 path.
 
+**Frames while streaming.** Every frame of cold benchmark runs, laid
+against every wait of the client: once the world shows, no read waits on
+the engine's main or render thread, only on the streamer's reader (a late
+read is an object that comes late, not a slow frame: 5-6 s of waiting in
+the fly-through over the loopback, 130 s through the simulated 100 Mbit/s
+link). The client's threads take 2-3 % of a core. The index saves are the
+one thing of the client's that shows in the frames (see the copy below).
+Slow frames came and went far more with the Mac's load from other work
+than with streaming: a run from a folder had more of them than streamed
+runs. (The simulated link, a Python proxy, also slows down under load:
+8.3 to 10.4 MB/s from run to run; a start needs 2.8 GB before the world
+either way.)
+
 **Before the game:** the catalog (every file, size and time) and the two
 packs, ~10 MB, asked together, which bring every small file and the
 shaders whole: the pipelines compile from them as from a folder (Play's
@@ -240,9 +256,16 @@ compile; a later start finds it there.
 
 **The copy** (`cache.rs`) mirrors the folder's layout, sparse, with a
 bitmap of the 4 KB blocks each file holds (640 KB for the whole game). Its
-index is saved every two seconds, after the data it describes is on disk
-(`fsync` per file, side by side, then `F_FULLFSYNC` on the index on Apple
-systems: a full flush per file made the text pack take 14 s to save). At
+index is saved after the data it describes is on disk (`fsync` per file,
+side by side, then `F_FULLFSYNC` on the index on Apple systems: a full
+flush per file made the text pack take 14 s to save): every 10 s while
+data comes, or once 256 MB came, and at once when it stops. A save slows
+the game's frames a little while it lasts (1.2 to 1.8 times as many
+frames over 50 ms fall within saves as within the same spans a second
+away; an I/O priority of background or `F_BARRIERFSYNC` made no
+difference that could be told from run to run), so fewer is better:
+saving every two seconds, a cold run through the simulated link saved 203
+times, now 47. At
 start, a block counts only if its file is still there with its full
 length: whatever the system deleted meanwhile (iOS and tvOS caches) is
 fetched again when needed. When the volume falls under 1 GB free, files
@@ -255,8 +278,9 @@ retried for ever and the requests in flight asked again. APFS, when it
 writes a file out, may fill the holes between its written parts with zeros
 (whether it does depends on its state, and changed within an hour on the
 same Mac: 5.7 GB taken for 3.7 GB of blocks); after each save, the holes
-of the files just synced are punched again (`F_PUNCHHOLE`,
-`FALLOC_FL_PUNCH_HOLE` on Linux and Android): 3.74 GB for 3.67. At most
+of the files just synced are punched again (`F_PUNCHHOLE`): 3.74 GB for
+3.67. Each hole holds off the file's writes while it is punched, not its
+reads. Other file systems never fill holes, and are left alone. At most
 4,096 files stay open (the limit is 10,240 on Apple systems, often 1,024
 on Linux); the others are opened for each use.
 
