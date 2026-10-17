@@ -273,7 +273,7 @@ struct App {
     /// This computer sharing its game folder (desktop).
     sharing: Option<crate::sharing::Sharing>,
     /// Servers found on the network by the last search, and whether one runs.
-    servers: Arc<Mutex<(bool, Vec<glue5_stream::discovery::Found>)>>,
+    servers: Arc<Mutex<(bool, Vec<ui::FoundServer>)>>,
     /// Engine reads have waited for the server since then.
     stream_waiting: Option<Instant>,
     /// Why the last game stopped, if it did.
@@ -614,6 +614,7 @@ impl App {
                 Action::FindServers => self.find_servers(),
                 Action::UseServer(address) => {
                     self.settings.server = address;
+                    self.settings.source = Source::Server;
                     self.settings.save(&self.user_dir);
                 }
             }
@@ -632,7 +633,7 @@ impl App {
                 // Nothing stays pressed in the game behind a page.
                 input.release_all();
             }
-            if page_before == Some(Page::Settings) {
+            if matches!(page_before, Some(Page::Settings | Page::Servers)) {
                 self.settings.save(&self.user_dir);
             }
         }
@@ -1063,8 +1064,25 @@ impl App {
             s.0 = true;
         }
         let spawned = std::thread::Builder::new().name("find servers".into()).spawn(move || {
-            let found = glue5_stream::discovery::find(Duration::from_secs(3));
-            *servers.lock().unwrap() = (false, found);
+            let mut found = glue5_stream::discovery::find(Duration::from_secs(3));
+            // In the same order at every search (the page searches all the
+            // while), shown at once with what they answered last time; each
+            // is then asked again whether it serves this game.
+            found.sort_by(|a, b| (&a.name, &a.address).cmp(&(&b.name, &b.address)));
+            {
+                let mut s = servers.lock().unwrap();
+                let last = |f: &glue5_stream::discovery::Found| s.1.iter().find(|(l, _)| *l == *f).and_then(|(_, c)| c.clone());
+                let shown = found.iter().map(|f| (f.clone(), last(f))).collect();
+                s.1 = shown;
+            }
+            let answers: Vec<_> = std::thread::scope(|scope| {
+                let asking: Vec<_> = found
+                    .iter()
+                    .map(|f| scope.spawn(|| glue5_stream::check(&f.address, glue5_runtime::GAME_BUILD)))
+                    .collect();
+                asking.into_iter().map(|a| a.join().ok()).collect()
+            });
+            *servers.lock().unwrap() = (false, found.into_iter().zip(answers).collect());
         });
         if spawned.is_err() {
             self.servers.lock().unwrap().0 = false;

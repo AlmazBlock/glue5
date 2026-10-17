@@ -25,11 +25,13 @@ mod credits;
 mod friends;
 mod pages;
 mod perf;
+mod servers;
 mod theme;
 mod widgets;
 use credits::credits_page;
 use friends::{FriendsPage, friends_page};
 use pages::{settings_page, start_page};
+use servers::{ServersPage, servers_page};
 
 use crate::touch::Touch;
 
@@ -43,6 +45,9 @@ pub enum Page {
     Credits,
     /// The player's friend code, requests, friends.
     Friends,
+    /// Where the game's files stream from: the server in use, the ones on
+    /// the network, one by its address, this device's copy.
+    Servers,
 }
 
 /// How the game starts.
@@ -76,9 +81,13 @@ pub enum Action {
     ClearCopy,
     /// Look for servers on the network.
     FindServers,
-    /// Stream from this server (an address found).
+    /// Stream from this server (an address found or typed).
     UseServer(String),
 }
+
+/// A server found on the network, and what it answered when asked whether
+/// it serves this game (nothing yet while it is asked).
+pub type FoundServer = (glue5_stream::discovery::Found, Option<glue5_stream::Check>);
 
 /// Navigation from a controller.
 #[derive(Clone, Copy, Debug)]
@@ -143,7 +152,7 @@ pub struct Status<'a> {
     /// This computer sharing its game folder (desktop).
     pub sharing: Option<crate::sharing::State>,
     /// Servers found on the network, and whether a search runs.
-    pub servers: &'a [glue5_stream::discovery::Found],
+    pub servers: &'a [FoundServer],
     pub searching: bool,
     /// A line over the game: it waits for the server.
     pub banner: Option<&'a str>,
@@ -176,10 +185,11 @@ pub struct Ui {
     page: Option<Page>,
     /// Where the settings go back to: the start page before the game.
     home: Option<Page>,
-    /// Where the credits and the friends go back to: the page they were
-    /// opened from.
+    /// Where the credits, the friends and the servers go back to: the page
+    /// they were opened from.
     behind: Option<Page>,
     friends: FriendsPage,
+    servers: ServersPage,
     /// The last submission drew something (an empty one clears it).
     drawn: bool,
     note: Option<String>,
@@ -233,6 +243,7 @@ impl Ui {
             home: Some(Page::Start),
             behind: Some(Page::Start),
             friends: FriendsPage::default(),
+            servers: ServersPage::default(),
             drawn: false,
             note: None,
             scale_edit: None,
@@ -318,14 +329,17 @@ impl Ui {
                 self.repaint();
             }
             Some(Page::Settings) => self.show(self.home),
-            Some(Page::Credits | Page::Friends) => self.show(self.behind),
+            Some(Page::Credits | Page::Friends | Page::Servers) => self.show(self.behind),
             _ => {}
         }
     }
 
     fn show(&mut self, page: Option<Page>) {
-        if matches!(page, Some(Page::Credits | Page::Friends)) && self.page != page {
+        if matches!(page, Some(Page::Credits | Page::Friends | Page::Servers)) && self.page != page {
             self.behind = self.page;
+            if page == Some(Page::Servers) {
+                self.servers.opened();
+            }
         }
         self.page = page;
         self.note = None;
@@ -586,6 +600,7 @@ impl Ui {
                 let game = friends::Context { started: status.started.is_some(), online: status.online };
                 back = friends_page(&ctx, &mut self.friends, game, &mut actions);
             }
+            Some(Page::Servers) => back = servers_page(&ctx, &mut self.servers, settings, status, &mut actions),
             None => {}
         }
         let mut output = ctx.end_pass();
