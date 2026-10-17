@@ -30,6 +30,7 @@
 //! never loads here, so the entrances do nothing.
 
 use std::cell::Cell;
+use std::sync::Mutex;
 
 use glue5_game::{Env, exports, orig};
 
@@ -129,22 +130,74 @@ pub(crate) unsafe extern "C" fn model_loaded(env: *mut Env, hash: u32) -> u32 {
     (archetype == 0) as u32
 }
 
+/// The additional text slots (CTextFile's 23) and the block each was last
+/// asked to load, until the slot is freed.
+const TEXT_SLOTS: usize = 23;
+static ASKED: Mutex<[Option<String>; TEXT_SLOTS]> = Mutex::new([const { None }; TEXT_SLOTS]);
+
+/// Whether a block that is not loaded counts as loaded: only one asked for
+/// in that slot whose load is over (the data lacks it). One never asked is
+/// not: the engine asks whether a block is loaded before it asks for it
+/// (a cutscene's subtitles, a movie's), and so do scripts.
+fn failed(requesting: bool, asked: Option<&str>, name: &str) -> bool {
+    !requesting && asked.is_some_and(|a| a.eq_ignore_ascii_case(name))
+}
+
+/// Hook for `CTextFile::RequestAdditionalText(char const*, int,
+/// CTextFile::eLocationOfTextBlock)`: the block asked for, kept for its slot.
+pub(crate) unsafe extern "C" fn text_request(env: *mut Env, name: u64, slot: u32, location: u32) {
+    // First the request, which frees the slot of what it held.
+    unsafe { orig::text_request(env, name, slot, location) };
+    if let Some(asked) = ASKED.lock().unwrap().get_mut(slot as usize) {
+        *asked = Some(unsafe { Mem::of(env) }.str(name));
+    }
+}
+
+/// Hook for `CTextFile::FreeTextSlot(int, bool)`: the slot asks for nothing.
+pub(crate) unsafe extern "C" fn text_free(env: *mut Env, slot: u32) {
+    if let Some(asked) = ASKED.lock().unwrap().get_mut(slot as usize) {
+        *asked = None;
+    }
+    unsafe { orig::text_free(env, slot) };
+}
+
 /// Hook for `CTextFile::HasThisAdditionalTextLoaded(char const*, int)`:
-/// a block no longer being loaded and not loaded failed (the data lacks it).
+/// yes too for a block asked for whose load ended without it (see `failed`).
 pub(crate) unsafe extern "C" fn additional_text_loaded(env: *mut Env, name: u64, slot: u32) -> u32 {
     if unsafe { orig::additional_text_loaded(env, name, slot) } != 0 {
         return 1;
     }
-    (unsafe { orig::additional_text_requesting(env, name, slot) } == 0) as u32
+    let requesting = unsafe { orig::additional_text_requesting(env, name, slot) } != 0;
+    let asked = ASKED.lock().unwrap().get(slot as usize).cloned().flatten();
+    failed(requesting, asked.as_deref(), &unsafe { Mem::of(env) }.str(name)) as u32
 }
 
 /// This module's hooks.
 pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.script_model_loaded = Some(model_loaded);
     hooks.additional_text_loaded = Some(additional_text_loaded);
+    hooks.text_request = Some(text_request);
+    hooks.text_free = Some(text_free);
     hooks.script_bank_request = Some(bank_request);
     hooks.bank_loading_status = Some(bank_loading_status);
     hooks.script_txd_loaded = Some(txd_loaded);
     hooks.script_request = Some(script_request);
     hooks.script_loaded = Some(script_loaded);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failed;
+
+    #[test]
+    fn only_a_block_asked_for_counts_as_loaded_when_its_load_failed() {
+        // Never asked: the engine and scripts ask before they request it.
+        assert!(!failed(false, None, "MPAWD"));
+        // Another block asked in that slot.
+        assert!(!failed(false, Some("FMMC"), "MPAWD"));
+        // Asked, still loading.
+        assert!(!failed(true, Some("MPAWD"), "MPAWD"));
+        // Asked, and its load ended without it.
+        assert!(failed(false, Some("mpawd"), "MPAWD"));
+    }
 }

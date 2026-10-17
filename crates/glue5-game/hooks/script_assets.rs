@@ -16,8 +16,11 @@
     // archetype is looked up by hash).
     ("script_model_loaded", "streaming_commands::HasModelLoaded(int)"),
     ("archetype_from_hash", "rage::fwArchetypeManager::GetArchetypeFromHashKey(unsigned int, unsigned int*)"),
-    // HAS_THIS_ADDITIONAL_TEXT_LOADED: a text block whose load ended
-    // without it (this data lacks it) counts as loaded.
+    // HAS_THIS_ADDITIONAL_TEXT_LOADED: a text block asked for whose load
+    // ended without it (this data lacks it) counts as loaded. The requests
+    // and freed slots say what each slot was asked for.
     ("additional_text_loaded", "CTextFile::HasThisAdditionalTextLoaded(char const*, int)"),
     ("additional_text_requesting", "CTextFile::IsRequestingThisAdditionalText(char const*, int)"),
+    ("text_request", "CTextFile::RequestAdditionalText(char const*, int, CTextFile::eLocationOfTextBlock)"),
+    ("text_free", "CTextFile::FreeTextSlot(int, bool)"),
 ]
