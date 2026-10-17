@@ -34,8 +34,8 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -78,6 +78,8 @@ const PATIENCE: Duration = Duration::from_secs(30);
 const LOBBIES: usize = 4;
 /// How often a lobby's players are asked for on the DHT.
 const LOBBY_REFRESH: Duration = Duration::from_secs(20);
+/// Errors in a row from the socket after which it is made again.
+const REBIND_AFTER: u32 = 20;
 
 /// A lobby's id in the players' datagrams, and its key on the DHT.
 pub(crate) type LobbyId = [u8; 8];
@@ -198,8 +200,9 @@ impl State {
 }
 
 pub struct P2p {
-    socket: UdpSocket,
-    port: u16,
+    /// Made again when it fails for good (`rebind`), on its port if it can.
+    socket: RwLock<UdpSocket>,
+    port: AtomicU16,
     id: u64,
     vip: AtomicU32,
     /// The engine took the address: it cannot change any more.
@@ -216,6 +219,22 @@ pub(crate) fn random() -> u64 {
     std::collections::hash_map::RandomState::new().build_hasher().finish()
 }
 
+/// A socket for the player, at the first of `ports` free (0: any).
+fn bind(ports: impl IntoIterator<Item = u16>) -> std::io::Result<UdpSocket> {
+    let mut error = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
+    for port in ports {
+        match UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)) {
+            Ok(socket) => {
+                socket.set_broadcast(true)?;
+                socket.set_read_timeout(Some(Duration::from_millis(50)))?;
+                return Ok(socket);
+            }
+            Err(e) => error = e,
+        }
+    }
+    Err(error)
+}
+
 /// The player's socket and the thread serving it, started once.
 pub fn start() -> std::io::Result<&'static P2p> {
     static STARTING: Mutex<()> = Mutex::new(());
@@ -223,18 +242,13 @@ pub fn start() -> std::io::Result<&'static P2p> {
     if let Some(p2p) = P2P.get() {
         return Ok(p2p);
     }
-    let socket = PORTS
-        .clone()
-        .find_map(|port| UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).ok())
-        .map_or_else(|| UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)), Ok)?;
-    socket.set_broadcast(true)?;
-    socket.set_read_timeout(Some(Duration::from_millis(50)))?;
+    let socket = bind(PORTS.chain([0]))?;
     let port = socket.local_addr()?.port();
     let id = random();
     let dht_id: dht::Id = Sha256::digest(id.to_le_bytes()).as_slice()[..20].try_into().unwrap();
     let p2p = P2p {
-        socket,
-        port,
+        socket: RwLock::new(socket),
+        port: AtomicU16::new(port),
         id,
         vip: AtomicU32::new(0),
         vip_taken: AtomicBool::new(false),
@@ -295,7 +309,32 @@ impl P2p {
     }
 
     pub(crate) fn port(&self) -> u16 {
-        self.port
+        self.port.load(Ordering::Relaxed)
+    }
+
+    fn socket(&self) -> RwLockReadGuard<'_, UdpSocket> {
+        self.socket.read().unwrap()
+    }
+
+    /// Makes the socket again, the old one failing for good (iOS takes back
+    /// a suspended app's sockets): on its port if it is free (the old one
+    /// let go first, a stand-in meanwhile), else on any.
+    fn rebind(&self) {
+        let mut socket = self.socket.write().unwrap();
+        let stand_in = match bind([0]) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("p2p: the socket fails, and no new one: {e}");
+                return;
+            }
+        };
+        drop(std::mem::replace(&mut *socket, stand_in));
+        if let Ok(again) = bind([self.port()]) {
+            *socket = again;
+        }
+        let port = socket.local_addr().map_or(0, |a| a.port());
+        self.port.store(port, Ordering::Relaxed);
+        log::warn!("p2p: the socket failed: a new one, port {port}");
     }
 
     /// Joins the game's lobby: `name` is any text, "" for everyone's (for
@@ -419,6 +458,7 @@ impl P2p {
         const DST: std::ops::Range<usize> = MAGIC.len() + 7..MAGIC.len() + 11;
         let now = Instant::now();
         let state = self.state.lock().unwrap();
+        let socket = self.socket();
         for peer in state.peers.values() {
             if peer.vip != dst && !is_broadcast(dst) {
                 continue;
@@ -428,17 +468,17 @@ impl P2p {
             // relay would keep it).
             if is_broadcast(dst) && Some(to) != peer.addr {
                 d[DST].copy_from_slice(&peer.vip.to_be_bytes());
-                let _ = self.socket.send_to(&d, to);
+                let _ = socket.send_to(&d, to);
                 d[DST].copy_from_slice(&dst.to_be_bytes());
             } else {
-                let _ = self.socket.send_to(&d, to);
+                let _ = socket.send_to(&d, to);
             }
         }
     }
 
     /// A datagram of the friends' (friends/), as it is.
     pub(crate) fn send_to(&self, to: SocketAddrV4, d: &[u8]) {
-        let _ = self.socket.send_to(d, to);
+        let _ = self.socket().send_to(d, to);
     }
 
     /// The DHT, for the friends' lookups.
@@ -463,7 +503,7 @@ impl P2p {
         if let Some(card) = CARD.lock().unwrap().as_ref() {
             card.write(&mut d);
         }
-        let _ = self.socket.send_to(&d, to);
+        let _ = self.socket().send_to(&d, to);
     }
 
     /// Introduces players of `lobby`: `about` to `to`.
@@ -479,7 +519,7 @@ impl P2p {
                 d.extend_from_slice(&addr.ip().octets());
                 d.extend_from_slice(&addr.port().to_be_bytes());
             }
-            let _ = self.socket.send_to(&d, to);
+            let _ = self.socket().send_to(&d, to);
         }
     }
 
@@ -488,13 +528,34 @@ impl P2p {
         let mut ticked = Instant::now() - KEEPALIVE;
         let mut dht_ticked = ticked;
         let mut swept = ticked - SWEEP;
+        let mut failing = 0;
         loop {
-            match self.socket.recv_from(&mut buf) {
-                Ok((len, SocketAddr::V4(from))) => self.receive(from, &buf[..len]),
-                Ok(_) => {}
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-                // ICMP port unreachable, from a player gone (Windows).
-                Err(_) => {}
+            let received = self.socket().recv_from(&mut buf);
+            match received {
+                Ok((len, SocketAddr::V4(from))) => {
+                    failing = 0;
+                    self.receive(from, &buf[..len]);
+                }
+                Ok(_) => failing = 0,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => failing = 0,
+                // ICMP port unreachable, from a player gone, and a datagram
+                // larger than the buffer (Windows says so).
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+                #[cfg(windows)]
+                Err(e) if e.raw_os_error() == Some(10040) => {}
+                // The socket fails (taken back by the system): again and
+                // again, waiting longer each time, then it is made again.
+                Err(e) => {
+                    failing += 1;
+                    if failing == 1 {
+                        log::warn!("p2p: the socket fails: {e}");
+                    }
+                    std::thread::sleep(Duration::from_millis(10 * u64::from(failing)));
+                    if failing >= REBIND_AFTER {
+                        failing = 0;
+                        self.rebind();
+                    }
+                }
             }
             let now = Instant::now();
             if now - dht_ticked > Duration::from_millis(250) {
@@ -516,9 +577,11 @@ impl P2p {
     }
 
     fn dht_output(&self, out: dht::Output) {
+        let socket = self.socket();
         for (to, d) in &out.send {
-            let _ = self.socket.send_to(d, to);
+            let _ = socket.send_to(d, to);
         }
+        drop(socket);
         if out.peers.is_empty() {
             return;
         }
@@ -585,7 +648,7 @@ impl P2p {
         for lobby in &lobbies {
             for port in PORTS {
                 self.hello(SocketAddrV4::new(Ipv4Addr::BROADCAST, port), ASK, lobby);
-                if port != self.port {
+                if port != self.port() {
                     self.hello(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port), ASK, lobby);
                 }
             }
@@ -683,7 +746,7 @@ impl P2p {
                     relayed.extend_from_slice(&MAGIC);
                     relayed.push(DATA);
                     relayed.extend_from_slice(d);
-                    let _ = self.socket.send_to(&relayed, to);
+                    let _ = self.socket().send_to(&relayed, to);
                 }
             }
             _ => {}
