@@ -547,22 +547,10 @@ impl Client {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         let mut reader = BufReader::with_capacity(256 << 10, stream.try_clone()?);
-        let h = Header::read(&mut reader).context("waiting for the server")?;
-        if h.kind != HELLO {
-            bail!("not a Glue 5 server");
-        }
-        let hello: serde_json::Value = serde_json::from_slice(&payload(&mut reader, h.len, MAX_MESSAGE)?)?;
-        if hello["protocol"].as_u64() != Some(PROTOCOL) {
-            self.set_phase(Phase::Failed(format!("the server speaks protocol {}, this app {PROTOCOL}", hello["protocol"])));
-            bail!("protocol mismatch");
-        }
-        if hello["build"].as_str() != Some(&self.opts.build) {
-            self.set_phase(Phase::Failed(format!(
-                "the server has game build {}, this app runs {}",
-                hello["build"].as_str().unwrap_or("?"),
-                self.opts.build
-            )));
-            bail!("build mismatch");
+        let hello = read_hello(&mut reader)?;
+        if let Some(why) = unusable(&hello, &self.opts.build) {
+            self.set_phase(Phase::Failed(why.clone()));
+            bail!(why);
         }
         log::info!("stream: connected to {addr}");
         *self.error.lock().unwrap() = None;
@@ -956,6 +944,58 @@ impl Sync {
                 k => bail!("unexpected message {k} while taking {name}"),
             }
         }
+    }
+}
+
+/// What a server answers before anything streams from it: a server found on
+/// the network, checked before it is chosen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Check {
+    /// It serves this game; connecting took `ms`. `at`: what its name stands
+    /// for (to know it under another name, or its address).
+    Ready { ms: u32, at: Vec<SocketAddr> },
+    /// It answers but cannot serve this app: why.
+    Unusable(String),
+    /// No answer: why.
+    Unreachable(String),
+}
+
+/// Asks `server` for its greeting: whether it serves `build`, and how far it is.
+pub fn check(server: &str, build: &str) -> Check {
+    let started = Instant::now();
+    let at = resolve(server).unwrap_or_default();
+    let stream = match connect(server) {
+        Ok((stream, _)) => stream,
+        Err(e) => return Check::Unreachable(format!("{e:#}")),
+    };
+    let ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+    match read_hello(&mut BufReader::new(stream)) {
+        Ok(hello) => unusable(&hello, build).map_or(Check::Ready { ms, at }, Check::Unusable),
+        Err(e) if e.to_string() == NOT_A_SERVER => Check::Unusable(NOT_A_SERVER.into()),
+        Err(e) => Check::Unreachable(format!("{e:#}")),
+    }
+}
+
+const NOT_A_SERVER: &str = "not a Glue 5 server";
+
+/// The server's greeting, the first message on a connection.
+fn read_hello(reader: &mut impl Read) -> Result<serde_json::Value> {
+    let h = Header::read(reader).context("waiting for the server")?;
+    if h.kind != HELLO {
+        bail!(NOT_A_SERVER);
+    }
+    Ok(serde_json::from_slice(&payload(reader, h.len, MAX_MESSAGE)?)?)
+}
+
+/// Why a server with this greeting cannot serve an app running `build`.
+fn unusable(hello: &serde_json::Value, build: &str) -> Option<String> {
+    if hello["protocol"].as_u64() != Some(PROTOCOL) {
+        Some(format!("the server speaks protocol {}, this app {PROTOCOL}", hello["protocol"]))
+    } else if hello["build"].as_str() != Some(build) {
+        Some(format!("the server has game build {}, this app runs {build}", hello["build"].as_str().unwrap_or("?")))
+    } else {
+        None
     }
 }
 

@@ -251,3 +251,15 @@ fn downloads_the_whole_game() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn checks_a_server_before_it_is_chosen() {
+    let dir = temp("check");
+    game(&dir);
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let addr = server.addr().to_string();
+    assert!(matches!(crate::check(&addr, BUILD), crate::Check::Ready { .. }));
+    assert!(matches!(crate::check(&addr, "otherbuild"), crate::Check::Unusable(why) if why.contains("otherbuild")));
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+    assert!(matches!(crate::check(&closed, BUILD), crate::Check::Unreachable(_)));
+}
