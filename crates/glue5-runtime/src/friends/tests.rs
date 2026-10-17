@@ -201,6 +201,35 @@ fn game_events_arrive_once_through_losses() {
     assert!(a.s.friends[&b.key()].outbox.is_empty());
 }
 
+/// `finder` finds `other`, a friend, on the DHT: they connect.
+fn reconnect(finder: &mut Player, other: &mut Player, now: &mut Instant) {
+    let shared = finder.s.friends[&other.key()].shared;
+    let mut out = Out::default();
+    finder.s.found(crypto::meeting_key(&shared, crypto::epoch(unix())), other.addr, *now, &mut out);
+    let from = finder.addr;
+    run(&mut [&mut *finder, &mut *other], out, from, now, 4, &keep);
+    assert!(finder.connected_to(other) && other.connected_to(finder));
+}
+
+#[test]
+fn messages_after_a_restart_are_not_repeats() {
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    befriend(&mut a, &mut b, true, &mut now);
+    // Ann starts again, Bob does not: her messages still reach him.
+    for round in 0..2 {
+        if round == 1 {
+            a = a.restarted();
+            reconnect(&mut a, &mut b, &mut now);
+        }
+        let mut out = Out::default();
+        assert!(a.s.send_game(2000, &format!("event {round}"), now, &mut out));
+        let from = a.addr;
+        run(&mut [&mut a, &mut b], out, from, &mut now, 4, &keep);
+        assert_eq!(b.s.events.drain(..).map(|e| e.text).collect::<Vec<_>>(), [format!("event {round}")]);
+    }
+}
+
 #[test]
 fn removing_a_friend_tells_it() {
     let mut now = Instant::now();

@@ -239,6 +239,8 @@ struct Friend {
     last_time: u64,
     /// Messages waiting for their acknowledgment: seq, payload, sent, tries.
     outbox: Vec<(u32, Vec<u8>, Instant, u32)>,
+    /// From a random number at each start: the friend keeps the last ones
+    /// it had from this player, which a count from 1 again would repeat.
     next_seq: u32,
     /// Game messages from it already passed on (repeated ones are not).
     seen: VecDeque<u32>,
@@ -585,7 +587,7 @@ impl Service {
             presence_sent: None,
             last_time: 0,
             outbox: Vec::new(),
-            next_seq: 1,
+            next_seq: u32::from_be_bytes(crypto::random()).max(1),
             seen: VecDeque::new(),
             invited: None,
             contacted: HashMap::new(),
