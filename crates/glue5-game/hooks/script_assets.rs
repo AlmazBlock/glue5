@@ -27,4 +27,8 @@
     // phone's movie calls itself without end for an app it lacks).
     ("as_function_invoke", "GASAsFunctionObject::Invoke(GASFnCall const&, GASLocalFrame*, char const*)"),
     ("user_function_invoke", "GASUserDefinedFunctionObject::Invoke(GASFnCall const&, GASLocalFrame*, char const*)"),
+    // Scaleform methods being built and their numbers: the phone's home
+    // screen gets no app its movie lacks.
+    ("method_begin", "CScaleformMgr::BeginMethodInternal(int, eSCALEFORM_BASE_CLASS, char const*, int, int)"),
+    ("param_int", "CScaleformMgr::AddParamInt(int)"),
 ]

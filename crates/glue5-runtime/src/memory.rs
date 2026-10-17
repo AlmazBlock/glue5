@@ -136,6 +136,12 @@ impl Mem {
         Mem { base: unsafe { (*(*env).memory).data } }
     }
 
+    /// A view of `buf` as if it were wasm memory (tests).
+    #[cfg(test)]
+    pub(crate) fn over(buf: &mut [u8]) -> Mem {
+        Mem { base: buf.as_mut_ptr() }
+    }
+
     pub fn ptr(self, addr: u64) -> *mut u8 {
         unsafe { self.base.add(addr as usize) }
     }

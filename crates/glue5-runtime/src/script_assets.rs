@@ -35,11 +35,12 @@
 //! other without end; each ActionScript call pushes a diagnostic context,
 //! and at the 33rd the engine stops ("MessageCommon - too many contexts
 //! pushed"). ActionScript calls nest at most `AS_DEPTH` deep here: deeper
-//! ones return at once, and the app shows nothing instead.
+//! ones return at once. And the app is not on the phone's home screen here
+//! (see `PHONE_HOME`), so it is not opened at all.
 
 use std::cell::Cell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use glue5_game::{Env, exports, orig};
 
@@ -228,8 +229,79 @@ pub(crate) unsafe extern "C" fn user_function_invoke(env: *mut Env, this: u64, c
     }
 }
 
+/// The phone's home screen in its movie: view 1, its apps given by the
+/// scripts as `SET_DATA_SLOT(view, slot, icon, notifications, name)`. Apps
+/// the movie has no screen for, by icon: the boss agency (57). Their slot
+/// goes to view 25 instead (the boss agency's own, which the movie keeps
+/// without showing): the home screen has an app less, and as the movie moves
+/// the selection over the apps it has, it cannot be chosen.
+const PHONE_HOME: f64 = 1.0;
+const MISSING_APPS: &[i32] = &[57];
+const OFF_HOME: f64 = 25.0;
+
+/// `CScaleformMgr`'s methods being built, one per kind of thread (4), 424
+/// bytes each: the movie at +0 (255: none), the parameters at +56 (16 bytes
+/// each: a double, its type at +8, 1 for a number), how many at +408.
+const METHODS: u64 = 19591280;
+const METHOD_SIZE: u64 = 424;
+const PARAMS: u64 = 56;
+const PARAM_COUNT: u64 = 408;
+const NUMBER: u32 = 1;
+
+/// The phone's movie: the one its title bar's time goes to.
+static PHONE_MOVIE: AtomicU32 = AtomicU32::new(u32::MAX);
+
+thread_local! {
+    /// A `SET_DATA_SLOT` for the phone is being built on this thread: the
+    /// numbers given it so far.
+    static PHONE_SLOT: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+/// Hook for `CScaleformMgr::BeginMethodInternal(int, eSCALEFORM_BASE_CLASS,
+/// char const*, int, int)`: every Scaleform method, the scripts' and the
+/// code's.
+pub(crate) unsafe extern "C" fn method_begin(env: *mut Env, movie: u32, base: u32, name: u64, a: u32, b: u32) -> u32 {
+    let m = unsafe { Mem::of(env) };
+    let is = |s: &[u8]| m.bytes(name, s.len()) == s;
+    if is(b"SET_TITLEBAR_TIME\0") {
+        PHONE_MOVIE.store(movie, Ordering::Relaxed);
+    }
+    PHONE_SLOT.set((is(b"SET_DATA_SLOT\0") && movie == PHONE_MOVIE.load(Ordering::Relaxed)).then_some(0));
+    unsafe { orig::method_begin(env, movie, base, name, a, b) }
+}
+
+/// Hook for `CScaleformMgr::AddParamInt(int)`: the third number of the
+/// phone's `SET_DATA_SLOT` is the app's icon.
+pub(crate) unsafe extern "C" fn param_int(env: *mut Env, value: u32) {
+    if let Some(n) = PHONE_SLOT.get() {
+        PHONE_SLOT.set(Some(n + 1));
+        if n == 2 && MISSING_APPS.contains(&(value as i32)) {
+            off_home(unsafe { Mem::of(env) });
+        }
+    }
+    unsafe { orig::param_int(env, value) }
+}
+
+/// The `SET_DATA_SLOT` being built for the home screen (its view and slot
+/// given), moved to `OFF_HOME`. False if no one method is that.
+fn off_home(m: Mem) -> bool {
+    let number = |s: u64, i: u64| (m.u32(s + PARAMS + i * 16 + 8) == NUMBER).then(|| m.f64(s + PARAMS + i * 16));
+    let mut building = (0..4).map(|i| METHODS + i * METHOD_SIZE).filter(|&s| {
+        m.u8(s) != 255 && m.u8(s + PARAM_COUNT) == 2 && number(s, 0) == Some(PHONE_HOME) && number(s, 1).is_some()
+    });
+    match (building.next(), building.next()) {
+        (Some(s), None) => {
+            m.set_u64(s + PARAMS, OFF_HOME.to_bits());
+            true
+        }
+        _ => false,
+    }
+}
+
 /// This module's hooks.
 pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.method_begin = Some(method_begin);
+    hooks.param_int = Some(param_int);
     hooks.as_function_invoke = Some(as_function_invoke);
     hooks.user_function_invoke = Some(user_function_invoke);
     hooks.script_model_loaded = Some(model_loaded);
@@ -245,7 +317,38 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AS_DEPTH, AS_NESTED, failed, nested};
+    use super::*;
+
+    /// The phone's slot for an app its movie lacks leaves the home screen:
+    /// the one method being built with the home view and a slot gets the
+    /// other view; any other method stays as it is.
+    #[test]
+    fn an_app_the_phone_lacks_leaves_its_home_screen() {
+        let mut buf = vec![0u8; (METHODS + 4 * METHOD_SIZE) as usize];
+        let m = Mem::over(&mut buf);
+        let state = |i: u64| METHODS + i * METHOD_SIZE;
+        let number = |s: u64, i: u64, v: f64| {
+            m.set_u64(s + PARAMS + i * 16, v.to_bits());
+            m.set_u32(s + PARAMS + i * 16 + 8, NUMBER);
+        };
+        for i in 0..4 {
+            m.set_u8(state(i), 255);
+        }
+        // Another thread builds a method of another movie's.
+        m.set_u8(state(1), 3);
+        m.set_u8(state(1) + PARAM_COUNT, 2);
+        number(state(1), 0, 7.0);
+        number(state(1), 1, 8.0);
+        assert!(!off_home(m), "nothing for the home screen");
+        // The phone's home screen, slot 8.
+        m.set_u8(state(2), 6);
+        m.set_u8(state(2) + PARAM_COUNT, 2);
+        number(state(2), 0, PHONE_HOME);
+        number(state(2), 1, 8.0);
+        assert!(off_home(m));
+        assert_eq!(m.f64(state(2) + PARAMS), OFF_HOME);
+        assert_eq!(m.f64(state(1) + PARAMS), 7.0, "the other one untouched");
+    }
 
     /// ActionScript that calls itself without end (the phone's LOAD_APP and
     /// CELLPHONE_APP for an app its movie lacks) stops at AS_DEPTH instead of
