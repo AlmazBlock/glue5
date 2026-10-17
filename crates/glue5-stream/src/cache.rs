@@ -348,10 +348,11 @@ impl Cache {
             self.slots[id as usize].dirty.store(false, Ordering::Release);
         }
         // A file not kept open is opened again just to be synced (a sync
-        // flushes the file, whichever handle asks).
+        // flushes the file, whichever handle asks), for writing: Windows
+        // flushes no file opened only to be read (access denied).
         let sync = |id: &u32| match self.slots[*id as usize].file.get() {
             Some(f) => sys::sync_data(f),
-            None => File::open(self.path(*id)).and_then(|f| sys::sync_data(&f)),
+            None => OpenOptions::new().read(true).write(true).open(self.path(*id)).and_then(|f| sys::sync_data(&f)),
         };
         // A pack writes thousands of files: synced side by side, each only to
         // the drive (one full flush of the drive's cache, the index's, below
