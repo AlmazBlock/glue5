@@ -240,6 +240,9 @@ pub(crate) mod responder {
     /// Record lifetimes: names that point at others, and host records.
     const LONG: u32 = 4500;
     const SHORT: u32 = 120;
+    /// How often the host's addresses are looked at again (a laptop moves
+    /// to another network).
+    const RECHECK: Duration = Duration::from_secs(30);
 
     pub struct Responder {
         stop: Arc<AtomicBool>,
@@ -259,7 +262,10 @@ pub(crate) mod responder {
             let socket = socket(&me.addresses)?;
             let stop = Arc::new(AtomicBool::new(false));
             let s = stop.clone();
-            let thread = std::thread::Builder::new().name("mdns".into()).spawn(move || serve(&socket, &me, &s))?;
+            let thread = std::thread::Builder::new().name("mdns".into()).spawn(move || {
+                let mut me = me;
+                serve(&socket, &mut me, &s)
+            })?;
             Ok(Responder { stop, thread: Some(thread) })
         }
     }
@@ -386,13 +392,33 @@ pub(crate) mod responder {
         Ok(s.into())
     }
 
-    fn serve(socket: &UdpSocket, me: &Instance, stop: &AtomicBool) {
+    fn serve(socket: &UdpSocket, me: &mut Instance, stop: &AtomicBool) {
         log::info!("mdns: announcing \"{}\" on port {} ({}.local)", me.name, me.port, me.host);
         let all = Asked { ptr: true, srv: true, txt: true, a: true, no_aaaa: false };
         // Announced twice, a second apart (RFC 6762, 8.3).
-        let mut announce = vec![Instant::now(), Instant::now() + Duration::from_secs(1)];
+        let twice = || vec![Instant::now(), Instant::now() + Duration::from_secs(1)];
+        let mut announce = twice();
+        let mut checked = Instant::now();
         let mut buf = [0u8; 9000];
         while !stop.load(Ordering::Acquire) {
+            // On other networks now: the old addresses said goodbye to, the
+            // group joined where the host is, announced there anew.
+            if checked.elapsed() > RECHECK {
+                checked = Instant::now();
+                let now = crate::lan_addresses();
+                if !same_addresses(&now, &me.addresses) {
+                    log::info!("mdns: addresses now {now:?} (were {:?})", me.addresses);
+                    multicast(socket, me, |addresses| reply(&all, me, addresses, Some(&Query::goodbye())));
+                    for ip in me.addresses.iter().filter(|ip| !now.contains(ip)) {
+                        let _ = socket.leave_multicast_v4(&GROUP, ip);
+                    }
+                    for ip in now.iter().filter(|ip| !me.addresses.contains(ip)) {
+                        let _ = socket.join_multicast_v4(&GROUP, ip);
+                    }
+                    me.addresses = now;
+                    announce = twice();
+                }
+            }
             if announce.first().is_some_and(|t| t.elapsed() > Duration::ZERO) {
                 announce.remove(0);
                 multicast(socket, me, |addresses| reply(&all, me, addresses, None));
@@ -407,6 +433,11 @@ pub(crate) mod responder {
         }
         // Goodbye: the records with a lifetime of 0 (RFC 6762, 10.1).
         multicast(socket, me, |addresses| reply(&all, me, addresses, Some(&Query::goodbye())));
+    }
+
+    /// The same addresses, in any order.
+    fn same_addresses(a: &[Ipv4Addr], b: &[Ipv4Addr]) -> bool {
+        a.len() == b.len() && a.iter().all(|ip| b.contains(ip))
     }
 
     /// Sends to the group from each interface, with that interface's address
