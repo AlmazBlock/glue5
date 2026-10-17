@@ -29,6 +29,7 @@ const PROJECTS: &[(&str, &str, &str, &str)] = &[
     ("etcpak", "Textures for GPUs without BC", "BSD-3-Clause", "https://github.com/wolfpld/etcpak"),
     ("bcdec_rs", "Texture decoding", "MIT", "https://github.com/ScanMountGoat/image_dds"),
     ("snow", "The Noise protocol: friends' encrypted channel", "Apache-2.0 / MIT", "https://github.com/mcginty/snow"),
+    ("Zstandard", "The game's small files, packed to stream", "BSD-3-Clause", "https://facebook.github.io/zstd"),
     #[cfg(target_vendor = "apple")]
     ("objc2", "Apple's frameworks from Rust", "MIT", "https://github.com/madsmtm/objc2"),
     #[cfg(windows)]
