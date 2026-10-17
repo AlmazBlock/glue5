@@ -347,6 +347,54 @@ fn checks_a_server_before_it_is_chosen() {
 }
 
 #[test]
+fn prepares_side_by_side() {
+    let dir = temp("prepare");
+    game(&dir);
+    let cache = dir.join("packs");
+    // The app sharing again before its first preparation was done.
+    let jobs: Vec<_> = (0..2)
+        .map(|_| {
+            let opts = server::Options { game: dir.clone(), build: BUILD.into(), cache: cache.clone(), rate: None };
+            std::thread::spawn(move || server::prepare(opts, &|_| {}).map(|_| ()))
+        })
+        .collect();
+    for j in jobs {
+        j.join().unwrap().unwrap();
+    }
+    let mut names: Vec<String> = fs::read_dir(&cache).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+    names.sort();
+    assert_eq!(names.len(), 2, "{names:?}");
+    for name in names {
+        assert!(name.ends_with(".zst"), "{name}");
+        crate::pack::unpack(fs::File::open(cache.join(&name)).unwrap(), |_, _| Ok(())).unwrap();
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn leaves_the_files_of_a_build_going_on() {
+    let dir = temp("leftovers");
+    game(&dir);
+    let cache = dir.join("packs");
+    fs::create_dir_all(&cache).unwrap();
+    let put = |name: &str, age: Duration| {
+        let f = fs::File::create(cache.join(name)).unwrap();
+        f.set_modified(std::time::SystemTime::now() - age).unwrap();
+    };
+    put("text-0123456789abcdef.4242-0.tmp", Duration::ZERO);
+    put("shaders-0123456789abcdef.4242-1.tmp", Duration::from_secs(7200));
+    put("text-fedcba9876543210.zst", Duration::from_secs(60));
+    let opts = server::Options { game: dir.clone(), build: BUILD.into(), cache: cache.clone(), rate: None };
+    server::prepare(opts, &|_| {}).unwrap();
+    // Another server's build, going on: left alone; one that died, and an
+    // older pack: gone.
+    assert!(cache.join("text-0123456789abcdef.4242-0.tmp").exists());
+    assert!(!cache.join("shaders-0123456789abcdef.4242-1.tmp").exists());
+    assert!(!cache.join("text-fedcba9876543210.zst").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn keeps_no_connection_its_client_closed() {
     let dir = temp("closed");
     game(&dir);

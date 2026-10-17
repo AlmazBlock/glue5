@@ -14,6 +14,7 @@
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -91,12 +92,30 @@ pub fn hash(catalog: &Catalog, ids: &[u32]) -> String {
     hex(&sha.finalize()[..8])
 }
 
-/// Builds the pack of `ids` from the game folder `game` into `out` (through
-/// a temporary file). `progress` gets the bytes read so far and the total.
+/// Builds the pack of `ids` from the game folder `game` into `out`, through
+/// a temporary file of this build's own (another build of the same pack,
+/// in this process or another, writes its own and renames it the same).
+/// `progress` gets the bytes read so far and the total.
 pub fn build(game: &Path, catalog: &Catalog, ids: &[u32], out: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
+    static BUILDS: AtomicU32 = AtomicU32::new(0);
+    let n = BUILDS.fetch_add(1, Ordering::Relaxed);
+    let tmp = out.with_extension(format!("{}-{n}.{TMP}", std::process::id()));
+    let result = write(game, catalog, ids, &tmp, progress)
+        .and_then(|()| fs::rename(&tmp, out).with_context(|| format!("renaming {} to {}", tmp.display(), out.display())));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// A build's temporary file ends with this.
+const TMP: &str = "tmp";
+/// A temporary file older than this is a build that died.
+const TMP_STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+fn write(game: &Path, catalog: &Catalog, ids: &[u32], tmp: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
     let total: u64 = ids.iter().map(|&i| catalog.entries[i as usize].size).sum();
-    let tmp = out.with_extension("tmp");
-    let file = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    let file = File::create(tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let mut enc = zstd::stream::Encoder::new(BufWriter::new(file), LEVEL)?;
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get()) as u32;
     enc.multithread(workers)?;
@@ -120,7 +139,6 @@ pub fn build(game: &Path, catalog: &Catalog, ids: &[u32], out: &Path, progress: 
     }
     enc.write_all(&u32::MAX.to_le_bytes())?;
     enc.finish()?.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-    fs::rename(&tmp, out)?;
     Ok(())
 }
 
@@ -159,12 +177,19 @@ pub fn cached_path(dir: &Path, kind: Kind, hash: &str) -> PathBuf {
     dir.join(format!("{}-{hash}.zst", kind.name()))
 }
 
-/// Removes this kind's packs other than `keep`.
+/// Removes this kind's packs other than `keep`, and temporary files of
+/// builds that died; not those of builds going on (another server
+/// preparing the same folder: its build would find its file gone).
 pub fn remove_others(dir: &Path, kind: Kind, keep: &Path) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with(&format!("{}-", kind.name())) && e.path() != keep {
+        if !name.starts_with(&format!("{}-", kind.name())) || e.path() == keep {
+            continue;
+        }
+        let stale = !name.ends_with(&format!(".{TMP}"))
+            || e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > TMP_STALE));
+        if stale {
             let _ = fs::remove_file(e.path());
         }
     }

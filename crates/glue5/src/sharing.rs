@@ -47,6 +47,12 @@ impl Sharing {
             let options =
                 server::Options { game, build: glue5_runtime::GAME_BUILD.into(), cache, rate: None };
             let result = server::prepare(options, &progress).and_then(|prepared| {
+                // Turned off (or on again: a newer one starts) meanwhile: not
+                // listening, not even for a moment on the port the newer
+                // one wants.
+                if stop.load(Ordering::Acquire) {
+                    anyhow::bail!("stopped");
+                }
                 let mut last = None;
                 for port in glue5_stream::PORT..=glue5_stream::PORT + MORE_PORTS {
                     match Server::start(&prepared, SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))) {
@@ -66,6 +72,7 @@ impl Sharing {
                     *s.lock().unwrap() = State::On(addresses);
                 }
                 Ok(_) => {}
+                Err(_) if stop.load(Ordering::Acquire) => {}
                 Err(e) => {
                     log::warn!("sharing: {e:#}");
                     *s.lock().unwrap() = State::Failed(format!("{e:#}"));

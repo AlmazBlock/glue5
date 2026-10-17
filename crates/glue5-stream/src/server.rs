@@ -88,6 +88,10 @@ pub fn prepare(options: Options, progress: &dyn Fn(Step)) -> Result<Prepared> {
     fs::create_dir_all(&options.cache).with_context(|| format!("creating {}", options.cache.display()))?;
     let mut blobs = vec![("catalog".to_string(), Blob::Memory(zstd::encode_all(&catalog.to_json()[..], 19)?))];
     let mut packs = serde_json::Map::new();
+    // One preparation builds the packs at a time: another (the app sharing
+    // again before the first was ready) waits, and finds them built.
+    static PACKING: Mutex<()> = Mutex::new(());
+    let _one = PACKING.lock().unwrap_or_else(|e| e.into_inner());
     for kind in Kind::ALL {
         let ids = pack::members(&catalog, kind);
         let hash = pack::hash(&catalog, &ids);
