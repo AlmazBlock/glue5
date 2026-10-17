@@ -246,7 +246,10 @@ systems: a full flush per file made the text pack take 14 s to save). At
 start, a block counts only if its file is still there with its full
 length: whatever the system deleted meanwhile (iOS and tvOS caches) is
 fetched again when needed. When the volume falls under 1 GB free, files
-read longest ago are emptied. A copy whose packs are complete starts
+read longest ago are emptied, 256 MB beyond that at a time: data files of
+earlier runs first, then this run's least recently used, the packs' files
+last (an iPhone with a gigabyte free gave away a gigabyte at a time, the
+start's own files and the packs among them). A copy whose packs are complete starts
 without the server (missing blocks wait for it); a lost connection is
 retried for ever and the requests in flight asked again. APFS, when it
 writes a file out, may fill the holes between its written parts with zeros
