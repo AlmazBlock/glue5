@@ -266,6 +266,44 @@ fn reads_ahead_only_what_is_played() {
 }
 
 #[test]
+fn boot_set_follows_the_engine() {
+    let dir = temp("follow");
+    let (a, b) = (noise(8 << 20, 11), noise(8 << 20, 13));
+    fs::create_dir_all(dir.join("data/x64")).unwrap();
+    fs::write(dir.join("data/x64/a.rpf"), &a).unwrap();
+    fs::write(dir.join("data/x64/b.rpf"), &b).unwrap();
+    fs::write(dir.join("data/bootset.json"), br#"[["x64/a.rpf", [[0, 8388607]]], ["x64/b.rpf", [[0, 8388607]]]]"#).unwrap();
+    fs::create_dir_all(dir.join(format!("b/{BUILD}/shaders"))).unwrap();
+    fs::write(dir.join(format!("b/{BUILD}/shaders/index.json")), b"{}").unwrap();
+    // 8 MB/s: the boot set takes two seconds, a.rpf first.
+    let opts = server::Options { game: dir.clone(), build: BUILD.into(), cache: dir.join("packs"), rate: Some(8_000_000) };
+    let prepared = server::prepare(opts, &|_| {}).unwrap();
+    let server = Server::start(&prepared, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let root = temp("follow-copy");
+    let client = Client::start(Options {
+        server: server.addr().to_string(),
+        root: root.clone(),
+        build: BUILD.into(),
+        low_memory: false,
+    });
+    wait_ready(&client);
+    let (ia, ib) = (client.find("data/x64/a.rpf").unwrap(), client.find("data/x64/b.rpf").unwrap());
+    // The engine starts with b.rpf: the rest of it comes before a.rpf's.
+    let mut buf = [0u8; 4096];
+    assert_eq!(client.read(ib, 0, &mut buf), Some(4096));
+    assert_eq!(&buf[..], &b[..4096]);
+    let started = Instant::now();
+    while !client.has(ib, 6 << 20) {
+        assert!(started.elapsed() < Duration::from_secs(10), "b.rpf does not come");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!client.has(ia, 7 << 20), "a.rpf came first");
+    client.stop();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn downloads_the_whole_game() {
     let dir = temp("whole");
     game(&dir);

@@ -4,7 +4,8 @@
 //! start, takes the catalog and the packs (every small file and the
 //! shaders, ~10 MB in all); the boot set (the ranges every start reads,
 //! ~550 MB) then comes at a low priority while the player is still on the
-//! start page or the shaders compile. A read the cache cannot answer asks
+//! start page or the shaders compile (once the game runs, what follows the
+//! parts it waits for comes first). A read the cache cannot answer asks
 //! the server at the highest priority, or raises a request already on its
 //! way, and waits for just its blocks. The engine's own announcements of
 //! the reads it will make ([`Client::hint`]) and read-ahead of files played
@@ -66,6 +67,10 @@ const PIECES_MAX: u64 = 512 << 10;
 const STREAM_GAP: Duration = Duration::from_millis(20);
 /// Two boot ranges closer than this are fetched as one.
 const BOOT_GAP: u64 = 64;
+/// When the engine waits for a part of the boot set not here yet, this much
+/// of the boot set after it comes next (it reads the boot set in an order of
+/// its own, the stream brings it file after file).
+const FOLLOW: u64 = 8 << 20;
 /// Requests of the full download on their way at most (32 MB): spare
 /// bandwidth is used, the queue of the server stays short.
 const FILL_REQUESTS: usize = 512;
@@ -142,6 +147,8 @@ struct Ready {
     cache: Cache,
     manifest: Vec<u8>,
     boot: Vec<(u32, u64, u64)>,
+    /// Per file: its runs in `boot`.
+    boot_runs: HashMap<u32, Vec<usize>>,
     /// Per file: the end of its last read, when the engine had it (µs after
     /// `epoch`), and the current read-ahead.
     seq_end: Vec<AtomicU64>,
@@ -379,6 +386,7 @@ impl Client {
         if !self.in_time(r, id, first, last) {
             self.stats.cold.fetch_add(1, Ordering::Relaxed);
         }
+        self.follow_boot(r, id, first);
         self.waiters.lock().unwrap().push(Waiter { file: id, first, last, thread: thread::current() });
         self.stats.waiting.fetch_add(1, Ordering::Relaxed);
         let mut asked: Option<Instant> = None;
@@ -433,6 +441,32 @@ impl Client {
             }
         }
         true
+    }
+
+    /// The engine waits for a part of the boot set still at its place in the
+    /// queue (`BOOT`): what follows it in the boot set comes next.
+    fn follow_boot(&self, r: &Ready, id: u32, block: u64) {
+        let Some(&k) = r.boot_runs.get(&id).and_then(|runs| runs.iter().find(|&&k| r.boot[k].1 <= block && block <= r.boot[k].2))
+        else {
+            return;
+        };
+        {
+            let inf = self.inflight.lock().unwrap();
+            if !inf.covering(id, block).is_some_and(|q| inf.reqs[&q].prio == BOOT) {
+                return;
+            }
+        }
+        let mut out = Vec::new();
+        self.plan(id, block, r.boot[k].2, AHEAD, &mut out, usize::MAX);
+        let mut left = FOLLOW / BLOCK;
+        for &(f, a, b) in &r.boot[k + 1..] {
+            if left == 0 {
+                break;
+            }
+            self.plan(f, a, b, AHEAD, &mut out, usize::MAX);
+            left = left.saturating_sub(b - a + 1);
+        }
+        self.send(&out);
     }
 
     /// The engine will read this soon (`ahead`: may read it).
@@ -715,11 +749,16 @@ impl Client {
         let n = catalog.entries.len();
         let radio = catalog.entries.iter().map(|e| e.path.to_ascii_lowercase().contains("/radio_")).collect();
         let manifest = catalog.engine_manifest();
+        let mut boot_runs: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (k, &(id, _, _)) in boot.iter().enumerate() {
+            boot_runs.entry(id).or_default().push(k);
+        }
         let ready = Ready {
             catalog,
             cache,
             manifest,
             boot,
+            boot_runs,
             seq_end: (0..n).map(|_| AtomicU64::new(0)).collect(),
             seq_done: (0..n).map(|_| AtomicU64::new(0)).collect(),
             epoch: Instant::now(),
