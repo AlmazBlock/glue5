@@ -998,30 +998,34 @@ impl App {
             old.stop();
             old.root().to_owned()
         });
-        // At start, where an earlier run left it: the download setting
-        // changed while the game ran, which the stream never follows.
-        let old = old.or_else(|| {
-            [Some(paths::stream_copy(&self.user_dir)), paths::download_dir(&self.user_dir)]
-                .into_iter()
-                .flatten()
-                .find(|dir| *dir != root && dir.join(glue5_stream::cache::CATALOG).is_file())
+        let earlier = [Some(paths::stream_copy(&self.user_dir)), paths::download_dir(&self.user_dir)];
+        // Once the old client has finished (it saves its index last), before
+        // the next one opens the copy.
+        let to = root.clone();
+        glue5_stream::after_stopped(move || {
+            let root = to;
+            // At start, where an earlier run left it: the download setting
+            // changed while the game ran, which the stream never follows.
+            let old = old.or_else(|| {
+                earlier.into_iter().flatten().find(|dir| *dir != root && dir.join(glue5_stream::cache::CATALOG).is_file())
+            });
+            // Only a partial copy moves: the whole game, downloaded, stays a game
+            // folder (moved into the cache, an iPhone's system emptied most of it).
+            let partial = |dir: &Path| dir.join(glue5_stream::cache::MARKER).exists();
+            let old = old.filter(|old| *old != root && partial(old));
+            // Folders with no file in them, left there earlier, are not in the way.
+            if old.is_some() && root.exists() && holds_no_files(&root) {
+                let _ = std::fs::remove_dir_all(&root);
+            }
+            if let Some(old) = old.filter(|_| !root.exists()) {
+                if let Some(parent) = root.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::rename(&old, &root) {
+                    log::warn!("stream: moving the copy to {}: {e}", root.display());
+                }
+            }
         });
-        // Only a partial copy moves: the whole game, downloaded, stays a game
-        // folder (moved into the cache, an iPhone's system emptied most of it).
-        let partial = |dir: &Path| dir.join(glue5_stream::cache::MARKER).exists();
-        let old = old.filter(|old| *old != root && partial(old));
-        // Folders with no file in them, left there earlier, are not in the way.
-        if old.is_some() && root.exists() && holds_no_files(&root) {
-            let _ = std::fs::remove_dir_all(&root);
-        }
-        if let Some(old) = old.filter(|_| !root.exists()) {
-            if let Some(parent) = root.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::rename(&old, &root) {
-                log::warn!("stream: moving the copy to {}: {e}", root.display());
-            }
-        }
         self.stream = server.map(|server| {
             let client = glue5_stream::Client::start(glue5_stream::Options {
                 server,
@@ -1076,9 +1080,13 @@ impl App {
         if self.settings.game_dir.as_deref() == Some(root.as_path()) {
             self.settings.game_dir = None;
         }
-        if let Err(e) = glue5_stream::cache::clear(&root) {
-            self.ui.note(format!("The copy could not be deleted: {e}"));
-        }
+        // In the background (gigabytes), once the client has finished, and
+        // before the next one starts on the folder.
+        glue5_stream::after_stopped(move || {
+            if let Err(e) = glue5_stream::cache::clear(&root) {
+                log::warn!("stream: the copy could not be deleted: {e}");
+            }
+        });
         if self.source == Source::Server {
             self.game_dir = None;
         }

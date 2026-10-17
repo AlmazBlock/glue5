@@ -277,6 +277,7 @@ fn end_to_end() {
     assert_eq!(client.read(later, 300_000, &mut buf), Some(8192));
     assert_eq!(&buf[..], &noise(1 << 20, 9)[300_000..300_000 + 8192]);
     client.stop();
+    client.join();
     drop(back);
 
     // Without a server, the copy plays.
@@ -286,6 +287,7 @@ fn end_to_end() {
     assert_eq!(offline.read(id, 0, &mut buf), Some(5000));
     assert_eq!(&buf[..], &big[..5000]);
     offline.stop();
+    offline.join();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
 }
@@ -321,6 +323,7 @@ fn demand_overtakes_prefetch() {
     let waited = started.elapsed();
     assert!(waited < Duration::from_millis(100), "the demand read waited {waited:?} behind the prefetch");
     client.stop();
+    client.join();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
 }
@@ -362,6 +365,7 @@ fn counts_reads_not_announced_in_time() {
     assert_eq!(client.read(b, 5000, &mut buf[..100]), Some(100));
     assert_eq!(client.not_in_time(), 1);
     client.stop();
+    client.join();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
 }
@@ -405,6 +409,7 @@ fn reads_ahead_only_what_is_played() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(!client.has(model, 48 << 10), "read ahead of small pieces read back to back");
     client.stop();
+    client.join();
     drop(server);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
@@ -444,6 +449,7 @@ fn boot_set_follows_the_engine() {
     }
     assert!(!client.has(ia, 7 << 20), "a.rpf came first");
     client.stop();
+    client.join();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
 }
@@ -474,6 +480,7 @@ fn downloads_the_whole_game() {
         assert_eq!(fs::read(root.join(f)).unwrap(), fs::read(dir.join(f)).unwrap(), "{f}");
     }
     client.stop();
+    client.join();
     drop(server);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
@@ -513,6 +520,7 @@ fn completes_only_once_finished() {
     }
     assert!(!root.join(crate::cache::MARKER).exists());
     client.stop();
+    client.join();
     drop(server);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
@@ -546,6 +554,7 @@ fn a_stuck_server_holds_nothing_up() {
     assert!(promptly(move || assert!(c.status().connected)), "status() waits for a stuck write");
     let c = client.clone();
     assert!(promptly(move || c.stop()), "stop() waits for a stuck write");
+    client.join();
     drop(proxy);
     drop(server);
     let _ = fs::remove_dir_all(&dir);
@@ -581,6 +590,7 @@ fn a_quiet_connection_is_not_taken_for_dead() {
     assert_eq!(read.join().unwrap().as_deref(), Some(&data[..4096]));
     assert_eq!(proxy.accepted.load(Ordering::Acquire), 1, "the connection was dropped");
     client.stop();
+    client.join();
     drop(proxy);
     drop(server);
     let _ = fs::remove_dir_all(&dir);
@@ -616,6 +626,7 @@ fn keeps_no_chunk_outside_its_request() {
     assert_eq!(client.read(0, 128 << 10, &mut buf), Some(4096));
     assert_eq!(&buf[..], &data[128 << 10..][..4096]);
     client.stop();
+    client.join();
     drop(proxy);
     drop(server);
     let _ = fs::remove_dir_all(&dir);
@@ -634,11 +645,52 @@ fn refuses_what_no_server_sends() {
     let client = Client::start(opts(fake_server(hello(serde_json::json!({ "catalog": u64::MAX / 2 })), vec![])));
     wait_error(&client, "bytes");
     client.stop();
+    client.join();
     let bomb = zstd::encode_all(&vec![b' '; 100 << 20][..], 3).unwrap();
     let addr = fake_server(hello(serde_json::json!({ "catalog": bomb.len() })), vec![("catalog", bomb)]);
     let client = Client::start(opts(addr));
     wait_error(&client, "more than");
     client.stop();
+    client.join();
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A stopped client finishes in the background, a sync it was in too; what
+/// touches its folder after it (work on it, the next client) waits for it.
+#[test]
+fn a_stopped_client_finishes_before_its_folder_is_touched() {
+    let dir = temp("handover");
+    game(&dir);
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    // The catalog's first chunk waits: the client is in its sync.
+    let hold = Arc::new(AtomicBool::new(true));
+    let held = hold.clone();
+    let tamper: Tamper = Arc::new(move |h: &mut Header| {
+        while h.kind == DATA && h.file == u32::MAX && held.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let proxy = Proxy::start(server.addr(), Some(tamper));
+    let root = temp("handover-copy");
+    let opts = |server: SocketAddr| Options { server: server.to_string(), root: root.clone(), build: BUILD.into(), low_memory: false };
+    let a = Client::start(opts(proxy.addr));
+    std::thread::sleep(Duration::from_millis(300));
+    a.stop();
+    let c = a.clone();
+    assert!(promptly(move || c.join()), "a stopped client goes on with its sync");
+    hold.store(false, Ordering::Release);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (c, s) = (a.clone(), seen.clone());
+    crate::after_stopped(move || s.lock().unwrap().push(c.finished()));
+    let b = Client::start(opts(server.addr()));
+    wait_ready(&b);
+    assert_eq!(*seen.lock().unwrap(), [true]);
+    assert!(!a.is_ready());
+    b.stop();
+    b.join();
+    drop(proxy);
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);
 }
 

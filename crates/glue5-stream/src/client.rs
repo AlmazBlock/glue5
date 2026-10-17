@@ -14,15 +14,20 @@
 //! A lost connection is retried for ever; requests in flight are asked
 //! again on the new one. Without a server, a copy that was complete enough
 //! still plays (whatever is missing waits for the server).
+//!
+//! [`Client::stop`] returns at once; the client finishes in the background
+//! (its threads end, its index is saved last). Until it has, nothing else
+//! touches its folder: a client started after it waits, and so does work
+//! on copies' folders ([`after_stopped`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, BufReader, Read};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread::{self, Thread};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -137,6 +142,8 @@ pub struct Client {
     phase: Mutex<Phase>,
     error: Mutex<Option<String>>,
     ready: OnceLock<Ready>,
+    /// The connection, from when it is made (for `stop` to shut it).
+    socket: Mutex<Option<TcpStream>>,
     /// The connection requests go on (locked briefly: writes hold `sending`).
     conn: Mutex<Option<Arc<TcpStream>>>,
     /// Whether there is one (the app asks every frame).
@@ -148,6 +155,11 @@ pub struct Client {
     waiters: Mutex<Vec<Waiter>>,
     stats: Stats,
     stop: AtomicBool,
+    /// Wakes the client's threads from their pauses when it stops.
+    woken: Mutex<()>,
+    wake: Condvar,
+    /// Set once a stopped client has finished.
+    finished: Arc<Done>,
     /// The whole game is wanted on this device ([`Client::set_fill`]), and
     /// it is all here.
     fill: AtomicBool,
@@ -267,6 +279,7 @@ impl Client {
             phase: Mutex::new(Phase::Connecting),
             error: Mutex::new(None),
             ready: OnceLock::new(),
+            socket: Mutex::new(None),
             conn: Mutex::new(None),
             connected: AtomicBool::new(false),
             sending: Mutex::new(()),
@@ -274,6 +287,9 @@ impl Client {
             waiters: Mutex::new(Vec::new()),
             stats: Stats::default(),
             stop: AtomicBool::new(false),
+            woken: Mutex::new(()),
+            wake: Condvar::new(),
+            finished: Arc::new(Done::default()),
             fill: AtomicBool::new(false),
             complete: AtomicBool::new(false),
             no_room: AtomicBool::new(false),
@@ -281,12 +297,13 @@ impl Client {
             tried_offline: AtomicBool::new(false),
             boot: Mutex::new(None),
         });
+        let before = pending();
         let c = client.clone();
-        thread::Builder::new().name("stream".into()).spawn(move || c.run()).expect("stream thread");
+        let keep = thread::Builder::new().name("stream sync".into()).spawn(move || c.keep()).expect("stream sync thread");
         let c = client.clone();
-        thread::Builder::new().name("stream sync".into()).spawn(move || c.keep()).expect("stream sync thread");
+        let fill = thread::Builder::new().name("stream fill".into()).spawn(move || c.fill()).expect("stream fill thread");
         let c = client.clone();
-        thread::Builder::new().name("stream fill".into()).spawn(move || c.fill()).expect("stream fill thread");
+        thread::Builder::new().name("stream".into()).spawn(move || c.run(before, [keep, fill])).expect("stream thread");
         client
     }
 
@@ -370,16 +387,37 @@ impl Client {
         self.fill.store(on, Ordering::Release);
     }
 
-    /// Disconnects for good and saves the index (another server is chosen).
-    /// Reads still waiting stay so.
+    /// Disconnects for good (another server is chosen), and returns at
+    /// once: the client finishes in the background, its index saved last
+    /// ([`Client::join`]). Reads still waiting stay so.
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Release);
-        // A write stuck on it fails at once.
-        if let Some(s) = self.conn.lock().unwrap().take() {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+        if self.stop.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        BEFORE.lock().unwrap_or_else(PoisonError::into_inner).push(self.finished.clone());
+        // A sync, or a write stuck on it, fails at once.
+        if let Some(s) = &*self.socket.lock().unwrap() {
+            let _ = s.shutdown(Shutdown::Both);
         }
         self.connected.store(false, Ordering::Release);
-        self.flush();
+        let _woken = self.woken.lock().unwrap();
+        self.wake.notify_all();
+    }
+
+    /// Waits until the client, stopped, has finished.
+    pub fn join(&self) {
+        self.finished.wait();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finished(&self) -> bool {
+        self.finished.is_set()
+    }
+
+    /// Sleeps for `d`, or until the client stops.
+    fn pause(&self, d: Duration) {
+        let woken = self.woken.lock().unwrap();
+        let _ = self.wake.wait_timeout_while(woken, d, |_| !self.stop.load(Ordering::Acquire));
     }
 
     /// Saves the copy's index (the app is closing).
@@ -617,7 +655,7 @@ impl Client {
     fn write(&self, buf: &[u8]) {
         let Some(s) = self.conn.lock().unwrap().clone() else { return };
         if io::Write::write_all(&mut &*s, buf).is_err() {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+            let _ = s.shutdown(Shutdown::Both);
             *self.conn.lock().unwrap() = None;
             self.connected.store(false, Ordering::Release);
         }
@@ -627,15 +665,34 @@ impl Client {
         *self.phase.lock().unwrap() = p;
     }
 
+    /// Waits for the clients stopped before it (its copy may be one of
+    /// theirs), serves until stopped, then finishes: its other threads end,
+    /// and the index is saved one last time.
+    fn run(self: Arc<Self>, before: Vec<Arc<Done>>, threads: [JoinHandle<()>; 2]) {
+        let _over = Over(self.finished.clone());
+        for done in before {
+            done.wait();
+        }
+        self.sessions();
+        for t in threads {
+            let _ = t.join();
+        }
+        self.flush();
+    }
+
     /// Connects, syncs, serves; again after every lost connection.
-    fn run(self: Arc<Self>) {
+    fn sessions(&self) {
         let mut backoff = Duration::from_millis(500);
         while !self.stop.load(Ordering::Acquire) {
             let mut served = false;
             let result = self.session(&mut served);
             let failed = matches!(*self.phase.lock().unwrap(), Phase::Failed(_));
+            *self.socket.lock().unwrap() = None;
             *self.conn.lock().unwrap() = None;
             self.connected.store(false, Ordering::Release);
+            if self.stop.load(Ordering::Acquire) {
+                return;
+            }
             if let Err(e) = &result {
                 let msg = format!("{e:#}");
                 if self.error.lock().unwrap().as_deref() != Some(&msg) {
@@ -660,7 +717,7 @@ impl Client {
             if served {
                 backoff = Duration::from_millis(500);
             } else {
-                thread::sleep(backoff);
+                self.pause(backoff);
                 backoff = (backoff * 2).min(Duration::from_secs(5));
             }
         }
@@ -669,6 +726,10 @@ impl Client {
     /// `served`: the copy was ready and requests went on the connection.
     fn session(&self, served: &mut bool) -> Result<()> {
         let (stream, addr) = connect(&self.opts.server)?;
+        *self.socket.lock().unwrap() = Some(stream.try_clone()?);
+        if self.stop.load(Ordering::Acquire) {
+            bail!("stopped");
+        }
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         stream.set_write_timeout(Some(SILENCE))?;
@@ -951,17 +1012,17 @@ impl Client {
         while !self.stop.load(Ordering::Acquire) {
             let connected = self.connected.load(Ordering::Acquire);
             let Some(r) = self.ready.get().filter(|_| connected && self.fill.load(Ordering::Acquire)) else {
-                thread::sleep(Duration::from_millis(500));
+                self.pause(Duration::from_millis(500));
                 continue;
             };
             if self.complete.load(Ordering::Acquire) {
-                thread::sleep(Duration::from_secs(1));
+                self.pause(Duration::from_secs(1));
                 continue;
             }
             let no_room = r.cache.free_space().is_some_and(|free| free < FLOOR);
             self.no_room.store(no_room, Ordering::Release);
             if no_room {
-                thread::sleep(Duration::from_secs(2));
+                self.pause(Duration::from_secs(2));
                 continue;
             }
             let outstanding = self.inflight.lock().unwrap().reqs.values().filter(|q| q.prio == FILL).count();
@@ -992,11 +1053,11 @@ impl Client {
                     // Still a partial copy (its marker says so): tried again.
                     Err(e) => {
                         log::warn!("stream cache: finishing the whole game: {e}");
-                        thread::sleep(Duration::from_secs(2));
+                        self.pause(Duration::from_secs(2));
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(100));
+            self.pause(Duration::from_millis(100));
         }
     }
 
@@ -1039,8 +1100,12 @@ impl Client {
         let (mut last, mut at) = ([0u64; 5], Instant::now());
         // When the index was saved, the bytes received then, and two seconds ago.
         let (mut saved, mut saved_at, mut received) = (Instant::now(), 0, 0);
-        while !self.stop.load(Ordering::Acquire) {
-            thread::sleep(Duration::from_secs(2));
+        loop {
+            self.pause(Duration::from_secs(2));
+            // The last save is the run thread's, once this one ended.
+            if self.stop.load(Ordering::Acquire) {
+                return;
+            }
             let Some(r) = self.ready.get() else { continue };
             let now = self.stats.received.load(Ordering::Relaxed);
             let flowing = std::mem::replace(&mut received, now) != now;
@@ -1067,6 +1132,75 @@ impl Client {
             }
             (last, at) = (now, Instant::now());
         }
+    }
+}
+
+/// Clients stopped and not finished yet, and work on copies' folders not
+/// done yet: what a client started now waits for.
+static BEFORE: Mutex<Vec<Arc<Done>>> = Mutex::new(Vec::new());
+
+fn pending() -> Vec<Arc<Done>> {
+    let mut before = BEFORE.lock().unwrap_or_else(PoisonError::into_inner);
+    before.retain(|d| !d.is_set());
+    before.clone()
+}
+
+/// Runs `work` on copies' folders (a copy moved, or deleted) in the
+/// background, once the clients stopped before have finished and the work
+/// asked before is done; a client started after it waits for it.
+pub fn after_stopped(work: impl FnOnce() + Send + 'static) {
+    let done = Arc::new(Done::default());
+    let before = {
+        let mut before = BEFORE.lock().unwrap_or_else(PoisonError::into_inner);
+        before.retain(|d| !d.is_set());
+        let earlier = before.clone();
+        before.push(done.clone());
+        earlier
+    };
+    let over = Over(done);
+    let spawned = thread::Builder::new().name("stream copy".into()).spawn(move || {
+        let _over = over;
+        for done in before {
+            done.wait();
+        }
+        work();
+    });
+    if let Err(e) = spawned {
+        log::warn!("stream: no thread for the copy's folder: {e}");
+    }
+}
+
+/// Set once something is over: a client finished, work on a copy done.
+#[derive(Default)]
+struct Done {
+    over: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl Done {
+    fn set(&self) {
+        *self.over.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.cv.notify_all();
+    }
+
+    fn is_set(&self) -> bool {
+        *self.over.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait(&self) {
+        let mut over = self.over.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*over {
+            over = self.cv.wait(over).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// Sets its [`Done`] when dropped: however its thread ends.
+struct Over(Arc<Done>);
+
+impl Drop for Over {
+    fn drop(&mut self) {
+        self.0.set();
     }
 }
 

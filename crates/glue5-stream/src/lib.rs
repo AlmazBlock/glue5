@@ -17,7 +17,7 @@ pub mod protocol;
 pub mod server;
 mod sys;
 
-pub use client::{Check, Client, Options, Phase, Status, check};
+pub use client::{Check, Client, Options, Phase, Status, after_stopped, check};
 pub use protocol::PORT;
 pub use sys::lan_addresses;
 
