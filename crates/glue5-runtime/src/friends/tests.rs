@@ -421,3 +421,21 @@ fn one_address_does_not_use_up_the_handshakes_of_all() {
     higher.s.receive(lower.addr, hs1[3], &hs1[4..], now, &mut answer);
     assert!(!answer.send.is_empty());
 }
+
+#[test]
+fn probes_find_friends_by_this_epoch_s_tag_and_the_last_one_s() {
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    befriend(&mut a, &mut b, true, &mut now);
+    let shared = a.s.friends[&b.key()].shared;
+    let epoch = crypto::epoch(unix());
+    for (e, found) in [(epoch, true), (epoch - 1, true), (epoch - 2, false)] {
+        a.s.friends.get_mut(&b.key()).unwrap().contacted.clear();
+        a.s.handshakes.clear();
+        let mut d = vec![9; 8];
+        d.extend_from_slice(&crypto::meeting_tag(&shared, e));
+        let mut out = Out::default();
+        a.s.on_probe(b.addr, &d, now, &mut out);
+        assert_eq!(out.send.iter().any(|(to, _)| *to == b.addr), found, "{e}");
+    }
+}

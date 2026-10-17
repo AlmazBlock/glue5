@@ -344,6 +344,19 @@ impl Ask {
     }
 }
 
+/// The friends by what finds them in an epoch, worked out once per epoch
+/// and as friends come and go (a hash each, which a probe would otherwise
+/// cost per tag and friend): their meeting keys on the DHT, and their tags
+/// on the local network (this epoch's and the last one's: clocks differ).
+#[derive(Default)]
+struct Meetings {
+    epoch: Option<u64>,
+    /// Each friend's key and tag this epoch.
+    of: HashMap<Key, (dht::Id, Tag)>,
+    keys: HashMap<dht::Id, Key>,
+    tags: HashMap<Tag, Key>,
+}
+
 /// A player met in a lobby.
 struct Recent {
     key: Key,
@@ -418,6 +431,7 @@ pub(crate) struct Service {
     /// This player, as told to friends (the lobbies are added as sent).
     local: Presence,
     friends: HashMap<Key, Friend>,
+    meetings: Meetings,
     blocked: HashSet<Key>,
     requests: HashMap<Key, Request>,
     asked: Vec<Ask>,
@@ -506,6 +520,7 @@ impl Service {
             salt,
             local: Presence { name: clean_name(name), id, ..Presence::default() },
             friends: HashMap::new(),
+            meetings: Meetings::default(),
             blocked: store.blocked.iter().filter_map(|k| crypto::unhex(k)).collect(),
             requests: HashMap::new(),
             asked: Vec::new(),
@@ -610,6 +625,7 @@ impl Service {
             return false;
         }
         self.blocked.remove(&key);
+        self.meetings = Meetings::default();
         self.friends.entry(key).or_insert(Friend {
             key,
             shared,
@@ -639,6 +655,7 @@ impl Service {
 
     fn remove_friend(&mut self, key: &Key, out: &mut Out) {
         let Some(mut f) = self.friends.remove(key) else { return };
+        self.meetings = Meetings::default();
         if let Some(t) = f.transport.as_mut() {
             out.push(t.addr, seal(t, &Message::Removed));
         }
@@ -666,16 +683,33 @@ impl Service {
 
     // ---- time ----
 
+    /// The friends' meeting keys and tags for the epoch of `unix`.
+    fn update_meetings(&mut self, unix: u64) {
+        let epoch = crypto::epoch(unix);
+        if self.meetings.epoch == Some(epoch) {
+            return;
+        }
+        let mut m = Meetings { epoch: Some(epoch), ..Meetings::default() };
+        for f in self.friends.values() {
+            let (key, tag) = (crypto::meeting_key(&f.shared, epoch), crypto::meeting_tag(&f.shared, epoch));
+            m.of.insert(f.key, (key, tag));
+            m.keys.insert(key, f.key);
+            m.tags.insert(tag, f.key);
+            m.tags.insert(crypto::meeting_tag(&f.shared, epoch.saturating_sub(1)), f.key);
+        }
+        self.meetings = m;
+    }
+
     /// The DHT lookups wanted now: key, options.
-    fn lookups(&self, unix: u64) -> Vec<(dht::Id, dht::Options)> {
+    fn lookups(&mut self, unix: u64) -> Vec<(dht::Id, dht::Options)> {
         let mut keys = Vec::new();
         if !self.active() {
             return keys;
         }
-        let epoch = crypto::epoch(unix);
-        for f in self.friends.values() {
-            let refresh = if f.connected() { LOOKUP_CONNECTED } else { LOOKUP_ALONE };
-            keys.push((crypto::meeting_key(&f.shared, epoch), dht::Options { announce: true, refresh }));
+        self.update_meetings(unix);
+        for (k, (key, _)) in &self.meetings.of {
+            let refresh = if self.friends[k].connected() { LOOKUP_CONNECTED } else { LOOKUP_ALONE };
+            keys.push((*key, dht::Options { announce: true, refresh }));
         }
         if let Some(code) = &self.code {
             keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_CONNECTED }));
@@ -861,13 +895,13 @@ impl Service {
     }
 
     /// The tags this player looks for: friends not connected, codes asked.
-    fn wanted_tags(&self, unix: u64) -> Vec<Tag> {
+    fn wanted_tags(&mut self, unix: u64) -> Vec<Tag> {
         if !self.active() {
             return Vec::new();
         }
-        let epoch = crypto::epoch(unix);
+        self.update_meetings(unix);
         let mut tags: Vec<Tag> =
-            self.friends.values().filter(|f| !f.connected()).map(|f| crypto::meeting_tag(&f.shared, epoch)).collect();
+            self.meetings.of.iter().filter(|(k, _)| !self.friends[*k].connected()).map(|(_, (_, tag))| *tag).collect();
         tags.extend(
             self.asked.iter().filter(|a| a.transport.is_none() && !a.declined).filter_map(Ask::code).map(crypto::code_tag),
         );
@@ -885,9 +919,8 @@ impl Service {
         if self.own.contains(&addr) || !self.active() {
             return;
         }
-        let epoch = crypto::epoch(unix());
-        if let Some(f) = self.friends.values().find(|f| crypto::meeting_key(&f.shared, epoch) == key) {
-            let k = f.key;
+        self.update_meetings(unix());
+        if let Some(&k) = self.meetings.keys.get(&key) {
             self.contact(k, addr, false, now, out);
             return;
         }
@@ -1013,22 +1046,18 @@ impl Service {
     }
 
     fn on_probe(&mut self, from: SocketAddrV4, d: &[u8], now: Instant, out: &mut Out) {
-        let tags: Vec<Tag> = d.as_chunks::<8>().0.to_vec();
-        let Some((id, tags)) = tags.split_first() else { return };
+        // As many tags as a probe carries, at most.
+        let all = d.as_chunks::<8>().0;
+        let Some((id, tags)) = all[..all.len().min(session::MAX_TAGS)].split_first() else { return };
         if *id == self.probe_id {
             self.own.insert(from);
             return;
         }
-        let epoch = crypto::epoch(unix());
-        // A friend (this epoch's tag or the last one's: clocks differ).
-        let friends: Vec<Key> = self
-            .friends
-            .values()
-            .filter(|f| {
-                tags.iter().any(|t| *t == crypto::meeting_tag(&f.shared, epoch) || *t == crypto::meeting_tag(&f.shared, epoch.saturating_sub(1)))
-            })
-            .map(|f| f.key)
-            .collect();
+        // A friend (this epoch's tag or the last one's).
+        self.update_meetings(unix());
+        let mut friends: Vec<Key> = tags.iter().filter_map(|t| self.meetings.tags.get(t).copied()).collect();
+        friends.sort_unstable();
+        friends.dedup();
         for key in friends {
             self.contact(key, from, true, now, out);
         }

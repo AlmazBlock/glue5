@@ -270,10 +270,13 @@ impl Window {
     }
 }
 
+/// The tags a probe carries at most (its id among them).
+pub(crate) const MAX_TAGS: usize = (MAX_DATAGRAM - MAGIC.len() - 1) / 8;
+
 /// A probe for `tags`.
 pub(crate) fn probe(tags: &[Tag]) -> Vec<u8> {
     let mut d = header(PROBE);
-    for t in tags.iter().take((MAX_DATAGRAM - d.len()) / 8) {
+    for t in tags.iter().take(MAX_TAGS) {
         d.extend_from_slice(t);
     }
     d
