@@ -5,10 +5,13 @@
 //! Blocks are written as they arrive and marked present right after; the
 //! index of present blocks (`index`) is saved every few seconds, after the
 //! data it describes is on disk, so a crash or a power cut loses at most
-//! what came in since. The system may delete any of it while the app is
-//! not running (Apple TV and iPhone caches, a user): at every start a
-//! block only counts if its file is still there with its full length, and
-//! the rest is fetched again when needed.
+//! what came in since. Files are emptied only once an index without their
+//! blocks is saved (on a volume too full for one, the index is deleted
+//! until the next save: a crash meanwhile loses it all). The system may
+//! delete any of it while the app is not running (Apple TV and iPhone
+//! caches, a user): at every start a block only counts if its file is
+//! still there with its full length, and the rest is fetched again when
+//! needed.
 //!
 //! Reads of present blocks are plain positioned reads from these files, as
 //! fast as a local game folder. When space runs out, files unused for the
@@ -495,29 +498,49 @@ impl Cache {
             let s = &self.slots[i as usize];
             (s.pack, s.last_used.load(Ordering::Relaxed), s.touched.load(Ordering::Relaxed))
         });
-        let mut freed = 0;
+        // Their blocks go first, readers and writers kept away until the
+        // files are emptied.
+        let (mut freed, mut emptied) = (0, Vec::new());
         for id in order {
             if freed >= want {
                 break;
             }
             let s = &self.slots[id as usize];
-            let _g = s.guard.write().unwrap();
+            let g = s.guard.write().unwrap();
             let bytes = s.bytes();
             for w in s.present.iter() {
                 w.store(0, Ordering::Release);
             }
+            self.used.fetch_sub(bytes.min(self.used()), Ordering::Relaxed);
+            freed += bytes;
+            emptied.push((s, g));
+        }
+        if emptied.is_empty() {
+            return 0;
+        }
+        // Then the index on disk, which must not claim them once their data
+        // is gone (after a crash, a full-length file of zeros would count):
+        // saved, or, if it cannot be (a full volume), deleted until the next
+        // save writes it again.
+        self.changed.store(true, Ordering::Release);
+        if let Err(e) = self.save() {
+            log::warn!("stream cache: saving the index before emptying files: {e}");
+            if let Err(e) = fs::remove_file(self.root.join("index"))
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                // Kept: the index still claims it (fetched again when needed).
+                log::warn!("stream cache: nothing emptied: {e}");
+                return 0;
+            }
+        }
+        for (s, _g) in &emptied {
             if let Some(f) = s.file.get() {
                 let _ = f.set_len(0).and_then(|()| f.set_len(s.size));
             } else {
                 let _ = fs::remove_file(self.root.join(&s.path));
             }
-            self.used.fetch_sub(bytes.min(self.used()), Ordering::Relaxed);
-            freed += bytes;
         }
-        if freed > 0 {
-            self.changed.store(true, Ordering::Release);
-            log::info!("stream cache: {:.2} GB freed", freed as f64 / 1e9);
-        }
+        log::info!("stream cache: {:.2} GB freed", freed as f64 / 1e9);
         freed
     }
 
@@ -705,6 +728,26 @@ mod tests {
         assert!(!c.has(0, 0, 0) && c.complete(2));
         assert_eq!(c.evict(1), 10);
         assert!(!c.complete(2));
+        let _ = clear(&root);
+    }
+
+    /// Blocks emptied stay gone after a crash right after (no save): the
+    /// index on disk no longer claims them, though the file kept open is
+    /// still there at its full length (of zeros).
+    #[test]
+    fn emptied_blocks_stay_gone_after_a_crash() {
+        let root = std::env::temp_dir().join(format!("glue5-cache-emptied-{}", std::process::id()));
+        let _ = clear(&root);
+        let catalog = Catalog::new("x".into(), vec![Entry { path: "data/a.rpf".into(), size: 2 * BLOCK, mtime: 1 }], 1);
+        {
+            let c = Cache::open(&root, &catalog).unwrap();
+            c.write(0, 0, &vec![5u8; 2 * BLOCK as usize]).unwrap();
+            c.save().unwrap();
+            assert_eq!(c.evict(1), 2 * BLOCK);
+        }
+        assert_eq!(fs::metadata(root.join("data/a.rpf")).unwrap().len(), 2 * BLOCK);
+        let c = Cache::open(&root, &catalog).unwrap();
+        assert!(!c.has(0, 0, 0) && !c.has(0, 1, 1));
         let _ = clear(&root);
     }
 
