@@ -131,7 +131,8 @@ impl Prepared {
 pub struct Server {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
-    clients: Arc<Mutex<Vec<TcpStream>>>,
+    /// The connections open now (to close them when the server stops).
+    clients: Arc<Mutex<HashMap<u64, TcpStream>>>,
     accept: Option<thread::JoinHandle<()>>,
 }
 
@@ -140,21 +141,27 @@ impl Server {
         let listener = TcpListener::bind(bind).with_context(|| format!("listening on {bind}"))?;
         let addr = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let clients = Arc::new(Mutex::new(Vec::new()));
+        let clients = Arc::new(Mutex::new(HashMap::new()));
         let shared = prepared.shared.clone();
         let accept = {
             let (stop, clients) = (stop.clone(), clients.clone());
             thread::Builder::new().name("serve".into()).spawn(move || {
-                for stream in listener.incoming() {
+                for (id, stream) in (0u64..).zip(listener.incoming()) {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
                     let Ok(stream) = stream else { continue };
                     if let Ok(clone) = stream.try_clone() {
-                        clients.lock().unwrap().push(clone);
+                        clients.lock().unwrap().insert(id, clone);
                     }
-                    let shared = shared.clone();
-                    let _ = thread::Builder::new().name("serve client".into()).spawn(move || serve(shared, stream));
+                    let (shared, clients) = (shared.clone(), clients.clone());
+                    let _ = thread::Builder::new().name("serve client".into()).spawn(move || {
+                        serve(shared, stream);
+                        // Its socket closes with the last handle: kept here, a
+                        // closed connection stayed open (a phone's Servers page
+                        // asks every 5 s).
+                        clients.lock().unwrap().remove(&id);
+                    });
                 }
             })?
         };
@@ -165,6 +172,12 @@ impl Server {
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
+
+    /// The connections open now.
+    #[cfg(test)]
+    pub(crate) fn connections(&self) -> usize {
+        self.clients.lock().unwrap().len()
+    }
 }
 
 impl Drop for Server {
@@ -173,7 +186,7 @@ impl Drop for Server {
         // Wakes the accept loop up.
         let wake = if self.addr.ip().is_unspecified() { SocketAddr::from(([127, 0, 0, 1], self.addr.port())) } else { self.addr };
         let _ = TcpStream::connect_timeout(&wake, Duration::from_millis(200));
-        for c in self.clients.lock().unwrap().drain(..) {
+        for (_, c) in self.clients.lock().unwrap().drain() {
             let _ = c.shutdown(Shutdown::Both);
         }
         if let Some(t) = self.accept.take() {
@@ -263,7 +276,6 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
     if hello.send(&mut writer, &shared.hello).is_err() {
         return;
     }
-    log::info!("serve: {peer} connected");
     let conn = Arc::new(Conn { queue: Mutex::new(Queue::default()), ready: Condvar::new() });
     let sender = {
         let (shared, conn) = (shared.clone(), conn.clone());
@@ -271,9 +283,16 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
     };
     let mut reader = BufReader::with_capacity(64 * 1024, stream.try_clone().expect("socket clone"));
     let (mut reads, mut asked) = (0u64, 0u64);
+    // Whether it asked anything: a client that only reads the greeting (an
+    // app checking whether this server serves its game) is not a session.
+    let mut asking = false;
     let result: io::Result<()> = (|| {
         loop {
             let h = Header::read(&mut reader)?;
+            if !asking {
+                asking = true;
+                log::info!("serve: {peer} connected");
+            }
             let queue_job = |job: Job| {
                 let mut q = conn.queue.lock().unwrap();
                 q.push(h.req, job);
@@ -335,7 +354,15 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
     if let Ok(t) = sender {
         let _ = t.join();
     }
-    let why = result.err().map_or_else(String::new, |e| format!(" ({e})"));
+    // The client closing the connection is how it ends.
+    let why = match result {
+        Err(e) if e.kind() != io::ErrorKind::UnexpectedEof => format!(" ({e})"),
+        _ => String::new(),
+    };
+    if !asking {
+        log::debug!("serve: {peer} read the greeting and left{why}");
+        return;
+    }
     log::info!(
         "serve: {peer} left after {:.0?}{why}: {reads} reads, {:.0} MB asked; {:.0} MB sent in all",
         started.elapsed(),

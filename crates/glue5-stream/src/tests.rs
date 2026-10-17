@@ -345,3 +345,22 @@ fn checks_a_server_before_it_is_chosen() {
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
     assert!(matches!(crate::check(&closed, BUILD), crate::Check::Unreachable(_)));
 }
+
+#[test]
+fn keeps_no_connection_its_client_closed() {
+    let dir = temp("closed");
+    game(&dir);
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let addr = server.addr().to_string();
+    // A phone's Servers page checks every few seconds.
+    for _ in 0..20 {
+        assert!(matches!(crate::check(&addr, BUILD), crate::Check::Ready { .. }));
+    }
+    let started = Instant::now();
+    while server.connections() > 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "{} connections still open", server.connections());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
+}
