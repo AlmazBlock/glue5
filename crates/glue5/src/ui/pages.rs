@@ -485,7 +485,7 @@ fn game_files(ui: &mut egui::Ui, settings: &mut Settings, status: &Status, go: &
         ui.label(RichText::new(paths::where_the_game_goes()).small().color(theme::MUTED));
         ui.label(RichText::new(paths::game_layout()).monospace().small().color(theme::MUTED));
         ui.label(RichText::new(paths::or_stream()).small().color(theme::MUTED));
-        if ui.horizontal(|ui| action_button(ui, "Play from a computer")).inner.clicked() {
+        if ui.horizontal(|ui| action_button(ui, "Stream from a server")).inner.clicked() {
             settings.source = Source::Server;
             *go = Some(Some(Page::Servers));
         }

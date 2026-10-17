@@ -354,7 +354,7 @@ caches the system may empty, so the game always streams there; its
 settings, saves and friends are in that cache folder too.
 
 The files can also stream from another computer instead (Settings › Game
-› Game files › Server, or Play from a computer on the start page): the app
+› Game files › Server, or Stream from a server on the start page): the app
 on a computer with the game, with Settings › Game › Share on the network
 on, or `glue5-serve` on any desktop system. The Servers page (the start
 page's Server button, or Settings › Game › Server) lists the computers on

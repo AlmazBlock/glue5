@@ -151,9 +151,9 @@ pub fn where_the_game_goes() -> &'static str {
 /// How the game streams instead, for the start page.
 pub fn or_stream() -> &'static str {
     if MOBILE {
-        "Or play it from a computer that has it, over the network."
+        "Or play it from a device that has it, over the network."
     } else {
-        "Or play it from another computer that has it, over the network."
+        "Or play it from another device that has it, over the network."
     }
 }
 
