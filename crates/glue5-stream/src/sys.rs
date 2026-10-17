@@ -15,6 +15,15 @@ const NOTSENT_LOWAT: i32 = 128 * 1024;
 
 pub fn tune_server_socket(s: &TcpStream) {
     let _ = s.set_nodelay(true);
+    // A client gone without a word (a phone out of range, asleep) is let go
+    // of after a minute: probed once the connection is idle for 30 s, every
+    // 10 s, three times. (No read timeout: a client may ask nothing for
+    // long, and still be there.)
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(30))
+        .with_interval(std::time::Duration::from_secs(10))
+        .with_retries(3);
+    let _ = socket2::SockRef::from(s).set_tcp_keepalive(&keepalive);
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     unsafe {
         #[cfg(target_vendor = "apple")]

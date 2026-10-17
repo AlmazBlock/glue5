@@ -154,18 +154,28 @@ impl Server {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
-                    let Ok(stream) = stream else { continue };
+                    let stream = match stream {
+                        Ok(stream) => stream,
+                        // Out of files, say: a moment for some to close.
+                        Err(_) => {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    };
                     if let Ok(clone) = stream.try_clone() {
                         clients.lock().unwrap().insert(id, clone);
                     }
-                    let (shared, clients) = (shared.clone(), clients.clone());
-                    let _ = thread::Builder::new().name("serve client".into()).spawn(move || {
+                    let (shared, list) = (shared.clone(), clients.clone());
+                    let spawned = thread::Builder::new().name("serve client".into()).spawn(move || {
+                        // Its socket closes with the last handle: kept in the
+                        // list, a closed connection stayed open (a phone's
+                        // Servers page asks every 5 s).
+                        let _leave = Leave(&list, id);
                         serve(shared, stream);
-                        // Its socket closes with the last handle: kept here, a
-                        // closed connection stayed open (a phone's Servers page
-                        // asks every 5 s).
-                        clients.lock().unwrap().remove(&id);
                     });
+                    if spawned.is_err() {
+                        clients.lock().unwrap().remove(&id);
+                    }
                 }
             })?
         };
@@ -196,6 +206,16 @@ impl Drop for Server {
         if let Some(t) = self.accept.take() {
             let _ = t.join();
         }
+    }
+}
+
+/// Takes a connection off the server's list when its thread ends, however
+/// it ends.
+struct Leave<'a>(&'a Mutex<HashMap<u64, TcpStream>>, u64);
+
+impl Drop for Leave<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
     }
 }
 
@@ -268,6 +288,17 @@ struct Conn {
     ready: Condvar,
 }
 
+/// Closes a connection's queue when the reader ends, however it ends: its
+/// sender then ends too.
+struct Close<'a>(&'a Conn);
+
+impl Drop for Close<'_> {
+    fn drop(&mut self) {
+        self.0.queue.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        self.0.ready.notify_all();
+    }
+}
+
 fn serve(shared: Arc<Shared>, stream: TcpStream) {
     let peer = stream.peer_addr().map_or_else(|_| "?".to_string(), |a| a.to_string());
     sys::tune_server_socket(&stream);
@@ -281,6 +312,7 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
         return;
     }
     let conn = Arc::new(Conn { queue: Mutex::new(Queue::default()), ready: Condvar::new() });
+    let close = Close(&conn);
     let sender = {
         let (shared, conn) = (shared.clone(), conn.clone());
         thread::Builder::new().name("serve send".into()).spawn(move || send(&shared, &conn, writer))
@@ -311,9 +343,10 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
                         queue_job(Job { prio, source: Source::File(0), next: 0, end: 0, status: UNKNOWN });
                         continue;
                     };
-                    let end = (h.off + h.len as u64).min(entry.size);
+                    let want = h.off.saturating_add(h.len as u64);
+                    let end = want.min(entry.size);
                     let start = h.off.min(end);
-                    let status = if end < h.off + h.len as u64 { SHORT } else { DONE };
+                    let status = if end < want { SHORT } else { DONE };
                     if end > start
                         && let Ok(f) = shared.file(h.file)
                     {
@@ -349,11 +382,7 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
             }
         }
     })();
-    {
-        let mut q = conn.queue.lock().unwrap();
-        q.closed = true;
-        conn.ready.notify_all();
-    }
+    drop(close);
     let _ = stream.shutdown(Shutdown::Both);
     if let Ok(t) = sender {
         let _ = t.join();

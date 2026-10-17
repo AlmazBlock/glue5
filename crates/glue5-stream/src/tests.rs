@@ -433,6 +433,33 @@ fn leaves_the_files_of_a_build_going_on() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A request past a file's end (even past what 64 bits hold) gets what
+/// there is of it, and its end.
+#[test]
+fn answers_a_read_past_the_end() {
+    use crate::protocol::*;
+    use std::io::Write;
+    let dir = temp("past");
+    game(&dir);
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let mut s = std::net::TcpStream::connect(server.addr()).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let hello = Header::read(&mut s).unwrap();
+    payload(&mut s, hello.len, MAX_MESSAGE).unwrap();
+    let read = Header { kind: READ, prio: DEMAND, req: 1, off: u64::MAX - 100, len: 4096, file: 0, crc: 0 };
+    s.write_all(&read.encode()).unwrap();
+    let end = Header::read(&mut s).unwrap();
+    assert_eq!((end.kind, end.req, end.len), (END, 1, SHORT));
+    drop(s);
+    let started = Instant::now();
+    while server.connections() > 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "the connection stays open");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn keeps_no_connection_its_client_closed() {
     let dir = temp("closed");
