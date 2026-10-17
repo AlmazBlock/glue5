@@ -290,7 +290,11 @@ the link; a complete copy loses its marker and is a game folder like a
 copied one, which plays without the server and which the local mode finds.
 It goes where a copied game would (`Documents/game`, the external files'
 `game`, the user directory's `game` on desktop), not in the cache folder,
-and never over a game folder of the user's own. tvOS has no such option:
+and never over a game folder of the user's own. Complete, it stays there
+whatever the setting says later, used as it is and never emptied for room
+(moved back into the cache, an iPhone's system emptied 17 of its 21 GB);
+only a partial copy moves when the setting changes, and one left in the
+cache beside the whole game is deleted. tvOS has no such option:
 it keeps nothing but caches.
 
 **Where:** the app's cache folder (`paths::cache_dir`): `Library/Caches`
