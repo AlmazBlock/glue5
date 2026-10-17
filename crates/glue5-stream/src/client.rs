@@ -95,6 +95,11 @@ pub(crate) const SILENCE: Duration = Duration::from_secs(4);
 /// to wait for them was not announced in time (the engine often announces a
 /// read as it makes it): it costs a round trip as if not announced at all.
 const IN_TIME: Duration = Duration::from_millis(10);
+/// What a server may send before the game: blobs (the packs are ~10 MB)
+/// and the JSON in them, unpacked (the catalog is ~2 MB). A broken server
+/// claiming more is refused, not obeyed.
+const MAX_BLOB: u64 = 256 << 20;
+const MAX_JSON: u64 = 64 << 20;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
@@ -726,7 +731,7 @@ impl Client {
         first.extend(size(boot_name).map(|n| (boot_name, n)));
         let first = s.ask(&first)?;
         let compressed = s.take(first[0], &|_, _| {})?;
-        let json = zstd::decode_all(&compressed[..])?;
+        let json = unpack_json(&compressed, "the catalog")?;
         let catalog = Catalog::from_json(&json)?;
         if catalog.build != self.opts.build {
             bail!("the catalog is for build {}", catalog.build);
@@ -763,7 +768,7 @@ impl Client {
         }
         let boot = match first.get(1) {
             Some(&req) => {
-                let boot = zstd::decode_all(&s.take(req, &|_, _| {})?[..])?;
+                let boot = unpack_json(&s.take(req, &|_, _| {})?, "the boot set")?;
                 fs::write(self.opts.root.join(BOOT_SET), &boot)?;
                 boot_runs(&catalog, &boot)
             }
@@ -1082,11 +1087,14 @@ impl Sync {
         let mut msg = Vec::new();
         let mut reqs = Vec::new();
         for &(name, size) in blobs {
+            if size > MAX_BLOB {
+                bail!("{name} of {size} bytes");
+            }
             self.next += 1;
             let req = self.next;
             msg.extend_from_slice(&Header { kind: BLOB, prio: HINT, req, len: name.len() as u32, ..Default::default() }.encode());
             msg.extend_from_slice(name.as_bytes());
-            self.blobs.insert(req, (name.to_string(), size, Vec::with_capacity(size as usize), false));
+            self.blobs.insert(req, (name.to_string(), size, Vec::with_capacity(size.min(16 << 20) as usize), false));
             reqs.push(req);
         }
         io::Write::write_all(&mut self.stream, &msg)?;
@@ -1111,6 +1119,9 @@ impl Sync {
                         bail!("a chunk of {} bytes", h.len);
                     }
                     let at = data.len();
+                    if at as u64 + h.len as u64 > *size {
+                        bail!("{name} came longer than its {size} bytes");
+                    }
                     data.resize(at + h.len as usize, 0);
                     self.reader.read_exact(&mut data[at..])?;
                     if crc(&data[at..]) != h.crc {
@@ -1249,6 +1260,16 @@ fn encode(msgs: &[Header]) -> Vec<u8> {
         buf.extend_from_slice(&m.encode());
     }
     buf
+}
+
+/// A blob of zstd-packed JSON, unpacked (at most [`MAX_JSON`]).
+fn unpack_json(packed: &[u8], what: &str) -> Result<Vec<u8>> {
+    let mut json = Vec::new();
+    zstd::stream::Decoder::new(packed)?.take(MAX_JSON + 1).read_to_end(&mut json).with_context(|| format!("unpacking {what}"))?;
+    if json.len() as u64 > MAX_JSON {
+        bail!("{what} unpacks to more than {MAX_JSON} bytes");
+    }
+    Ok(json)
 }
 
 fn read_json(path: &Path) -> serde_json::Value {

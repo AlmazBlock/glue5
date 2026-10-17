@@ -167,6 +167,40 @@ fn promptly(f: impl FnOnce() + Send + 'static) -> bool {
     rx.recv_timeout(Duration::from_secs(1)).is_ok()
 }
 
+/// A server of a test's own making: its greeting, then the blobs asked for.
+fn fake_server(hello: serde_json::Value, blobs: Vec<(&'static str, Vec<u8>)>) -> SocketAddr {
+    use crate::protocol::*;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hello = serde_json::to_vec(&hello).unwrap();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { continue };
+            let _ = Header { kind: HELLO, len: hello.len() as u32, ..Default::default() }.send(&mut s, &hello);
+            while let Ok(h) = Header::read(&mut s) {
+                let Ok(name) = payload(&mut s, h.len, MAX_MESSAGE) else { break };
+                let data = blobs.iter().find(|(n, _)| n.as_bytes() == name).map_or(&[][..], |(_, d)| &d[..]);
+                for (k, chunk) in data.chunks(CHUNK as usize).enumerate() {
+                    let off = (k * CHUNK as usize) as u64;
+                    let data = Header { kind: DATA, req: h.req, off, len: chunk.len() as u32, file: u32::MAX, prio: 0, crc: crc(chunk) };
+                    let _ = data.send(&mut s, chunk);
+                }
+                let _ = s.write_all(&Header { kind: END, req: h.req, len: DONE, ..Default::default() }.encode());
+            }
+        }
+    });
+    addr
+}
+
+/// Waits for the client's error to say `what`.
+fn wait_error(c: &Client, what: &str) {
+    let started = Instant::now();
+    while !c.status().error.is_some_and(|e| e.contains(what)) {
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", c.status());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn wait_ready(c: &Client) {
     let started = Instant::now();
     while !c.is_ready() {
@@ -585,6 +619,26 @@ fn keeps_no_chunk_outside_its_request() {
     drop(proxy);
     drop(server);
     let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A broken server (sizes no blob has, a catalog that unpacks to more than
+/// any game's) is refused, not obeyed.
+#[test]
+fn refuses_what_no_server_sends() {
+    let hello = |blobs: serde_json::Value| {
+        serde_json::json!({ "protocol": crate::protocol::PROTOCOL, "build": BUILD, "catalog": "x", "blobs": blobs, "packs": {} })
+    };
+    let root = temp("broken-copy");
+    let opts = |addr: SocketAddr| Options { server: addr.to_string(), root: root.clone(), build: BUILD.into(), low_memory: false };
+    let client = Client::start(opts(fake_server(hello(serde_json::json!({ "catalog": u64::MAX / 2 })), vec![])));
+    wait_error(&client, "bytes");
+    client.stop();
+    let bomb = zstd::encode_all(&vec![b' '; 100 << 20][..], 3).unwrap();
+    let addr = fake_server(hello(serde_json::json!({ "catalog": bomb.len() })), vec![("catalog", bomb)]);
+    let client = Client::start(opts(addr));
+    wait_error(&client, "more than");
+    client.stop();
     let _ = fs::remove_dir_all(&root);
 }
 

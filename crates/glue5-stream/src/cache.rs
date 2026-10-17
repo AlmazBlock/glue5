@@ -254,7 +254,7 @@ impl Cache {
     /// blocks it fills (the last one may end with the file).
     pub fn write(&self, id: u32, off: u64, data: &[u8]) -> io::Result<()> {
         let s = &self.slots[id as usize];
-        if !off.is_multiple_of(BLOCK) || off + data.len() as u64 > s.size {
+        if !off.is_multiple_of(BLOCK) || off.checked_add(data.len() as u64).is_none_or(|end| end > s.size) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "write outside the file's blocks"));
         }
         if data.is_empty() {
@@ -608,7 +608,9 @@ fn load_index(path: &Path) -> Option<Index> {
     }
     let session = r.u32()?;
     let count = r.u32()?;
-    let mut files = HashMap::with_capacity(count as usize);
+    // Not more than the data can hold (26 bytes a file at least): a damaged
+    // count would ask for gigabytes.
+    let mut files = HashMap::with_capacity((count as usize).min(data.len() / 26));
     for _ in 0..count {
         let len = u16::from_le_bytes(r.take(2)?.try_into().ok()?) as usize;
         let path = String::from_utf8(r.take(len)?.to_vec()).ok()?;
@@ -806,6 +808,21 @@ mod tests {
         }
         let c = Cache::open(&root, &catalog).unwrap();
         assert!(c.has(0, 0, 0));
+        let _ = clear(&root);
+    }
+
+    /// A damaged index is no index, whatever it says.
+    #[test]
+    fn takes_a_damaged_index_for_none() {
+        let root = std::env::temp_dir().join(format!("glue5-cache-damaged-{}", std::process::id()));
+        let _ = clear(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut index = MAGIC.to_vec();
+        for word in [VERSION, 1, u32::MAX] {
+            index.extend_from_slice(&word.to_le_bytes());
+        }
+        fs::write(root.join("index"), &index).unwrap();
+        assert!(load_index(&root.join("index")).is_none());
         let _ = clear(&root);
     }
 
