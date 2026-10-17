@@ -33,6 +33,8 @@ pub(super) enum Control {
     Choice,
     Toggle,
     Action,
+    /// A few buttons side by side (`action_buttons`).
+    Actions,
 }
 
 pub(super) fn setting<R>(
@@ -56,6 +58,7 @@ pub(super) fn setting<R>(
                     Control::Choice => (available * 0.60).min(180.0 * scale),
                     Control::Toggle => 44.0 * scale,
                     Control::Action => (available * 0.55).min(180.0 * scale),
+                    Control::Actions => (available * 0.62).min(320.0 * scale),
                 };
                 let label_width = (available - width - ui.spacing().item_spacing.x).max(1.0);
                 ui.horizontal_top(|ui| {
@@ -176,17 +179,31 @@ pub(super) fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options
 }
 
 pub(super) fn action_button(ui: &mut Ui, text: &str) -> Response {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| button(ui, text)).inner
+}
+
+/// Buttons side by side at the end of a row, in the order of `texts`:
+/// their responses in that order. (`action_button` twice would draw the
+/// second over the first.)
+pub(super) fn action_buttons(ui: &mut Ui, texts: &[&str]) -> Vec<Response> {
+    let mut responses = ui
+        .with_layout(Layout::right_to_left(Align::Center), |ui| {
+            texts.iter().rev().map(|text| button(ui, text)).collect::<Vec<_>>()
+        })
+        .inner;
+    responses.reverse();
+    responses
+}
+
+fn button(ui: &mut Ui, text: &str) -> Response {
     let scale = density(ui);
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        focus(
-            ui.add(
-                Button::new(RichText::new(text).size(13.0 * scale))
-                    .corner_radius((10.0 * scale) as u8)
-                    .min_size(vec2(0.0, 40.0 * scale)),
-            ),
-        )
-    })
-    .inner
+    focus(
+        ui.add(
+            Button::new(RichText::new(text).size(13.0 * scale))
+                .corner_radius((10.0 * scale) as u8)
+                .min_size(vec2(0.0, 40.0 * scale)),
+        ),
+    )
 }
 
 pub(super) fn choice<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> Response {

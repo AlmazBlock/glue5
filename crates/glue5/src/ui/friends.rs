@@ -5,7 +5,7 @@
 use glue5_runtime::friends::{self, AddError, FriendInfo, Notice, Playing, SessionKind, Snapshot};
 
 use super::pages::sheet;
-use super::widgets::{Control, action_button, focus, segmented, setting, text_field};
+use super::widgets::{Control, action_button, action_buttons, focus, segmented, setting, text_field};
 use super::{Action, WARN, theme};
 use egui::{Color32, RichText, Stroke};
 
@@ -176,33 +176,38 @@ fn friend_row(ui: &mut egui::Ui, f: &FriendInfo, page: &mut FriendsPage, game: &
         (Some(Playing::Online), Some(SessionKind::Solo)) => "Playing GTA Online, Solo Session",
         (Some(Playing::Online), _) => "Playing GTA Online, Public Session",
     };
-    let dot = if f.playing.is_some() { "● " } else { "" };
+    // The font has no round dot: its bullet.
+    let dot = if f.playing.is_some() { "• " } else { "" };
+    let sure = page.removing.as_deref() == Some(f.key.as_str());
+    // Its session, when friends may join it (or it invited); an invite to
+    // this player's, playing GTA Online.
+    let can_join = f.lobby.is_some() && f.playing == Some(Playing::Online) && (!game.started || game.online);
+    let can_invite = game.online && f.playing.is_some();
     ui.push_id(&f.key, |ui| {
-        setting(ui, &format!("{dot}{}", f.name), Control::Action, Some(status), |ui| {
-            ui.horizontal(|ui| {
-                let sure = page.removing.as_deref() == Some(f.key.as_str());
-                let remove = action_button(ui, if sure { "Remove?" } else { "🗙" }).on_hover_text("Remove friend");
-                if remove.clicked() {
-                    if sure {
-                        friends::remove(&f.key);
-                        page.message = Some((format!("{} removed from your friends.", f.name), false));
-                        page.removing = None;
-                    } else {
-                        page.removing = Some(f.key.clone());
-                    }
+        setting(ui, &format!("{dot}{}", f.name), Control::Actions, Some(status), |ui| {
+            // A phone's row has room for short words.
+            let short = ui.available_width() < 250.0 * theme::density(ui);
+            let mut labels = vec![if sure { "Remove?" } else { "🗙" }];
+            labels.extend(can_join.then_some(if short { "Join" } else { "Join game" }));
+            labels.extend(can_invite.then_some(if short { "Invite" } else { "Invite to game" }));
+            let mut buttons = action_buttons(ui, &labels).into_iter();
+            if buttons.next().is_some_and(|b| b.on_hover_text("Remove friend").clicked()) {
+                if sure {
+                    friends::remove(&f.key);
+                    page.message = Some((format!("{} removed from your friends.", f.name), false));
+                    page.removing = None;
+                } else {
+                    page.removing = Some(f.key.clone());
                 }
-                // Its session, when friends may join it (or it invited).
-                let joinable = f.lobby.is_some() && f.playing == Some(Playing::Online);
-                if joinable && (!game.started || game.online) && action_button(ui, "Join game").clicked() {
-                    join(f, game, actions);
-                    page.message = Some((format!("Joining {}…", f.name), false));
-                }
-                // Playing GTA Online: an invite to this player's session.
-                if game.online && f.playing.is_some() && action_button(ui, "Invite to game").clicked() {
-                    friends::invite(&f.key);
-                    page.message = Some((format!("Game Invite Sent to {}", f.name), false));
-                }
-            });
+            }
+            if can_join && buttons.next().is_some_and(|b| b.clicked()) {
+                join(f, game, actions);
+                page.message = Some((format!("Joining {}…", f.name), false));
+            }
+            if can_invite && buttons.next().is_some_and(|b| b.clicked()) {
+                friends::invite(&f.key);
+                page.message = Some((format!("Game Invite Sent to {}", f.name), false));
+            }
         });
     });
 }
@@ -214,17 +219,16 @@ fn requests_tab(ui: &mut egui::Ui, snapshot: &Snapshot, page: &mut FriendsPage) 
     }
     for (key, name) in &snapshot.requests {
         ui.push_id(key, |ui| {
-            setting(ui, name, Control::Action, Some("Wants to be your friend."), |ui| {
-                ui.horizontal(|ui| {
-                    if action_button(ui, "Decline").clicked() {
-                        friends::answer(key, false);
-                        page.message = Some((format!("Friend request from {name} declined."), false));
-                    }
-                    if action_button(ui, "Accept").clicked() {
-                        friends::answer(key, true);
-                        page.message = Some((format!("Friend request from {name} accepted."), false));
-                    }
-                });
+            setting(ui, name, Control::Actions, Some("Wants to be your friend."), |ui| {
+                let [decline, accept] = <[_; 2]>::try_from(action_buttons(ui, &["Decline", "Accept"])).unwrap();
+                if decline.clicked() {
+                    friends::answer(key, false);
+                    page.message = Some((format!("Friend request from {name} declined."), false));
+                }
+                if accept.clicked() {
+                    friends::answer(key, true);
+                    page.message = Some((format!("Friend request from {name} accepted."), false));
+                }
             });
         });
     }
@@ -255,15 +259,17 @@ fn invites_tab(ui: &mut egui::Ui, snapshot: &Snapshot, game: &Context, actions: 
     }
     for f in invites {
         ui.push_id(("invite", &f.key), |ui| {
-            setting(ui, &f.name, Control::Action, Some("Sent you a multiplayer invite."), |ui| {
-                ui.horizontal(|ui| {
-                    if action_button(ui, "Decline").clicked() {
-                        friends::ignore_invite(&f.key);
-                    }
-                    if (!game.started || game.online) && action_button(ui, "Accept").clicked() {
-                        join(f, game, actions);
-                    }
-                });
+            setting(ui, &f.name, Control::Actions, Some("Sent you a multiplayer invite."), |ui| {
+                // Accepted from the start page or GTA Online (not story mode).
+                let can_accept = !game.started || game.online;
+                let labels: &[&str] = if can_accept { &["Decline", "Accept"] } else { &["Decline"] };
+                let buttons = action_buttons(ui, labels);
+                if buttons[0].clicked() {
+                    friends::ignore_invite(&f.key);
+                }
+                if buttons.get(1).is_some_and(|b| b.clicked()) {
+                    join(f, game, actions);
+                }
             });
         });
     }
@@ -309,17 +315,16 @@ fn join(f: &FriendInfo, game: &Context, actions: &mut Vec<Action>) {
 fn your_code(ui: &mut egui::Ui, snapshot: &Snapshot, page: &mut FriendsPage) {
     let code = snapshot.code.clone().or_else(friends::my_code).unwrap_or_default();
     let what = "Your friend code: with it a player can send you a friend request";
-    setting(ui, &code, Control::Action, Some(what), |ui| {
-        ui.horizontal(|ui| {
-            if action_button(ui, "New").on_hover_text("A new code: the old one stops working").clicked() {
-                friends::new_code();
-                page.message = Some(("A new code: the old one no longer reaches you.".into(), false));
-            }
-            if action_button(ui, "Copy").clicked() {
-                ui.ctx().copy_text(code.clone());
-                page.message = Some(("Code copied.".into(), false));
-            }
-        });
+    setting(ui, &code, Control::Actions, Some(what), |ui| {
+        let [new, copy] = <[_; 2]>::try_from(action_buttons(ui, &["New", "Copy"])).unwrap();
+        if new.on_hover_text("A new code: the old one stops working").clicked() {
+            friends::new_code();
+            page.message = Some(("A new code: the old one no longer reaches you.".into(), false));
+        }
+        if copy.clicked() {
+            ui.ctx().copy_text(code.clone());
+            page.message = Some(("Code copied.".into(), false));
+        }
     });
 }
 
