@@ -824,6 +824,7 @@ impl Client {
         if let Err(e) = &result
             && is_full(e)
             && !self.fill.load(Ordering::Acquire)
+            && !self.complete.load(Ordering::Acquire)
         {
             r.cache.evict(FLOOR + ROOM);
             result = r.cache.write(id, off, data);
@@ -892,7 +893,8 @@ impl Client {
     /// Keeps the volume above [`FLOOR`] (not while the whole game is
     /// wanted: then the download waits for room).
     fn make_room(&self, r: &Ready) {
-        if self.fill.load(Ordering::Acquire) {
+        // Nor from a complete copy: a game folder, maybe the user's only one.
+        if self.fill.load(Ordering::Acquire) || self.complete.load(Ordering::Acquire) {
             return;
         }
         if let Some(free) = r.cache.free_space()
