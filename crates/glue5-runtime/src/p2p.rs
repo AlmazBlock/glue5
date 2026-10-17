@@ -526,8 +526,9 @@ impl P2p {
         let mut state = self.state.lock().unwrap();
         let mut new = Vec::new();
         let mut friends = Vec::new();
+        let external = state.dht.external();
         for (key, addr) in out.peers {
-            if state.own.contains(&addr) {
+            if state.own.contains(&addr) || external == Some(addr) {
                 continue;
             }
             let Some(lobby) = state.lobbies.iter().find(|l| l.key == key).map(|l| l.id) else {

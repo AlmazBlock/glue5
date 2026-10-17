@@ -86,6 +86,11 @@ pub struct Dht {
     /// sent at.
     pending: HashMap<u16, (Id, Id, Instant)>,
     next_tid: u16,
+    /// This player's address as the nodes see it (its NAT's, which the DHT
+    /// hands out to the others), once two nodes agree on it; the last one
+    /// told, and by whom.
+    external: Option<SocketAddrV4>,
+    told: Option<(SocketAddrV4, Ipv4Addr)>,
 }
 
 /// What the socket should send, and the players found (under which key).
@@ -102,7 +107,14 @@ fn distance(a: &Id, b: &Id) -> Id {
 impl Dht {
     /// A client announcing `port`, with no lookup yet.
     pub fn new(id: Id, port: u16) -> Dht {
-        Dht { id, port, lookups: HashMap::new(), pending: HashMap::new(), next_tid: 0 }
+        Dht { id, port, lookups: HashMap::new(), pending: HashMap::new(), next_tid: 0, external: None, told: None }
+    }
+
+    /// This player's address on the Internet, as the nodes see it, when
+    /// known: the DHT gives it back among the others under the keys this
+    /// player announces.
+    pub fn external(&self) -> Option<SocketAddrV4> {
+        self.external
     }
 
     /// Whether a datagram is the DHT's (a bencoded dictionary).
@@ -269,6 +281,16 @@ impl Dht {
             return;
         }
         node.responded = true;
+        // The address it sees this player at (BEP 42), taken once another
+        // node said the same.
+        if let Some(Value::Bytes(ip)) = msg.get(&b"ip"[..])
+            && let Some(seen) = compact_addr(ip)
+        {
+            if self.told.is_some_and(|(a, by)| a == seen && by != *from.ip()) {
+                self.external = Some(seen);
+            }
+            self.told = Some((seen, *from.ip()));
+        }
         if let Some(Value::Bytes(token)) = r.get(&b"token"[..]) {
             node.token = Some(token.clone());
         }
@@ -439,5 +461,32 @@ mod tests {
         assert_eq!(e, b"d1:ai-3e1:b3:xyz1:cli1e0:ee");
         assert_eq!(Value::decode(&e), Some(v));
         assert_eq!(Value::decode(b"d1:a"), None);
+    }
+
+    #[test]
+    fn the_address_nodes_see_counts_once_two_agree() {
+        let key = [7; 20];
+        let mut dht = Dht::new([1; 20], 47000);
+        dht.add(key, Options { announce: false, refresh: Duration::from_secs(60) });
+        let now = Instant::now();
+        let seen = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 40123);
+        let ip = [seen.ip().octets().as_slice(), &seen.port().to_be_bytes()].concat();
+        // Told by one node twice, then by another.
+        for (i, node) in [1, 1, 2].into_iter().enumerate() {
+            let addr = SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, node), 6881);
+            let mut d = [0xee; 20];
+            d[19] = i as u8;
+            dht.lookups.get_mut(&key).unwrap().nodes.insert(d, Node { addr, queried: false, responded: false, token: None });
+            let mut out = Output::default();
+            dht.get_peers(key, d, now, &mut out);
+            let response = dict([
+                ("t", B(dht.next_tid.to_be_bytes().to_vec())),
+                ("y", B(b"r".to_vec())),
+                ("ip", B(ip.clone())),
+                ("r", dict([("id", B(vec![i as u8; 20]))])),
+            ]);
+            dht.receive(addr, &response.encode(), &mut out);
+            assert_eq!(dht.external(), (i == 2).then_some(seen), "{i}");
+        }
     }
 }

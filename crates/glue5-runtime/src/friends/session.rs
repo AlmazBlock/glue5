@@ -54,6 +54,9 @@ fn header(kind: u8) -> Vec<u8> {
     d
 }
 
+/// The addresses one handshake's first message goes to, at most.
+const ADDRESSES: usize = 8;
+
 /// A handshake under way.
 pub(crate) struct Handshake {
     state: HandshakeState,
@@ -63,6 +66,9 @@ pub(crate) struct Handshake {
     pub remote_index: u32,
     pub to: SocketAddrV4,
     pub started: Instant,
+    /// The initiator's message 1, and the addresses it went to.
+    first: Vec<u8>,
+    pub tried: Vec<SocketAddrV4>,
 }
 
 fn builder<'a>(pattern: &str, identity: &'a Identity) -> Builder<'a> {
@@ -99,7 +105,18 @@ impl Handshake {
         let mut buf = [0; 512];
         let len = state.write_message(payload, &mut buf).ok()?;
         d.extend_from_slice(&buf[..len]);
-        Some((Handshake { state, pattern, index, remote_index: 0, to, started: now }, d))
+        let h = Handshake { state, pattern, index, remote_index: 0, to, started: now, first: d.clone(), tried: vec![to] };
+        Some((h, d))
+    }
+
+    /// Message 1 again, for another address the other side may be at (a
+    /// few at most): it answers the first copy that reaches it.
+    pub(crate) fn first_to(&mut self, to: SocketAddrV4) -> Option<Vec<u8>> {
+        if self.first.is_empty() || self.tried.contains(&to) || self.tried.len() >= ADDRESSES {
+            return None;
+        }
+        self.tried.push(to);
+        Some(self.first.clone())
     }
 
     /// Answers message 1 (`hs1`: after the pattern and the sender's index):
@@ -119,7 +136,8 @@ impl Handshake {
             Pattern::Friend => builder(FRIEND_PATTERN, identity).build_responder().ok()?,
             Pattern::Code => builder(CODE_PATTERN, identity).psk(0, psk?).ok()?.build_responder().ok()?,
         };
-        let mut hs = Handshake { state, pattern, index: new_index(), remote_index, to, started: now };
+        let mut hs =
+            Handshake { state, pattern, index: new_index(), remote_index, to, started: now, first: Vec::new(), tried: Vec::new() };
         let mut payload = [0; 512];
         let len = hs.state.read_message(hs1, &mut payload).ok()?;
         Some((hs, payload[..len].to_vec()))

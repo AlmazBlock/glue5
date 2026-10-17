@@ -867,24 +867,29 @@ impl Service {
         let Some(identity) = self.identity.as_ref() else { return };
         let Some(f) = self.friends.get_mut(&key) else { return };
         let starts = identity.public() < &key;
-        // One handshake at a time (each address the friend answers at would
-        // open a channel of its own): the next address once it fails.
-        let busy = starts && self.handshakes.values().any(|(_, o)| *o == Owner::Friend(key));
         let due = f.transport.as_ref().is_none_or(|t| now - t.established > REKEY);
-        if busy || !due && !again || f.contacted.get(&addr).is_some_and(|t| now - *t < CONTACT) {
+        if !due && !again || f.contacted.get(&addr).is_some_and(|t| now - *t < CONTACT) {
             return;
         }
         f.contacted.insert(addr, now);
         f.contacted.retain(|_, t| now - *t < CONTACT * 4);
-        if starts {
-            let time = unix_ms().to_be_bytes();
-            if let Some((h, d)) = Handshake::friend(identity, &key, &time, addr, now) {
-                self.handshakes.insert(h.index, (h, Owner::Friend(key)));
-                out.send.push((addr, d));
-            }
-        } else {
+        if !starts {
             let tag = crypto::meeting_tag(&f.shared, crypto::epoch(unix()));
             let d = self.probe(&[tag]);
+            out.send.push((addr, d));
+            return;
+        }
+        // One handshake at a time, its message 1 to every address found for
+        // the friend meanwhile (the DHT keeps old ones for a while, which may
+        // come first): the friend answers the first copy that reaches it and
+        // not the others (their time is not newer).
+        if let Some((h, _)) = self.handshakes.values_mut().find(|(_, o)| *o == Owner::Friend(key)) {
+            out.push(addr, h.first_to(addr));
+            return;
+        }
+        let time = unix_ms().to_be_bytes();
+        if let Some((h, d)) = Handshake::friend(identity, &key, &time, addr, now) {
+            self.handshakes.insert(h.index, (h, Owner::Friend(key)));
             out.send.push((addr, d));
         }
     }
@@ -893,12 +898,17 @@ impl Service {
     fn ask_at(&mut self, i: usize, addr: SocketAddrV4, now: Instant, out: &mut Out) {
         let Some(identity) = self.identity.as_ref() else { return };
         let a = &mut self.asked[i];
-        let busy = self.handshakes.values().any(|(_, o)| *o == Owner::Asking(a.id.clone()));
-        if busy || a.transport.is_some() || a.declined || a.contacted.get(&addr).is_some_and(|t| now - *t < CONTACT) {
+        if a.transport.is_some() || a.declined || a.contacted.get(&addr).is_some_and(|t| now - *t < CONTACT) {
             return;
         }
         a.contacted.insert(addr, now);
         a.contacted.retain(|_, t| now - *t < CONTACT * 4);
+        // One handshake at a time, to every address found (see `contact`; a
+        // code's owner reached at two answers twice, the second is not read).
+        if let Some((h, _)) = self.handshakes.values_mut().find(|(_, o)| matches!(o, Owner::Asking(id) if *id == a.id)) {
+            out.push(addr, h.first_to(addr));
+            return;
+        }
         let handshake = match &a.player {
             // Its key is known: the friends' handshake, which it answers
             // for a player of its lobbies.

@@ -315,3 +315,34 @@ fn players_met_ask_each_other() {
     c.s.receive(d.addr, first[3], &first[4..], now, &mut answer);
     assert!(answer.send.is_empty());
 }
+
+/// Not a player's: datagrams sent there are lost.
+fn nowhere() -> SocketAddrV4 {
+    SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 7), 40000)
+}
+
+#[test]
+fn a_stale_address_first_does_not_hold_up_the_others() {
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    befriend(&mut a, &mut b, true, &mut now);
+    let (mut a, mut b) = (a.restarted(), b.restarted());
+    let (lower, higher) = if a.key() < b.key() { (&mut a, &mut b) } else { (&mut b, &mut a) };
+    let shared = lower.s.friends[&higher.key()].shared;
+    let key = crypto::meeting_key(&shared, crypto::epoch(unix()));
+    let mut out = Out::default();
+    lower.s.found(key, nowhere(), now, &mut out);
+    lower.s.found(key, higher.addr, now, &mut out);
+    let from = lower.addr;
+    run(&mut [&mut *lower, &mut *higher], out, from, &mut now, 2, &keep);
+    assert!(lower.connected_to(higher) && higher.connected_to(lower));
+    // A code's owner too.
+    let mut c = Player::new("Carl", 3);
+    c.s.asked.push(Ask::new(a.code(), None));
+    let mut out = Out::default();
+    c.s.found(crypto::code_key(&a.code()), nowhere(), now, &mut out);
+    c.s.found(crypto::code_key(&a.code()), a.addr, now, &mut out);
+    let from = c.addr;
+    run(&mut [&mut a, &mut c], out, from, &mut now, 2, &keep);
+    assert!(a.s.requests.get(&c.key()).is_some_and(|r| r.asked));
+}
