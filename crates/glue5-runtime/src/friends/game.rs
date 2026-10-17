@@ -4,7 +4,7 @@
 //! The engine asks Social Club for all of it; here:
 //! - the friends list is ours (`rlFriendsReader::Read`, the only reader of
 //!   the platform's list), loaded again as it changes; the browser build's
-//!   friends menus, made to fail, are mended (`MENU_PATCHES`,
+//!   friends and players menus, made to fail, are mended (`MENU_PATCHES`,
 //!   `card_data_init`), and what they wait for from Rockstar (crews, stats)
 //!   comes at once, empty;
 //! - each player tells its friends its session (the engine publishes it to
@@ -494,22 +494,24 @@ pub(crate) unsafe extern "C" fn friends_with(env: *mut Env, gamer: u32, handle: 
     unsafe { orig::friends_with(env, gamer, handle) }
 }
 
-/// `CMPFriendPlayerCardDataManager`'s vtable, and a card data manager's
-/// state (0: to read the friends, 6: ready, 8 and 9: failed) and when it
-/// started reading (the engine's frame time).
-const MP_FRIENDS_DATA: u64 = 6188416;
+/// The vtables of `CMPFriendPlayerCardDataManager` (the FRIENDS tab) and
+/// `CActivePlayerCardDataManager` (the ONLINE tab's Players), and a card
+/// data manager's state (0: to read the players, 6: ready, 8 and 9:
+/// failed) and when it started reading (the engine's frame time).
+const CARD_DATA: [u64; 2] = [6188416, 6187512];
 const CARD_DATA_STATE: u64 = 204;
 const CARD_DATA_STARTED: u64 = 212;
 const FRAME_TIME: u64 = 12321192;
 
 /// Hook for `BasePlayerCardDataManager::Init(CPlayerCardXMLDataManager
-/// const&)`: the friends' card data is set up as failed in the browser
-/// build (state 8, which nothing leaves); here it starts reading the
-/// friends instead, as the other builds do.
+/// const&)`: the card data of the friends and of the session's players is
+/// set up as failed in the browser build (state 8, which nothing leaves,
+/// and their lists say "the internet connection has been lost"); here it
+/// starts reading the players instead, as the other builds do.
 pub(crate) unsafe extern "C" fn card_data_init(env: *mut Env, data: u64, xml: u64) {
     unsafe { orig::card_data_init(env, data, xml) };
     let m = unsafe { Mem::of(env) };
-    if m.u64(data) == MP_FRIENDS_DATA && m.u32(data + CARD_DATA_STATE) == 8 {
+    if CARD_DATA.contains(&m.u64(data)) && m.u32(data + CARD_DATA_STATE) == 8 {
         m.set_u32(data + CARD_DATA_STATE, 0);
         m.set_u32(data + CARD_DATA_STARTED, m.u32(FRAME_TIME));
     }
