@@ -198,8 +198,12 @@ pub(crate) unsafe fn update(env: *mut Env) {
         let id = session.as_ref().map(|(id, _)| *id);
         if state.session.map(|(s, _)| s) != id {
             state.session = id.map(|id| (id, now));
-            if id.is_some() {
-                super::session_changed();
+            if let Some(id) = id {
+                // Whose it is, among the friends' the game may be joining.
+                let friend = super::joining()
+                    .into_iter()
+                    .find(|f| super::session_of(*f).is_some_and(|text| unsafe { session_id(env, &text) } == Some(id)));
+                super::session_changed(friend);
             }
         }
         super::set_session(session.map(|(_, t)| t));
@@ -245,6 +249,19 @@ unsafe fn session_text(env: *mut Env) -> Option<(u64, String)> {
         })
     }?;
     (!text.is_empty()).then_some((id, text))
+}
+
+/// A session's id, from its info's text.
+unsafe fn session_id(env: *mut Env, text: &str) -> Option<u64> {
+    let m = unsafe { Mem::of(env) };
+    unsafe {
+        with_stack(env, SESSION_INFO + text.len() as u64 + 1, |info| {
+            let text_at = info + SESSION_INFO;
+            m.bytes_mut(text_at, text.len()).copy_from_slice(text.as_bytes());
+            (orig::session_info_parse(env, info, text_at, 0) != 0).then(|| m.u64(info + SESSION_ID))
+        })
+    }
+    .flatten()
 }
 
 /// Joins the session of the friend followed (gamer id `id`), once this

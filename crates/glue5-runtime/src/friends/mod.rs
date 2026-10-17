@@ -481,11 +481,12 @@ pub(crate) struct Service {
     joinable: bool,
     card: Option<String>,
     /// The friend's lobby whose session this player joined, where its
-    /// invites lead (its own lobby otherwise); the one whose session the
-    /// game is joining, since when; whether the game looks for a friend's
-    /// session to join ("Join Friends").
+    /// invites lead (its own lobby otherwise); the friends whose sessions
+    /// the game may be joining (gamer id, lobby, since when: "Join Friends"
+    /// lists all those it can join); whether the game looks for a friend's
+    /// session to join.
     joined: Option<String>,
-    joining: Option<(String, Instant)>,
+    joining: Vec<(u64, String, Instant)>,
     finding: bool,
     /// What happened that the player should know, for the application, and
     /// whether the summary of the start was told.
@@ -596,7 +597,7 @@ impl Service {
             joinable: true,
             card: None,
             joined: None,
-            joining: None,
+            joining: Vec::new(),
             finding: false,
             notices: VecDeque::new(),
             started: Instant::now(),
@@ -1026,6 +1027,35 @@ impl Service {
         {
             f.since = Some(now);
         }
+    }
+
+    /// Friend `id`'s address and lobbies (its players introduced by it
+    /// there). `joining`: the game joins its session, which, in the
+    /// friend's lobby, will be the friend's to share (`session_changed`).
+    fn reach(&mut self, id: u64, joining: bool, ours: Option<&str>, now: Instant) -> Option<(SocketAddrV4, Vec<String>)> {
+        let f = self.friend_of(id)?;
+        let addr = f.transport.as_ref()?.addr;
+        let mut lobbies = f.presence.as_ref().filter(|p| p.playing == Playing::Online)?.lobbies.clone();
+        lobbies.extend(f.invited.as_ref().and_then(|i| i.lobby.clone()));
+        if joining && let Some(theirs) = lobbies.first().filter(|l| Some(l.as_str()) != ours) {
+            self.joining.retain(|(i, _, since)| *i != id && now - *since < JOINING);
+            self.joining.push((id, theirs.clone(), now));
+        }
+        Some((addr, lobbies))
+    }
+
+    /// The game is in a new session: friend `friend`'s, one being joined in
+    /// its lobby, it is shared only through invites.
+    fn session_changed(&mut self, friend: Option<u64>, now: Instant) {
+        let joining = std::mem::take(&mut self.joining);
+        let Some((_, lobby, _)) = joining.into_iter().find(|(id, _, since)| Some(*id) == friend && now - *since < JOINING)
+        else {
+            return;
+        };
+        log::info!("friends: in a friend's session");
+        self.local.kind = SessionKind::Closed;
+        self.joinable = false;
+        self.joined = Some(lobby);
     }
 
     /// Requests to answer, and invites from friends connected.
@@ -2082,19 +2112,11 @@ pub(crate) fn session_of(id: u64) -> Option<String> {
 /// into is no longer one this player's friends may join without an invite
 /// (the friend's lobby is the friend's to share).
 pub(crate) fn reach(id: u64, joining: bool) {
-    let target = with(|s, _| {
-        let f = s.friend_of(id)?;
-        let addr = f.transport.as_ref()?.addr;
-        let mut lobbies = f.presence.as_ref().filter(|p| p.playing == Playing::Online)?.lobbies.clone();
-        lobbies.extend(f.invited.as_ref().and_then(|i| i.lobby.clone()));
-        Some((addr, lobbies))
-    })
-    .flatten();
-    let (Some((addr, lobbies)), Some(p2p)) = (target, crate::p2p::get()) else { return };
+    let Some(p2p) = crate::p2p::get() else { return };
     let ours = p2p.lobbies().into_iter().next();
-    if joining && let Some(theirs) = lobbies.first().filter(|l| Some(*l) != ours.as_ref()) {
-        with(|s, _| s.joining = Some((theirs.clone(), Instant::now())));
-    }
+    let Some((addr, lobbies)) = with(|s, _| s.reach(id, joining, ours.as_deref(), Instant::now())).flatten() else {
+        return;
+    };
     for lobby in lobbies {
         p2p.visit_lobby(&lobby, addr);
     }
@@ -2126,18 +2148,15 @@ pub(crate) fn send_invites(ids: &[u64]) -> usize {
         .unwrap_or(0)
 }
 
-/// The game is in a new session: a friend's being joined, in the friend's
-/// lobby, is shared only through invites.
-pub(crate) fn session_changed() {
-    with(|s, _| {
-        let Some((lobby, since)) = s.joining.take() else { return };
-        if since.elapsed() < JOINING {
-            log::info!("friends: in a friend's session");
-            s.local.kind = SessionKind::Closed;
-            s.joinable = false;
-            s.joined = Some(lobby);
-        }
-    });
+/// The friends (gamer ids) whose sessions the game may be joining.
+pub(crate) fn joining() -> Vec<u64> {
+    with(|s, _| s.joining.iter().map(|(id, ..)| *id).collect()).unwrap_or_default()
+}
+
+/// The game is in a new session: friend `friend`'s (gamer id), when it is
+/// one of `joining`'s (game.rs compares the sessions).
+pub(crate) fn session_changed(friend: Option<u64>) {
+    with(|s, _| s.session_changed(friend, Instant::now()));
 }
 
 /// Whether friend `id` (gamer id) invited this player to its session a few
@@ -2167,7 +2186,7 @@ pub(crate) fn set_session_kind(kind: SessionKind) {
     with(|s, _| {
         s.looking_for_session(Instant::now());
         s.joined = None;
-        s.joining = None;
+        s.joining.clear();
         s.finding = false;
         if s.local.kind != kind {
             log::info!("friends: in a {kind:?} session");

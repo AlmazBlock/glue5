@@ -570,3 +570,26 @@ fn a_friend_followed_is_waited_for_from_the_game_s_search() {
     a.s.follow = Some(Follow { key: b.key(), asked: now, since: None });
     assert_eq!(a.s.following(now + FOLLOW_START + Duration::from_secs(1)), None);
 }
+
+#[test]
+fn the_session_joined_is_the_friend_s_whose_session_it_is() {
+    let mut now = Instant::now();
+    let (mut a, mut b, mut c) = (Player::new("Ann", 1), Player::new("Bob", 2), Player::new("Carl", 3));
+    befriend(&mut a, &mut b, true, &mut now);
+    befriend(&mut a, &mut c, true, &mut now);
+    for (p, lobby) in [(&b, "B"), (&c, "C")] {
+        let f = a.s.friends.get_mut(&p.key()).unwrap();
+        f.presence = Some(Presence { playing: Playing::Online, lobbies: vec![lobby.into()], ..Presence::default() });
+    }
+    // "Join Friends" lists both, Bob's session is the one joined.
+    assert!(a.s.reach(2000, true, Some(""), now).is_some());
+    assert!(a.s.reach(3000, true, Some(""), now).is_some());
+    a.s.session_changed(Some(2000), now);
+    assert_eq!(a.s.joined.as_deref(), Some("B"));
+    assert!(!a.s.joinable);
+    // A session none of them is in: not a friend's.
+    a.s.joined = None;
+    a.s.reach(3000, true, Some(""), now);
+    a.s.session_changed(None, now);
+    assert_eq!(a.s.joined, None);
+}
