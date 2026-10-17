@@ -64,6 +64,12 @@ const BOOT_GAP: u64 = 64;
 const FILL_REQUESTS: usize = 512;
 /// In the copy: the boot set it was given (for a start without the server).
 const BOOT_SET: &str = "bootset.json";
+/// While data keeps coming, the index is saved this often, or once this
+/// much came since the last save (a save syncs every file written to, and
+/// the game's frames come a little slower meanwhile; a crash loses at most
+/// that much of the download); as soon as it stops, at once.
+const SAVE_BUSY: Duration = Duration::from_secs(10);
+const SAVE_BYTES: u64 = 256 << 20;
 /// No data for this long with requests in flight: the connection is dead.
 const SILENCE: Duration = Duration::from_secs(20);
 /// A read whose blocks were asked for less than this before the engine came
@@ -854,17 +860,24 @@ impl Client {
         }
     }
 
-    /// Saves the index every few seconds; logs the traffic every ten.
+    /// Saves the index (see [`SAVE_BUSY`]); logs the traffic every ten seconds.
     fn keep(self: Arc<Self>) {
         let counters = |s: &Stats| {
             [&s.received, &s.waits, &s.wait_us, &s.cold, &s.hints].map(|c| c.load(Ordering::Relaxed))
         };
         let (mut last, mut at) = ([0u64; 5], Instant::now());
+        // When the index was saved, the bytes received then, and two seconds ago.
+        let (mut saved, mut saved_at, mut received) = (Instant::now(), 0, 0);
         while !self.stop.load(Ordering::Acquire) {
             thread::sleep(Duration::from_secs(2));
             let Some(r) = self.ready.get() else { continue };
-            if let Err(e) = r.cache.save() {
-                log::warn!("stream cache: saving the index: {e}");
+            let now = self.stats.received.load(Ordering::Relaxed);
+            let flowing = std::mem::replace(&mut received, now) != now;
+            if !flowing || saved.elapsed() >= SAVE_BUSY || now.saturating_sub(saved_at) >= SAVE_BYTES {
+                if let Err(e) = r.cache.save() {
+                    log::warn!("stream cache: saving the index: {e}");
+                }
+                (saved, saved_at) = (Instant::now(), now);
             }
             if at.elapsed() < Duration::from_secs(10) {
                 continue;
