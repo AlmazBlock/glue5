@@ -1,13 +1,16 @@
 //! A server and a client on this machine, over a small made-up game.
 
 use std::fs;
-use std::net::SocketAddr;
+use std::io::{Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::cache::BLOCK;
 use crate::client::{Client, Options, Phase};
+use crate::protocol::{DATA, HEADER, HELLO, Header};
 use crate::server::{self, Server};
 
 const BUILD: &str = "testbuild";
@@ -54,6 +57,107 @@ fn serve(dir: &Path, cache: &Path, addr: SocketAddr) -> Server {
     let opts = server::Options { game: dir.to_owned(), build: BUILD.into(), cache: cache.to_owned(), rate: None };
     let prepared = server::prepare(opts, &|_| {}).unwrap();
     Server::start(&prepared, addr).unwrap()
+}
+
+/// Between a client and a server: passes on what each sends, or holds it
+/// (the client's requests, the server's answers), or changes the headers
+/// of the server's messages.
+struct Proxy {
+    addr: SocketAddr,
+    up: Arc<AtomicBool>,
+    down: Arc<AtomicBool>,
+    accepted: Arc<AtomicUsize>,
+    done: Arc<AtomicBool>,
+    sockets: Arc<Mutex<Vec<TcpStream>>>,
+}
+
+type Tamper = Arc<dyn Fn(&mut Header) + Send + Sync>;
+
+impl Proxy {
+    fn start(server: SocketAddr, tamper: Option<Tamper>) -> Proxy {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        // Little room for requests the proxy holds: the client's writes stop.
+        let _ = socket2::SockRef::from(&listener).set_recv_buffer_size(16 << 10);
+        let p = Proxy {
+            addr: listener.local_addr().unwrap(),
+            up: Arc::new(AtomicBool::new(true)),
+            down: Arc::new(AtomicBool::new(true)),
+            accepted: Arc::new(AtomicUsize::new(0)),
+            done: Arc::new(AtomicBool::new(false)),
+            sockets: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (up, down, accepted, done, sockets) = (p.up.clone(), p.down.clone(), p.accepted.clone(), p.done.clone(), p.sockets.clone());
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                if done.load(Ordering::Acquire) {
+                    break;
+                }
+                let (Ok(client), Ok(server)) = (client, TcpStream::connect(server)) else { continue };
+                accepted.fetch_add(1, Ordering::AcqRel);
+                sockets.lock().unwrap().extend([client.try_clone().unwrap(), server.try_clone().unwrap()]);
+                pump(client.try_clone().unwrap(), server.try_clone().unwrap(), up.clone(), done.clone(), None);
+                pump(server, client, down.clone(), done.clone(), tamper.clone());
+            }
+        });
+        p
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        let _ = TcpStream::connect(self.addr);
+        for s in self.sockets.lock().unwrap().drain(..) {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+/// Passes `from`'s bytes on to `to` while `pass` (with `tamper`, a message
+/// at a time).
+fn pump(mut from: TcpStream, mut to: TcpStream, pass: Arc<AtomicBool>, done: Arc<AtomicBool>, tamper: Option<Tamper>) {
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            while !pass.load(Ordering::Acquire) {
+                if done.load(Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let n = match &tamper {
+                Some(tamper) => {
+                    let Ok(mut h) = Header::read(&mut from) else { break };
+                    let n = HEADER + if matches!(h.kind, HELLO | DATA) { h.len as usize } else { 0 };
+                    if from.read_exact(&mut buf[HEADER..n]).is_err() {
+                        break;
+                    }
+                    tamper(&mut h);
+                    buf[..HEADER].copy_from_slice(&h.encode());
+                    n
+                }
+                None => match from.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                },
+            };
+            if to.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
+        let _ = from.shutdown(Shutdown::Both);
+        let _ = to.shutdown(Shutdown::Both);
+    });
+}
+
+/// Whether `f` returns within a second.
+fn promptly(f: impl FnOnce() + Send + 'static) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(Duration::from_secs(1)).is_ok()
 }
 
 fn wait_ready(c: &Client) {
@@ -368,6 +472,40 @@ fn completes_only_once_finished() {
     }
     assert!(!root.join(crate::cache::MARKER).exists());
     client.stop();
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A server that takes no more requests holds up neither the app's status
+/// (asked every frame) nor stopping the client.
+#[test]
+fn a_stuck_server_holds_nothing_up() {
+    let dir = temp("stuck");
+    fs::create_dir_all(dir.join("data")).unwrap();
+    // 8 GB, sparse: 4 MB of requests.
+    fs::File::create(dir.join("data/huge.rpf")).unwrap().set_len(8 << 30).unwrap();
+    fs::create_dir_all(dir.join(format!("b/{BUILD}/shaders"))).unwrap();
+    fs::write(dir.join(format!("b/{BUILD}/shaders/index.json")), b"{}").unwrap();
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let proxy = Proxy::start(server.addr(), None);
+    let root = temp("stuck-copy");
+    let client = Client::start(Options { server: proxy.addr.to_string(), root: root.clone(), build: BUILD.into(), low_memory: false });
+    wait_ready(&client);
+    let id = client.find("data/huge.rpf").unwrap();
+    proxy.up.store(false, Ordering::Release);
+    let c = client.clone();
+    std::thread::spawn(move || {
+        for k in 0..64 {
+            c.hint(id, k << 27, 1 << 27, true);
+        }
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let c = client.clone();
+    assert!(promptly(move || assert!(c.status().connected)), "status() waits for a stuck write");
+    let c = client.clone();
+    assert!(promptly(move || c.stop()), "stop() waits for a stuck write");
+    drop(proxy);
     drop(server);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&root);

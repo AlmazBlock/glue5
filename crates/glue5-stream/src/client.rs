@@ -82,7 +82,8 @@ const BOOT_SET: &str = "bootset.json";
 /// that much of the download); as soon as it stops, at once.
 const SAVE_BUSY: Duration = Duration::from_secs(10);
 const SAVE_BYTES: u64 = 256 << 20;
-/// No data for this long with requests in flight: the connection is dead.
+/// No data for this long with requests in flight, or no room for requests
+/// for this long: the connection is dead.
 const SILENCE: Duration = Duration::from_secs(20);
 /// A read whose blocks were asked for less than this before the engine came
 /// to wait for them was not announced in time (the engine often announces a
@@ -125,7 +126,13 @@ pub struct Client {
     phase: Mutex<Phase>,
     error: Mutex<Option<String>>,
     ready: OnceLock<Ready>,
-    conn: Mutex<Option<TcpStream>>,
+    /// The connection requests go on (locked briefly: writes hold `sending`).
+    conn: Mutex<Option<Arc<TcpStream>>>,
+    /// Whether there is one (the app asks every frame).
+    connected: AtomicBool,
+    /// Held while requests are written, one writer at a time; the socket's
+    /// write timeout bounds it.
+    sending: Mutex<()>,
     inflight: Mutex<Inflight>,
     waiters: Mutex<Vec<Waiter>>,
     stats: Stats,
@@ -243,6 +250,8 @@ impl Client {
             error: Mutex::new(None),
             ready: OnceLock::new(),
             conn: Mutex::new(None),
+            connected: AtomicBool::new(false),
+            sending: Mutex::new(()),
             inflight: Mutex::new(Inflight::default()),
             waiters: Mutex::new(Vec::new()),
             stats: Stats::default(),
@@ -311,7 +320,7 @@ impl Client {
         };
         Status {
             phase: self.phase.lock().unwrap().clone(),
-            connected: self.conn.lock().unwrap().is_some(),
+            connected: self.connected.load(Ordering::Acquire),
             error: self.error.lock().unwrap().clone(),
             cache_bytes: self.ready.get().map_or(0, |r| r.cache.used()),
             boot,
@@ -349,9 +358,11 @@ impl Client {
     /// Reads still waiting stay so.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
+        // A write stuck on it fails at once.
         if let Some(s) = self.conn.lock().unwrap().take() {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
+        self.connected.store(false, Ordering::Release);
         self.flush();
     }
 
@@ -579,16 +590,20 @@ impl Client {
         if msgs.is_empty() {
             return;
         }
-        let mut buf = Vec::with_capacity(msgs.len() * HEADER);
-        for m in msgs {
-            buf.extend_from_slice(&m.encode());
-        }
-        let mut conn = self.conn.lock().unwrap();
-        if let Some(s) = conn.as_mut()
-            && io::Write::write_all(s, &buf).is_err()
-        {
+        let buf = encode(msgs);
+        let _one = self.sending.lock().unwrap();
+        self.write(&buf);
+    }
+
+    /// Writes requests on the connection, if there is one (`sending` held).
+    /// One that takes none for [`SILENCE`] (the socket's write timeout: the
+    /// server stopped reading) is dead: shut, its session then ends.
+    fn write(&self, buf: &[u8]) {
+        let Some(s) = self.conn.lock().unwrap().clone() else { return };
+        if io::Write::write_all(&mut &*s, buf).is_err() {
             let _ = s.shutdown(std::net::Shutdown::Both);
-            *conn = None;
+            *self.conn.lock().unwrap() = None;
+            self.connected.store(false, Ordering::Release);
         }
     }
 
@@ -603,6 +618,7 @@ impl Client {
             let result = self.session();
             let failed = matches!(*self.phase.lock().unwrap(), Phase::Failed(_));
             *self.conn.lock().unwrap() = None;
+            self.connected.store(false, Ordering::Release);
             if let Err(e) = &result {
                 let msg = format!("{e:#}");
                 if self.error.lock().unwrap().as_deref() != Some(&msg) {
@@ -634,6 +650,7 @@ impl Client {
         let (stream, addr) = connect(&self.opts.server)?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(SILENCE))?;
         let mut reader = BufReader::with_capacity(256 << 10, stream.try_clone()?);
         let hello = read_hello(&mut reader)?;
         if let Some(why) = unusable(&hello, &self.opts.build) {
@@ -666,8 +683,13 @@ impl Client {
                 .collect()
         };
         *self.stats.last_data.lock().unwrap() = Some(Instant::now());
-        *self.conn.lock().unwrap() = Some(stream);
-        self.send(&again);
+        {
+            // No request goes on it before these.
+            let _one = self.sending.lock().unwrap();
+            *self.conn.lock().unwrap() = Some(Arc::new(stream));
+            self.connected.store(true, Ordering::Release);
+            self.write(&encode(&again));
+        }
         self.prefetch_boot();
         self.receive(sync.reader)
     }
@@ -889,7 +911,7 @@ impl Client {
     fn fill(self: Arc<Self>) {
         let mut cursor = 0u32;
         while !self.stop.load(Ordering::Acquire) {
-            let connected = self.conn.lock().unwrap().is_some();
+            let connected = self.connected.load(Ordering::Acquire);
             let Some(r) = self.ready.get().filter(|_| connected && self.fill.load(Ordering::Acquire)) else {
                 thread::sleep(Duration::from_millis(500));
                 continue;
@@ -1183,6 +1205,15 @@ fn boot_runs(catalog: &Catalog, json: &[u8]) -> Vec<(u32, u64, u64)> {
         runs.extend(cur.map(|(x, y)| (id, x, y)));
     }
     runs
+}
+
+/// Messages as they go on the wire.
+fn encode(msgs: &[Header]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(msgs.len() * HEADER);
+    for m in msgs {
+        buf.extend_from_slice(&m.encode());
+    }
+    buf
 }
 
 fn read_json(path: &Path) -> serde_json::Value {
