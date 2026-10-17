@@ -222,6 +222,50 @@ fn counts_reads_not_announced_in_time() {
 }
 
 #[test]
+fn reads_ahead_only_what_is_played() {
+    let dir = temp("ahead");
+    let data = noise(4 << 20, 11);
+    fs::create_dir_all(dir.join("data")).unwrap();
+    fs::write(dir.join("data/music.rpf"), &data).unwrap();
+    fs::write(dir.join("data/model.rpf"), &data).unwrap();
+    fs::create_dir_all(dir.join(format!("b/{BUILD}/shaders"))).unwrap();
+    fs::write(dir.join(format!("b/{BUILD}/shaders/index.json")), b"{}").unwrap();
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let root = temp("ahead-copy");
+    let client = Client::start(Options {
+        server: server.addr().to_string(),
+        root: root.clone(),
+        build: BUILD.into(),
+        low_memory: false,
+    });
+    wait_ready(&client);
+    let (music, model) = (client.find("data/music.rpf").unwrap(), client.find("data/model.rpf").unwrap());
+    // Played: 32 KB every 50 ms. What follows comes before it is read.
+    let mut buf = vec![0u8; 32 << 10];
+    for k in 0..3 {
+        assert_eq!(client.read(music, k * (32 << 10), &mut buf), Some(buf.len()));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let started = Instant::now();
+    while !client.has(music, 320 << 10) {
+        assert!(started.elapsed() < Duration::from_secs(2), "nothing read ahead of the music");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Small pieces of one resource read back to back: nothing past them.
+    let mut piece = vec![0u8; 16 << 10];
+    for k in 0..3 {
+        assert_eq!(client.read(model, k * (16 << 10), &mut piece), Some(piece.len()));
+        assert_eq!(&piece[..], &data[(k * (16 << 10)) as usize..][..piece.len()]);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!client.has(model, 48 << 10), "read ahead of small pieces read back to back");
+    client.stop();
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn downloads_the_whole_game() {
     let dir = temp("whole");
     game(&dir);

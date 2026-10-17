@@ -7,8 +7,8 @@
 //! start page or the shaders compile. A read the cache cannot answer asks
 //! the server at the highest priority, or raises a request already on its
 //! way, and waits for just its blocks. The engine's own announcements of
-//! the reads it will make ([`Client::hint`]) and sequential read-ahead are
-//! fetched in between.
+//! the reads it will make ([`Client::hint`]) and read-ahead of files played
+//! over time (music, radio) are fetched in between.
 //!
 //! A lost connection is retried for ever; requests in flight are asked
 //! again on the new one. Without a server, a copy that was complete enough
@@ -54,9 +54,16 @@ const ROOM: u64 = 256 << 20;
 /// requests keep that to one chunk (with 1 MB requests, a read waited 134 ms
 /// behind a prefetch at 8 MB/s; with these, 10-14 ms).
 const MAX_RUN: u64 = CHUNK as u64 / BLOCK;
-/// Read-ahead of sequential reads: from 64 KB, doubling up to 512 KB.
+/// Read-ahead of a file played over time (music, a radio station): four
+/// times the read at first (64 KB at least), doubling up to 1 MB; of one
+/// read in pieces of 64 KB or more one after the other: from 64 KB,
+/// doubling up to 512 KB.
 const AHEAD_FIRST: u64 = 64 << 10;
-const AHEAD_MAX: u64 = 512 << 10;
+const AHEAD_MAX: u64 = 1 << 20;
+const PIECES_MAX: u64 = 512 << 10;
+/// A file read again this long at least after the engine had its previous
+/// read is being played over time, not read in pieces.
+const STREAM_GAP: Duration = Duration::from_millis(20);
 /// Two boot ranges closer than this are fetched as one.
 const BOOT_GAP: u64 = 64;
 /// Requests of the full download on their way at most (32 MB): spare
@@ -135,10 +142,20 @@ struct Ready {
     cache: Cache,
     manifest: Vec<u8>,
     boot: Vec<(u32, u64, u64)>,
-    /// Per file: the end of its last read, and the current read-ahead.
+    /// Per file: the end of its last read, when the engine had it (µs after
+    /// `epoch`), and the current read-ahead.
     seq_end: Vec<AtomicU64>,
+    seq_done: Vec<AtomicU64>,
     ahead: Vec<AtomicU64>,
+    epoch: Instant,
     radio: Vec<bool>,
+}
+
+impl Ready {
+    /// The engine has its read of file `id`.
+    fn read_done(&self, id: u32) {
+        self.seq_done[id as usize].store(self.epoch.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
 }
 
 #[derive(Default)]
@@ -254,6 +271,12 @@ impl Client {
         self.stats.cold.load(Ordering::Relaxed)
     }
 
+    /// Whether the block holding `off` of file `id` is here.
+    #[cfg(test)]
+    pub(crate) fn has(&self, id: u32, off: u64) -> bool {
+        self.ready.get().is_some_and(|r| r.cache.has_block(id, off / BLOCK))
+    }
+
     pub fn status(&self) -> Status {
         let boot = {
             let mut cached = self.boot.lock().unwrap();
@@ -344,7 +367,10 @@ impl Client {
         }
         self.read_ahead(r, id, off, n as u64);
         match r.cache.read(id, off, &mut buf[..n]) {
-            Ok(Some(got)) => return Some(got),
+            Ok(Some(got)) => {
+                r.read_done(id);
+                return Some(got);
+            }
             Ok(None) => {}
             Err(e) => log::warn!("stream cache: reading {}: {e}", r.catalog.entries[id as usize].path),
         }
@@ -385,6 +411,7 @@ impl Client {
         self.stats.waiting.fetch_sub(1, Ordering::Relaxed);
         self.stats.waits.fetch_add(1, Ordering::Relaxed);
         self.stats.wait_us.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        r.read_done(id);
         got
     }
 
@@ -419,23 +446,36 @@ impl Client {
         self.want(id, off / BLOCK, last, if ahead { AHEAD } else { HINT });
     }
 
-    /// A read that continues the previous one of the file (a stream being
-    /// played, a resource read in pieces) also fetches what follows.
+    /// A read that continues the previous one of the file also fetches what
+    /// follows, if the file is played over time (the engine had its previous
+    /// read [`STREAM_GAP`] before at least: music is read 32 KB at a time
+    /// every ~0.8 s, and waited a round trip for each piece; radio stations)
+    /// or read in pieces of 64 KB or more (a smaller window). Smaller pieces
+    /// read back to back get none: the next one is read before a read-ahead
+    /// could come (read-ahead of every such run, up to 4 MB, fetched 520 MB
+    /// in a cold run, 340 MB of it never read).
     fn read_ahead(&self, r: &Ready, id: u32, off: u64, n: u64) {
         let i = id as usize;
         let prev = r.seq_end[i].swap(off + n, Ordering::Relaxed);
-        // Radio stations are read in ~33 KB blocks one after the other, each
-        // a round trip without this.
-        let sequential =
-            if r.radio[i] { prev != 0 && off >= prev && off - prev <= 64 << 10 } else { off == prev && n >= 64 << 10 };
-        if !sequential {
+        let since = (r.epoch.elapsed().as_micros() as u64).saturating_sub(r.seq_done[i].load(Ordering::Relaxed));
+        // Radio stations skip a little between their ~33 KB blocks.
+        let continues = prev != 0 && if r.radio[i] { off >= prev && off - prev <= 64 << 10 } else { off == prev };
+        if !continues {
             r.ahead[i].store(0, Ordering::Relaxed);
             return;
         }
-        let ahead = match r.ahead[i].load(Ordering::Relaxed) {
-            0 => AHEAD_FIRST,
-            a => (a * 2).min(AHEAD_MAX),
+        let (first, max) = if since >= STREAM_GAP.as_micros() as u64 {
+            ((4 * n).max(AHEAD_FIRST), AHEAD_MAX)
+        } else if n >= 64 << 10 || r.radio[i] {
+            (AHEAD_FIRST, PIECES_MAX)
+        } else {
+            return;
         };
+        let ahead = match r.ahead[i].load(Ordering::Relaxed) {
+            0 => first,
+            a => 2 * a,
+        }
+        .min(max);
         r.ahead[i].store(ahead, Ordering::Relaxed);
         let (from, size) = (off + n, r.cache.size(id));
         if from < size {
@@ -681,6 +721,8 @@ impl Client {
             manifest,
             boot,
             seq_end: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            seq_done: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            epoch: Instant::now(),
             ahead: (0..n).map(|_| AtomicU64::new(0)).collect(),
             radio,
         };
