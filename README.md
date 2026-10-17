@@ -52,6 +52,7 @@ See [design.md](docs/design.md) for architecture, tradeoffs and known limits.
 | `crates/glue5-stream` | The game's files over the network: `glue5-serve` (a game folder to other devices), the client and its local copy, Bonjour discovery. |
 | `crates/glue5` | The application (SDL3), the same on every platform: window, input, audio, settings and touch controls (egui overlay). Its `headless` example runs the game without a window. |
 | `platform/ios` | What iOS needs around it: `main.c`, entitlements, the xcodegen spec. |
+| `platform/tvos` | The same for the Apple TV (so far run in the simulator only). |
 | `platform/android` | The Gradle project around it: manifest, the activity (SDL's, subclassed), the adaptive icon. |
 | `platform/macos` | Extra bundle metadata; cargo-packager configuration lives in `crates/glue5/Cargo.toml`. |
 | `platform/linux` | The container the AppImage is built in (`Dockerfile`). |
@@ -224,7 +225,7 @@ up the system keyboard on touch devices.
 The start page shows the game files, Story mode, GTA Online, Sandbox (the
 whole map, free roam, no missions) and Settings; the last mode played comes
 first. App settings cover resolution, upscaling, VSync, frame rate, touch
-controls, low memory, the game folder and GTA Online's name. During play,
+controls, low memory and where the game files come from. During play,
 open them with F1, the ⚙ button on touch screens, or by holding Back +
 Start on a controller. Use the D-pad or arrow keys to navigate, A or Enter
 to select, and B or Esc to go back.
@@ -242,7 +243,8 @@ of everyone playing, where the game's own matchmaking finds or hosts a
 public session. The pause menu's other sessions (invite only, crew,
 closed friends, solo) are hosted in a lobby of their own, new each time,
 reached only through an invite or, for a closed friends session, by
-friends. The name other players see is in Settings › Game.
+friends. The name other players see is set on the start page, in the GTA
+ONLINE card.
 
 - The lobby is a virtual LAN the engine plays on as on a real one
   (`vnet.rs`): its sockets carry their datagrams over one UDP socket per
@@ -344,7 +346,8 @@ repository. On iOS, it is `Documents/game`, populated with
 `mise run ios:game`, Finder > device > Files, or the Files app. On Android,
 it is `Android/data/local.glue5/files/game`, populated with
 `mise run android:game`. The Apple TV has no game folder: it keeps only
-caches the system may empty, so the game always streams there.
+caches the system may empty, so the game always streams there; its
+settings, saves and friends are in that cache folder too.
 
 The files can also stream from another computer instead (Settings › Game
 › Game files › Server, or Play from a computer on the start page): the app
