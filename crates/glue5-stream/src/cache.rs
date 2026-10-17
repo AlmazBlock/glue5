@@ -29,6 +29,7 @@ use crate::sys;
 pub const BLOCK: u64 = 4096;
 const MAGIC: &[u8; 4] = b"G5SC";
 /// Missing blocks are given back to the file system in runs of at least this.
+#[cfg(target_vendor = "apple")]
 const MIN_HOLE: u64 = 64 << 10;
 const VERSION: u32 = 1;
 /// In a partial copy: it is not a game folder for the local mode.
@@ -61,8 +62,10 @@ struct Slot {
     mtime: u64,
     present: Box<[AtomicU64]>,
     file: OnceLock<File>,
-    /// Shared by reads, exclusive while the file is emptied.
+    /// Shared by reads and writes, exclusive while the file is emptied.
     guard: RwLock<()>,
+    /// Held by a write and by the punching of a hole (not by reads).
+    writing: Mutex<()>,
     last_used: AtomicU32,
     /// When this run last read or wrote the file: milliseconds since the
     /// copy was opened (0: not yet).
@@ -113,6 +116,7 @@ impl Cache {
                 present,
                 file: OnceLock::new(),
                 guard: RwLock::new(()),
+                writing: Mutex::new(()),
                 last_used: AtomicU32::new(last_used),
                 touched: AtomicU32::new(0),
                 pack: crate::pack::kind_of(catalog, slots.len()).is_some(),
@@ -254,8 +258,10 @@ impl Cache {
             }
             return Ok(());
         }
-        // Not while the file is emptied: its blocks would be marked over zeros.
+        // Not while the file is emptied or a hole punched: its blocks would
+        // be marked over zeros.
         let _g = s.guard.read().unwrap();
+        let _w = s.writing.lock().unwrap();
         sys::write_all_at(&*self.handle(id)?, data, off)?;
         let end = off + data.len() as u64;
         if end >= off + BLOCK || end == s.size {
@@ -278,6 +284,7 @@ impl Cache {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "not the file's size"));
         }
         let _g = s.guard.read().unwrap();
+        let _w = s.writing.lock().unwrap();
         let f = match s.file.get() {
             Some(f) => Handle::Kept(f),
             None => Handle::Once(self.open_file(id)?),
@@ -357,6 +364,7 @@ impl Cache {
                 .collect();
             jobs.into_iter().try_for_each(|j| j.join().unwrap_or(Ok(())))
         })?;
+        #[cfg(target_vendor = "apple")]
         for &id in &dirty {
             if let Err(e) = self.keep_sparse(id) {
                 log::debug!("stream cache: {}: {e}", self.slots[id as usize].path);
@@ -390,13 +398,15 @@ impl Cache {
     /// APFS, when it writes a file out, may fill the holes between its
     /// written parts with zeros (whether it does depends on its state: once
     /// 4.2 GB were taken for 3.7 GB of blocks); a just-synced file gives them
-    /// back here. Nothing reads or writes the file meanwhile.
+    /// back here (other file systems never fill holes). Each hole is punched
+    /// with the file's writes held off (a block written meanwhile would be
+    /// marked over zeros), its reads not (they only read blocks that are here).
+    #[cfg(target_vendor = "apple")]
     fn keep_sparse(&self, id: u32) -> io::Result<()> {
         let s = &self.slots[id as usize];
         if self.complete(id) {
             return Ok(());
         }
-        let _g = s.guard.write().unwrap();
         let f = match s.file.get() {
             Some(f) => Handle::Kept(f),
             None => Handle::Once(OpenOptions::new().read(true).write(true).open(self.root.join(&s.path))?),
@@ -415,7 +425,12 @@ impl Cache {
                     b += 1;
                 }
                 let (off, len) = (hole * BLOCK, ((b * BLOCK).min(s.size)) - hole * BLOCK);
-                if len >= MIN_HOLE {
+                if len < MIN_HOLE {
+                    continue;
+                }
+                let _writes = s.writing.lock().unwrap();
+                // Written meanwhile: next time.
+                if (hole..b).all(|k| !set(k)) {
                     sys::punch_hole(&f, off, len)?;
                 }
             }

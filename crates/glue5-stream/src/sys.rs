@@ -145,71 +145,48 @@ pub fn sync_full(f: &File) -> io::Result<()> {
     f.sync_all()
 }
 
-/// The ranges of `f` that take space on disk (`SEEK_DATA`/`SEEK_HOLE`);
-/// all of it where the system cannot tell.
+/// The ranges of `f` that take space on disk (`SEEK_DATA`/`SEEK_HOLE`).
+#[cfg(target_vendor = "apple")]
 pub fn data_extents(f: &File) -> io::Result<Vec<(u64, u64)>> {
+    use std::os::fd::AsRawFd;
+    const SEEK_HOLE: libc::c_int = 3;
+    const SEEK_DATA: libc::c_int = 4;
     let size = f.metadata()?.len();
-    #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
-    {
-        use std::os::fd::AsRawFd;
-        #[cfg(target_vendor = "apple")]
-        const SEEK_HOLE: libc::c_int = 3;
-        #[cfg(target_vendor = "apple")]
-        const SEEK_DATA: libc::c_int = 4;
-        #[cfg(not(target_vendor = "apple"))]
-        const SEEK_DATA: libc::c_int = 3;
-        #[cfg(not(target_vendor = "apple"))]
-        const SEEK_HOLE: libc::c_int = 4;
-        let (fd, mut out, mut off) = (f.as_raw_fd(), Vec::new(), 0u64);
-        while off < size {
-            let start = unsafe { libc::lseek(fd, off as libc::off_t, SEEK_DATA) };
-            if start < 0 {
-                let e = io::Error::last_os_error();
-                // ENXIO: no data after `off`.
-                return if e.raw_os_error() == Some(libc::ENXIO) { Ok(out) } else { Err(e) };
-            }
-            let end = unsafe { libc::lseek(fd, start, SEEK_HOLE) };
-            if end < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            out.push((start as u64, end as u64));
-            off = end as u64;
+    let (fd, mut out, mut off) = (f.as_raw_fd(), Vec::new(), 0u64);
+    while off < size {
+        let start = unsafe { libc::lseek(fd, off as libc::off_t, SEEK_DATA) };
+        if start < 0 {
+            let e = io::Error::last_os_error();
+            // ENXIO: no data after `off`.
+            return if e.raw_os_error() == Some(libc::ENXIO) { Ok(out) } else { Err(e) };
         }
-        Ok(out)
+        let end = unsafe { libc::lseek(fd, start, SEEK_HOLE) };
+        if end < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        out.push((start as u64, end as u64));
+        off = end as u64;
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
-    Ok(vec![(0, size)])
+    Ok(out)
 }
 
 /// Frees the space of `len` bytes of `f` at `off` (block-aligned), which then
 /// read as zeros.
+#[cfg(target_vendor = "apple")]
 pub fn punch_hole(f: &File, off: u64, len: u64) -> io::Result<()> {
-    #[cfg(target_vendor = "apple")]
-    unsafe {
-        use std::os::fd::AsRawFd;
-        #[repr(C)]
-        struct Punch {
-            flags: u32,
-            reserved: u32,
-            offset: libc::off_t,
-            length: libc::off_t,
-        }
-        const F_PUNCHHOLE: libc::c_int = 99;
-        let p = Punch { flags: 0, reserved: 0, offset: off as libc::off_t, length: len as libc::off_t };
-        if libc::fcntl(f.as_raw_fd(), F_PUNCHHOLE, &p) != 0 {
-            return Err(io::Error::last_os_error());
-        }
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct Punch {
+        flags: u32,
+        reserved: u32,
+        offset: libc::off_t,
+        length: libc::off_t,
     }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    unsafe {
-        use std::os::fd::AsRawFd;
-        let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
-        if libc::fallocate(f.as_raw_fd(), mode, off as libc::off_t, len as libc::off_t) != 0 {
-            return Err(io::Error::last_os_error());
-        }
+    const F_PUNCHHOLE: libc::c_int = 99;
+    let p = Punch { flags: 0, reserved: 0, offset: off as libc::off_t, length: len as libc::off_t };
+    if unsafe { libc::fcntl(f.as_raw_fd(), F_PUNCHHOLE, &p) } != 0 {
+        return Err(io::Error::last_os_error());
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
-    let _ = (f, off, len);
     Ok(())
 }
 
