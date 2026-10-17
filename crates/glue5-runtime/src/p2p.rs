@@ -20,6 +20,15 @@
 //! the others by the first player it reaches, and while two players cannot
 //! reach each other directly, that player relays between them.
 //!
+//! Mobile networks' NATs give a new port to each address a phone sends to
+//! (one after the other), so the port the DHT hands out is not the one its
+//! datagrams to another player come from, and a home router lets these in
+//! only from where it sent to. A player whose NAT keeps one port for all
+//! (the nodes agree on its address) and who does not hear from a far
+//! player sends to the ports around the ones handed out (`spray_ports`):
+//! its router then lets in the far player's greetings, whichever of them
+//! its NAT picked.
+//!
 //! The game looks for a session only for a moment (about a second) and
 //! hosts one when it finds none, so it waits for the others first
 //! (`may_enter`): until the lobby's players are known, and while another
@@ -51,6 +60,9 @@ pub(crate) const MAGIC: [u8; 3] = [b'G', b'5', 1];
 const HELLO: u8 = 1;
 const PEERS: u8 = 2;
 const DATA: u8 = 3;
+/// A datagram that only opens this player's NAT to where it goes (nobody
+/// answers it).
+const OPEN: u8 = 4;
 /// Kinds of datagram from here on are the friends' (friends/).
 pub(crate) const FRIENDS: u8 = 10;
 /// HELLO flags: please answer; the player is about to look for a session;
@@ -80,6 +92,13 @@ const LOBBIES: usize = 4;
 const LOBBY_REFRESH: Duration = Duration::from_secs(20);
 /// Errors in a row from the socket after which it is made again.
 const REBIND_AFTER: u32 = 20;
+/// Toward a far player not heard from (`Far`): how long plain greetings
+/// get, how often the ports around its own are opened again, how many,
+/// and for how many players at a time.
+const SPRAY_AFTER: Duration = Duration::from_secs(4);
+const SPRAY_EVERY: Duration = Duration::from_secs(10);
+const SPRAY_PORTS: u16 = 512;
+const SPRAYING: usize = 4;
 
 /// A lobby's id in the players' datagrams, and its key on the DHT.
 pub(crate) type LobbyId = [u8; 8];
@@ -168,6 +187,24 @@ impl Peer {
     }
 }
 
+/// A player on the Internet whose NAT may give its datagrams here another
+/// port than the DHT's: the ports handed out for its address, since when.
+struct Far {
+    low: u16,
+    high: u16,
+    since: Instant,
+    sprayed: Option<Instant>,
+}
+
+/// The ports a far player's NAT may send from to this player, given the
+/// ones the DHT handed out: a little before the lowest, and more after
+/// the highest (they come in order, and the far player greets this one
+/// after announcing itself).
+fn spray_ports(low: u16, high: u16) -> std::ops::RangeInclusive<u16> {
+    let start = low.saturating_sub(SPRAY_PORTS / 4).max(high.saturating_sub(SPRAY_PORTS / 2)).max(1024);
+    start..=start.saturating_add(SPRAY_PORTS - 1)
+}
+
 /// How close an address is: this machine, this network, the Internet.
 fn nearness(addr: SocketAddrV4) -> u8 {
     let ip = addr.ip();
@@ -189,6 +226,10 @@ struct State {
     trying: HashMap<SocketAddrV4, (Instant, LobbyId)>,
     /// This player's own addresses (the DHT hands them out too).
     own: HashSet<SocketAddrV4>,
+    /// When players' addresses were last heard from, and the far ones not
+    /// heard from yet.
+    heard: HashMap<Ipv4Addr, Instant>,
+    far: HashMap<Ipv4Addr, Far>,
     introduced: Instant,
     dht: Dht,
 }
@@ -196,6 +237,42 @@ struct State {
 impl State {
     fn lobby(&self, id: &LobbyId) -> Option<&Lobby> {
         self.lobbies.iter().find(|l| l.id == *id)
+    }
+
+    /// A player's address from the DHT: a far one when its NAT changed the
+    /// port (one keeping the lobby port keeps it for all) and it is not
+    /// heard from.
+    fn note_far(&mut self, addr: SocketAddrV4, now: Instant) {
+        if nearness(addr) < 2 || PORTS.contains(&addr.port()) || self.heard.get(addr.ip()).is_some_and(|t| now - *t < GONE) {
+            return;
+        }
+        let port = addr.port();
+        let far = self.far.entry(*addr.ip()).or_insert(Far { low: port, high: port, since: now, sprayed: None });
+        if now - far.since > PUNCH {
+            *far = Far { low: port, high: port, since: now, sprayed: None };
+        }
+        far.low = far.low.min(port);
+        far.high = far.high.max(port);
+    }
+
+    /// The far players whose ports around their own are due to be opened
+    /// (only by a player whose NAT keeps one port for all: `easy`).
+    fn sprays(&mut self, easy: bool, now: Instant) -> Vec<(Ipv4Addr, std::ops::RangeInclusive<u16>)> {
+        self.heard.retain(|_, t| now - *t < GONE);
+        let heard = &self.heard;
+        self.far.retain(|ip, f| now - f.since < PUNCH && heard.get(ip).is_none_or(|t| *t < f.since));
+        if !easy {
+            return Vec::new();
+        }
+        self.far
+            .iter_mut()
+            .filter(|(_, f)| now - f.since >= SPRAY_AFTER && f.sprayed.is_none_or(|t| now - t >= SPRAY_EVERY))
+            .take(SPRAYING)
+            .map(|(ip, f)| {
+                f.sprayed = Some(now);
+                (*ip, spray_ports(f.low, f.high))
+            })
+            .collect()
     }
 }
 
@@ -259,6 +336,8 @@ pub fn start() -> std::io::Result<&'static P2p> {
             peers: HashMap::new(),
             trying: HashMap::new(),
             own: Default::default(),
+            heard: HashMap::new(),
+            far: HashMap::new(),
             introduced: Instant::now(),
             dht: Dht::new(dht_id, port),
         }),
@@ -594,6 +673,10 @@ impl P2p {
             if state.own.contains(&addr) || external == Some(addr) {
                 continue;
             }
+            // Behind this player's NAT too: met on the local network.
+            if external.is_none_or(|e| e.ip() != addr.ip()) {
+                state.note_far(addr, now);
+            }
             let Some(lobby) = state.lobbies.iter().find(|l| l.key == key).map(|l| l.id) else {
                 friends.push((key, addr));
                 continue;
@@ -642,7 +725,18 @@ impl P2p {
         if introduce {
             state.introduced = now;
         }
+        let easy = state.dht.external().is_some();
+        let sprays = state.sprays(easy, now);
         drop(state);
+        for (ip, ports) in sprays {
+            log::debug!("p2p: opening the way from {ip}:{}-{}", ports.start(), ports.end());
+            let socket = self.socket();
+            let mut d = MAGIC.to_vec();
+            d.push(OPEN);
+            for port in ports {
+                let _ = socket.send_to(&d, SocketAddrV4::new(ip, port));
+            }
+        }
         // Players on this machine or network (the ones on other machines
         // mostly at the first port, as this one).
         for lobby in &lobbies {
@@ -698,6 +792,7 @@ impl P2p {
         if d.len() < MAGIC.len() + 1 || d[..MAGIC.len()] != MAGIC {
             return;
         }
+        self.state.lock().unwrap().heard.insert(*from.ip(), Instant::now());
         let kind = d[MAGIC.len()];
         if kind >= FRIENDS {
             crate::friends::receive(self, from, kind, &d[MAGIC.len() + 1..]);
@@ -842,5 +937,69 @@ impl P2p {
         for addr in punch {
             self.hello(addr, ASK, &lobby);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> State {
+        State {
+            lobbies: Vec::new(),
+            peers: HashMap::new(),
+            trying: HashMap::new(),
+            own: HashSet::new(),
+            heard: HashMap::new(),
+            far: HashMap::new(),
+            introduced: Instant::now(),
+            dht: Dht::new([0; 20], 47000),
+        }
+    }
+
+    #[test]
+    fn the_ports_opened_follow_the_ones_handed_out() {
+        // Measured on a mobile network: announced at 31329, its greetings
+        // came from a port a few above.
+        assert_eq!(spray_ports(31329, 31329), 31201..=31712);
+        // Ports far apart: the latest count.
+        assert_eq!(spray_ports(20000, 40000), 39744..=40255);
+        assert_eq!(spray_ports(1100, 1100), 1024..=1535);
+        assert_eq!(*spray_ports(65500, 65500).end(), 65535);
+    }
+
+    #[test]
+    fn a_far_player_not_heard_from_gets_its_ports_opened() {
+        let mut s = state();
+        let now = Instant::now();
+        let ip = Ipv4Addr::new(203, 0, 113, 7);
+        s.note_far(SocketAddrV4::new(ip, 31329), now);
+        s.note_far(SocketAddrV4::new(ip, 31340), now);
+        // Not on the lobby port, not on this network.
+        s.note_far(SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), 47000), now);
+        s.note_far(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 7), 50000), now);
+        assert_eq!(s.far.len(), 1);
+        // Plain greetings first; never from behind a NAT changing ports.
+        assert!(s.sprays(true, now + Duration::from_secs(1)).is_empty());
+        assert!(s.sprays(false, now + SPRAY_AFTER).is_empty());
+        assert_eq!(s.sprays(true, now + SPRAY_AFTER), vec![(ip, spray_ports(31329, 31340))]);
+        assert!(s.sprays(true, now + SPRAY_AFTER + Duration::from_secs(2)).is_empty());
+        assert_eq!(s.sprays(true, now + SPRAY_AFTER + SPRAY_EVERY).len(), 1);
+        // Heard from: done, and not noted again while it talks.
+        let later = now + SPRAY_AFTER + SPRAY_EVERY + Duration::from_secs(1);
+        s.heard.insert(ip, later);
+        assert!(s.sprays(true, later).is_empty());
+        assert!(s.far.is_empty());
+        s.note_far(SocketAddrV4::new(ip, 31400), later);
+        assert!(s.far.is_empty());
+    }
+
+    #[test]
+    fn spraying_stops_when_punching_does() {
+        let mut s = state();
+        let now = Instant::now();
+        s.note_far(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 31329), now);
+        assert!(s.sprays(true, now + PUNCH).is_empty());
+        assert!(s.far.is_empty());
     }
 }
