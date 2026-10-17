@@ -368,3 +368,31 @@ fn a_forged_answer_does_not_cancel_the_handshake() {
     run(&mut [&mut *lower, &mut *higher], out, from, &mut now, 2, &keep);
     assert!(lower.connected_to(higher) && higher.connected_to(lower));
 }
+
+#[test]
+fn only_a_code_s_owner_answers_for_it() {
+    let mut now = Instant::now();
+    let (mut a, mut b, mut m) = (Player::new("Ann", 1), Player::new("Bob", 2), Player::new("Mal", 3));
+    // Mal knows Ann's code and answers for it, first.
+    m.s.code = Some(a.code());
+    b.s.asked.push(Ask::new(a.code(), None));
+    let mut out = Out::default();
+    b.s.found(crypto::code_key(&a.code()), m.addr, now, &mut out);
+    b.s.found(crypto::code_key(&a.code()), a.addr, now, &mut out);
+    let from = b.addr;
+    run(&mut [&mut b, &mut m, &mut a], out, from, &mut now, 4, &keep);
+    assert!(m.s.requests.is_empty());
+    assert!(a.s.requests.get(&b.key()).is_some_and(|r| r.asked));
+}
+
+#[test]
+fn a_code_from_before_is_replaced_by_one_from_the_key() {
+    let a = Player::new("Ann", 1);
+    // A file of before: the key and a code, no salt.
+    let dir = dir("Before");
+    let store = Store { key: Some(crypto::hex(a.s.identity.as_ref().unwrap().private())), code: a.s.code.clone(), ..Store::default() };
+    std::fs::write(dir.join(FILE), serde_json::to_vec(&store).unwrap()).unwrap();
+    let s = Service::load(&dir, "Ann", 1);
+    assert!(s.code.is_some() && s.code != a.s.code);
+    assert_eq!(s.code, crypto::code_of(&a.key(), &s.salt));
+}

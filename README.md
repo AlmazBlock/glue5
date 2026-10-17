@@ -269,9 +269,12 @@ a request, a request accepted, an invite (Settings › Game turns them
 off).
 
 - Each player has a key pair made on the device and a friend code
-  (16 characters, 75 random bits and a check character) to give out.
-  Asking with a code reaches its owner, who says yes or no; a new code
-  retires the old one. A player met online can be asked without one,
+  (16 characters: 75 bits of a hash of its key and a random salt, and a
+  check character) to give out. Asking with a code reaches its owner, who
+  says yes or no: the owner answers with the salt, and the asker checks
+  that the code comes from the key that answered, so knowing a code is
+  not enough to answer for it. A new code (a new salt) retires the old
+  one. A player met online can be asked without one,
   from the page's players met or the pause menu's "Send Friend Request"
   on a player of the session: the players of a lobby tell each other
   their key, and a request without a code is answered only while its

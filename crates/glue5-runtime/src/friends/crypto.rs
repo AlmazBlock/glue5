@@ -3,10 +3,14 @@
 //!
 //! - A player is an X25519 key pair, made on the device and kept in its
 //!   user directory; a friend is known by its public key.
-//! - A friend code is 75 random bits and a check character, 16 letters and
-//!   digits (Crockford's base 32). It is a capability: whoever has it can
-//!   find its owner and ask to be friends (the Noise handshake proves the
-//!   code on both sides), nothing more; a new code retires the old one.
+//! - A friend code is 75 bits and a check character, 16 letters and digits
+//!   (Crockford's base 32): the bits are a hash of the owner's key and a
+//!   random salt. It is a capability: whoever has it can find its owner and
+//!   ask to be friends (the Noise handshake proves the code on both sides),
+//!   nothing more. The owner answers with the salt, and the asker checks
+//!   that the code comes from the key that answered: knowing a code is not
+//!   enough to answer for it. A new salt makes a new code, which retires the
+//!   old one.
 //! - Two friends meet on the DHT under a key only they can compute, from
 //!   the Diffie-Hellman secret of their two keys and the time (it changes
 //!   every 6 hours): nothing on the DHT names either of them.
@@ -127,12 +131,19 @@ fn value(c: u8) -> Option<u8> {
     ALPHABET.iter().position(|&a| a == c).map(|v| v as u8)
 }
 
-/// A new friend code (its 16 characters, without dashes).
-pub(crate) fn new_code() -> String {
-    let bytes: [u8; 15] = random();
-    let mut chars: Vec<u8> = bytes.iter().map(|b| ALPHABET[usize::from(b % 32)]).collect();
+/// What a code is made with besides the owner's key.
+pub(crate) type Salt = [u8; 16];
+
+/// The friend code of the owner of `public` with `salt` (its 16
+/// characters, without dashes); none for a salt of another length.
+pub(crate) fn code_of(public: &Key, salt: &[u8]) -> Option<String> {
+    if salt.len() != size_of::<Salt>() {
+        return None;
+    }
+    let bits = hash("glue5 code of 1", &[public, salt]);
+    let mut chars: Vec<u8> = bits[..CODE_LEN - 1].iter().map(|b| ALPHABET[usize::from(b % 32)]).collect();
     chars.push(check(&chars));
-    String::from_utf8(chars).unwrap()
+    Some(String::from_utf8(chars).unwrap())
 }
 
 /// A friend code as typed: upper case, without spaces or dashes, the
@@ -195,7 +206,7 @@ mod tests {
     #[test]
     fn codes_are_checked() {
         for _ in 0..100 {
-            let code = new_code();
+            let code = code_of(&random(), &random::<16>()).unwrap();
             assert_eq!(code.len(), 16);
             assert_eq!(parse_code(&code).as_deref(), Some(code.as_str()));
             let shown = format_code(&code);
@@ -213,6 +224,17 @@ mod tests {
         }
         assert_eq!(parse_code("ABCD"), None);
         assert_eq!(parse_code("ABCD-EFGH-JKMN-PQRU"), None);
+    }
+
+    #[test]
+    fn a_code_comes_from_its_owner_s_key() {
+        let (a, b) = (Identity::generate(), Identity::generate());
+        let salt: Salt = random();
+        let code = code_of(a.public(), &salt).unwrap();
+        assert_eq!(code_of(a.public(), &salt), Some(code.clone()));
+        assert_ne!(code_of(b.public(), &salt), Some(code.clone()));
+        assert_ne!(code_of(a.public(), &random::<16>()), Some(code));
+        assert_eq!(code_of(a.public(), &salt[1..]), None);
     }
 
     #[test]

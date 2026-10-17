@@ -343,10 +343,10 @@ mod tests {
     fn a_code_opens_a_channel_only_with_the_code() {
         let now = Instant::now();
         let (owner, asker) = (Identity::generate(), Identity::generate());
-        let code = crypto::new_code();
+        let code = crypto::code_of(owner.public(), &crypto::random::<16>()).unwrap();
         let (mut hq, d1) = Handshake::code(&asker, &code, addr(1), now).unwrap();
         let (pattern, iq, _, m1) = split(&d1, false);
-        let wrong = crypto::code_psk(&crypto::new_code());
+        let wrong = crypto::code_psk(&crypto::code_of(owner.public(), &crypto::random::<16>()).unwrap());
         assert!(Handshake::answer(&owner, pattern, Some(&wrong), iq, m1, addr(2), now).is_none());
         let psk = crypto::code_psk(&code);
         let (mut ho, _) = Handshake::answer(&owner, pattern, Some(&psk), iq, m1, addr(2), now).unwrap();

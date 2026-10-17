@@ -37,7 +37,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crypto::{Identity, Key, Tag};
+use crypto::{Identity, Key, Salt, Tag};
 use session::{Handshake, Pattern, Transport};
 
 use crate::dht;
@@ -189,6 +189,9 @@ struct Store {
     key: Option<String>,
     #[serde(default)]
     code: Option<String>,
+    /// What the code is made with besides the key (hex).
+    #[serde(default)]
+    salt: Option<String>,
     #[serde(default)]
     friends: Vec<StoredFriend>,
     /// Keys whose requests were declined (hex): not heard again.
@@ -319,16 +322,25 @@ struct Ask {
     asked: Option<Instant>,
     declined: bool,
     contacted: HashMap<SocketAddrV4, Instant>,
+    refused: Vec<SocketAddrV4>,
 }
 
 impl Ask {
     fn new(id: String, player: Option<(Key, String)>) -> Ask {
-        Ask { id, player, transport: None, asked: None, declined: false, contacted: HashMap::new() }
+        Ask { id, player, transport: None, asked: None, declined: false, contacted: HashMap::new(), refused: Vec::new() }
     }
 
     /// The friend code asked with.
     fn code(&self) -> Option<&str> {
         self.player.is_none().then_some(self.id.as_str())
+    }
+
+    /// Addresses whose answer was not from the code's owner: not asked again.
+    fn refuse(&mut self, addr: SocketAddrV4) {
+        if self.refused.len() >= 16 {
+            self.refused.remove(0);
+        }
+        self.refused.push(addr);
     }
 }
 
@@ -400,7 +412,9 @@ pub(crate) struct GameEvent {
 pub(crate) struct Service {
     dir: PathBuf,
     identity: Option<Identity>,
+    /// The friend code, made from the key and the salt.
     code: Option<String>,
+    salt: Salt,
     /// This player, as told to friends (the lobbies are added as sent).
     local: Presence,
     friends: HashMap<Key, Friend>,
@@ -478,10 +492,18 @@ impl Service {
             })
             .unwrap_or_default();
         let identity = store.key.as_deref().and_then(crypto::unhex::<32>).map(Identity::from_private);
+        // The code comes from the key and the salt; one from before (random,
+        // which anyone who knew it could answer for) is replaced.
+        let (salt, new_code) = match store.salt.as_deref().and_then(crypto::unhex::<16>) {
+            Some(salt) => (salt, false),
+            None => (crypto::random(), identity.is_some()),
+        };
+        let code = identity.as_ref().and_then(|i| crypto::code_of(i.public(), &salt));
         let mut service = Service {
             dir: dir.to_owned(),
             identity,
-            code: store.code.filter(|c| crypto::parse_code(c).is_some()),
+            code,
+            salt,
             local: Presence { name: clean_name(name), id, ..Presence::default() },
             friends: HashMap::new(),
             blocked: store.blocked.iter().filter_map(|k| crypto::unhex(k)).collect(),
@@ -521,6 +543,10 @@ impl Service {
                 service.asked.push(Ask::new(code, None));
             }
         }
+        if new_code {
+            log::info!("friends: a new friend code, made from the key");
+            service.save();
+        }
         service
     }
 
@@ -528,6 +554,7 @@ impl Service {
         let store = Store {
             key: self.identity.as_ref().map(|i| crypto::hex(i.private())),
             code: self.code.clone(),
+            salt: Some(crypto::hex(&self.salt)),
             friends: self
                 .friends
                 .values()
@@ -561,11 +588,19 @@ impl Service {
     fn identity(&mut self) -> &Identity {
         if self.identity.is_none() {
             self.identity = Some(Identity::generate());
-            self.code = Some(crypto::new_code());
-            self.save();
+            self.new_code();
             log::info!("friends: a new key and friend code");
         }
         self.identity.as_ref().unwrap()
+    }
+
+    /// A new salt, and with it a new code.
+    fn new_code(&mut self) {
+        let Some(identity) = &self.identity else { return };
+        self.salt = crypto::random();
+        self.code = crypto::code_of(identity.public(), &self.salt);
+        self.generation += 1;
+        self.save();
     }
 
     fn add_friend(&mut self, key: Key, name: &str, id: u64, since: u64) -> bool {
@@ -898,7 +933,11 @@ impl Service {
     fn ask_at(&mut self, i: usize, addr: SocketAddrV4, now: Instant, out: &mut Out) {
         let Some(identity) = self.identity.as_ref() else { return };
         let a = &mut self.asked[i];
-        if a.transport.is_some() || a.declined || a.contacted.get(&addr).is_some_and(|t| now - *t < CONTACT) {
+        if a.transport.is_some()
+            || a.declined
+            || a.refused.contains(&addr)
+            || a.contacted.get(&addr).is_some_and(|t| now - *t < CONTACT)
+        {
             return;
         }
         a.contacted.insert(addr, now);
@@ -1034,7 +1073,8 @@ impl Service {
                     return;
                 }
                 let Some((mut h, _)) = Handshake::answer(identity, pattern, Some(&psk), index, msg, from, now) else { return };
-                let Some(d) = h.write(&[]) else { return };
+                // The salt: the asker makes sure the code is this key's.
+                let Some(d) = h.write(&self.salt) else { return };
                 out.send.push((from, d));
                 self.handshakes.insert(h.index, (h, Owner::Asker(None)));
             }
@@ -1069,18 +1109,30 @@ impl Service {
         // Read first: one that does not open (forged, by someone who saw
         // message 1) leaves the handshake as it was, for the real one.
         let Some((h, _)) = self.handshakes.get_mut(&receiver) else { return };
-        if h.remote_index != 0 && h.remote_index != sender || h.read(msg).is_none() {
+        if h.remote_index != 0 && h.remote_index != sender {
             return;
         }
+        let Some(payload) = h.read(msg) else { return };
         let (mut h, owner) = self.handshakes.remove(&receiver).unwrap();
         h.remote_index = sender;
         h.to = from;
+        let Some(key) = h.remote_key() else { return };
+        // A code's owner sends the salt its code is made with: the code
+        // comes from the key that answered, or someone else who knows it
+        // answered first.
+        if let Owner::Asking(id) = &owner
+            && h.pattern == Pattern::Code
+            && crypto::code_of(&key, &payload).as_deref() != Some(id.as_str())
+        {
+            log::warn!("friends: {from} answered for a code not its own");
+            self.not_the_owner(id, from, std::mem::take(&mut h.tried), now, out);
+            return;
+        }
         if !h.finished() {
             // XX, message 2 read: message 3 finishes it.
             let Some(d) = h.write(&[]) else { return };
             out.send.push((from, d));
         }
-        let Some(key) = h.remote_key() else { return };
         let Some(t) = h.into_transport(now) else { return };
         match owner {
             Owner::Friend(k) if k == key => self.open_friend(key, t, now, out),
@@ -1120,6 +1172,21 @@ impl Service {
                 }
             }
             Owner::Friend(_) => {}
+        }
+    }
+
+    /// `from` answered for code `id` without being its owner: it is not
+    /// asked again, and the other addresses its message 1 went to are asked
+    /// at once (their answers came to a handshake no longer there).
+    fn not_the_owner(&mut self, id: &str, from: SocketAddrV4, tried: Vec<SocketAddrV4>, now: Instant, out: &mut Out) {
+        let Some(i) = self.asked.iter().position(|a| a.id == id) else { return };
+        let a = &mut self.asked[i];
+        a.refuse(from);
+        for addr in &tried {
+            a.contacted.remove(addr);
+        }
+        for addr in tried {
+            self.ask_at(i, addr, now, out);
         }
     }
 
@@ -1571,9 +1638,7 @@ pub fn my_code() -> Option<String> {
 pub fn new_code() {
     with(|s, _| {
         s.identity();
-        s.code = Some(crypto::new_code());
-        s.generation += 1;
-        s.save();
+        s.new_code();
     });
 }
 
