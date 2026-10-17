@@ -628,7 +628,8 @@ impl Client {
     fn run(self: Arc<Self>) {
         let mut backoff = Duration::from_millis(500);
         while !self.stop.load(Ordering::Acquire) {
-            let result = self.session();
+            let mut served = false;
+            let result = self.session(&mut served);
             let failed = matches!(*self.phase.lock().unwrap(), Phase::Failed(_));
             *self.conn.lock().unwrap() = None;
             self.connected.store(false, Ordering::Release);
@@ -651,15 +652,19 @@ impl Client {
                     log::info!("stream: no copy to play from without the server: {e:#}");
                 }
             }
-            thread::sleep(backoff);
-            backoff = (backoff * 2).min(Duration::from_secs(5));
-            if result.is_ok() {
+            // A connection that served is made again at once; one that did
+            // not, after a pause that grows.
+            if served {
                 backoff = Duration::from_millis(500);
+            } else {
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(5));
             }
         }
     }
 
-    fn session(&self) -> Result<()> {
+    /// `served`: the copy was ready and requests went on the connection.
+    fn session(&self, served: &mut bool) -> Result<()> {
         let (stream, addr) = connect(&self.opts.server)?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -706,6 +711,7 @@ impl Client {
             again.sort_by_key(|h| h.req);
             self.write(&encode(&again));
         }
+        *served = true;
         // Then the boot set's rest.
         self.prefetch_boot();
         self.receive(sync.reader)
