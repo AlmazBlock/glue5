@@ -924,11 +924,17 @@ impl Client {
             }
             self.send(&out);
             if visited == n && incomplete == 0 && outstanding == 0 {
-                if let Err(e) = r.cache.finish() {
-                    log::warn!("stream cache: {e}");
+                match r.cache.finish() {
+                    Ok(()) => {
+                        self.complete.store(true, Ordering::Release);
+                        log::info!("stream: the whole game is on this device ({:.1} GB)", r.cache.total() as f64 / 1e9);
+                    }
+                    // Still a partial copy (its marker says so): tried again.
+                    Err(e) => {
+                        log::warn!("stream cache: finishing the whole game: {e}");
+                        thread::sleep(Duration::from_secs(2));
+                    }
                 }
-                self.complete.store(true, Ordering::Release);
-                log::info!("stream: the whole game is on this device ({:.1} GB)", r.cache.total() as f64 / 1e9);
             }
             thread::sleep(Duration::from_millis(100));
         }

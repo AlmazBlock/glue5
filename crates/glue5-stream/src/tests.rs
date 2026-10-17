@@ -334,6 +334,45 @@ fn downloads_the_whole_game() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// The whole game is complete once the copy says so on disk (no marker):
+/// until then, a partial copy.
+#[cfg(unix)]
+#[test]
+fn completes_only_once_finished() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp("unfinished");
+    game(&dir);
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let root = temp("unfinished-copy");
+    let client = Client::start(Options {
+        server: server.addr().to_string(),
+        root: root.clone(),
+        build: BUILD.into(),
+        low_memory: false,
+    });
+    wait_ready(&client);
+    // The files can be written, nothing beside them (the index, the marker).
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+    client.set_fill(true);
+    let started = Instant::now();
+    while client.status().cache_bytes < client.status().total_bytes {
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", client.status());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!client.status().complete && root.join(crate::cache::MARKER).exists());
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    while !client.status().complete {
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", client.status());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!root.join(crate::cache::MARKER).exists());
+    client.stop();
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn checks_a_server_before_it_is_chosen() {
     let dir = temp("check");
