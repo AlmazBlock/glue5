@@ -1056,21 +1056,9 @@ impl App {
     }
 
     /// Where the stream's copy goes: the cache folder, or, for the whole
-    /// game, the device's game folder (not when the user's own game is there).
+    /// game, the device's game folder (not when the user's own files are there).
     fn copy_root(&self) -> PathBuf {
-        match paths::download_dir(&self.user_dir) {
-            // The whole game, downloaded: a game folder, used where it is
-            // whatever the setting says now (never moved into the cache,
-            // where the system may delete it).
-            Some(dir) if is_whole_download(&dir) => dir,
-            Some(dir)
-                if self.settings.download_all
-                    && (!is_game_dir(&dir) || dir.join(glue5_stream::cache::CATALOG).is_file()) =>
-            {
-                dir
-            }
-            _ => paths::stream_copy(&self.user_dir),
-        }
+        copy_root(paths::download_dir(&self.user_dir), self.settings.download_all, paths::stream_copy(&self.user_dir))
     }
 
     /// Deletes the stream's copy (the game does not run).
@@ -1179,6 +1167,26 @@ impl App {
 /// server's catalog) that is complete (it lost the partial copy's marker).
 fn is_whole_download(dir: &Path) -> bool {
     dir.join(glue5_stream::cache::CATALOG).is_file() && !dir.join(glue5_stream::cache::MARKER).exists()
+}
+
+/// Where the stream's copy goes (see `App::copy_root`): the download folder
+/// when it holds the whole game, downloaded, whatever the setting says now
+/// (never moved into the cache, where the system may delete it), or when the
+/// download is wanted and the folder is the stream's or free; else the cache.
+/// A folder with the user's own files in it (a game for another build, a
+/// copy not finished) is never the stream's: its files would be cut to the
+/// catalog's sizes, and Delete would take them all.
+fn copy_root(download: Option<PathBuf>, download_all: bool, cache: PathBuf) -> PathBuf {
+    match download {
+        Some(dir) if is_whole_download(&dir) => dir,
+        Some(dir)
+            if download_all
+                && (!dir.exists() || holds_no_files(&dir) || dir.join(glue5_stream::cache::CATALOG).is_file()) =>
+        {
+            dir
+        }
+        _ => cache,
+    }
 }
 
 /// `dir` has folders in it at most, no file at any depth.
@@ -1348,7 +1356,7 @@ impl FolderPick {
 
 #[cfg(test)]
 mod tests {
-    use super::{holds_no_files, is_whole_download};
+    use super::{copy_root, holds_no_files, is_whole_download};
     use glue5_stream::cache::{CATALOG, MARKER};
 
     /// What a copy's move may delete (folders with no file), and what it
@@ -1366,6 +1374,30 @@ mod tests {
         assert!(is_whole_download(&game));
         std::fs::write(game.join(MARKER), b"").unwrap();
         assert!(!is_whole_download(&game), "a partial copy");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The whole game downloads into the device's game folder only when the
+    /// folder is free or already the stream's: never over the user's files.
+    #[test]
+    fn the_download_takes_no_folder_of_the_users() {
+        let root = std::env::temp_dir().join(format!("glue5-app-test-root-{}", std::process::id()));
+        let (game, cache) = (root.join("game"), root.join("cache"));
+        let _ = std::fs::remove_dir_all(&root);
+        let at = |all| copy_root(Some(game.clone()), all, cache.clone());
+        assert_eq!(at(true), game, "no folder yet");
+        assert_eq!(at(false), cache, "not wanted");
+        std::fs::create_dir_all(game.join("data/x64")).unwrap();
+        assert_eq!(at(true), game, "empty folders");
+        // The user's game for another build (or a copy not finished): no
+        // shaders for this build, so not a game folder here, but theirs.
+        std::fs::write(game.join("data/x64/a.rpf"), b"x").unwrap();
+        assert_eq!(at(true), cache, "the user's files");
+        std::fs::write(game.join(CATALOG), b"{}").unwrap();
+        std::fs::write(game.join(MARKER), b"").unwrap();
+        assert_eq!(at(true), game, "the download on its way");
+        std::fs::remove_file(game.join(MARKER)).unwrap();
+        assert_eq!(at(false), game, "the whole game, downloaded");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
