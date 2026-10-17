@@ -216,6 +216,67 @@ static VEHICLE_NEAR: AtomicBool = AtomicBool::new(false);
 static SCAN_FRAME: AtomicU32 = AtomicU32::new(0);
 static PHONE_OUT: AtomicBool = AtomicBool::new(false);
 static PAUSE_MENU: AtomicBool = AtomicBool::new(false);
+static SCRIPTED: AtomicBool = AtomicBool::new(false);
+static CHARACTER: AtomicU32 = AtomicU32::new(Character::Other as u32);
+static GUN: AtomicBool = AtomicBool::new(false);
+
+/// A ped's weapons (`CPedWeaponManager`), and the one in hand's hash.
+const PED_WEAPONS: u64 = 4344;
+const WEAPON_SELECTED: u64 = 24;
+/// What the player can hold that does not reload (their B is a blow): bare
+/// hands, melee weapons, thrown ones, cans.
+const NO_RELOAD: &[&str] = &[
+    "WEAPON_UNARMED", "WEAPON_KNIFE", "WEAPON_NIGHTSTICK", "WEAPON_HAMMER", "WEAPON_BAT", "WEAPON_GOLFCLUB",
+    "WEAPON_CROWBAR", "WEAPON_BOTTLE", "WEAPON_DAGGER", "WEAPON_HATCHET", "WEAPON_KNUCKLE", "WEAPON_MACHETE",
+    "WEAPON_FLASHLIGHT", "WEAPON_SWITCHBLADE", "WEAPON_POOLCUE", "WEAPON_WRENCH", "WEAPON_BATTLEAXE",
+    "WEAPON_STONE_HATCHET", "WEAPON_CANDYCANE", "WEAPON_GRENADE", "WEAPON_STICKYBOMB", "WEAPON_PROXMINE",
+    "WEAPON_BZGAS", "WEAPON_SMOKEGRENADE", "WEAPON_MOLOTOV", "WEAPON_PIPEBOMB", "WEAPON_SNOWBALL", "WEAPON_BALL",
+    "WEAPON_FLARE", "WEAPON_ACIDPACKAGE", "WEAPON_PETROLCAN", "WEAPON_HAZARDCAN", "WEAPON_FERTILIZERCAN",
+    "WEAPON_FIREEXTINGUISHER", "GADGET_PARACHUTE",
+];
+
+/// A ped's archetype (its model), and the model's name hash.
+const PED_ARCHETYPE: u64 = 32;
+const ARCHETYPE_HASH: u64 = 24;
+/// The story's characters' models (`player_zero`, `_one`, `_two`).
+const MICHAEL: u32 = 0x0D71_14C9;
+const FRANKLIN: u32 = 0x9B22_DBAF;
+const TREVOR: u32 = 0x9B81_0FA2;
+
+/// `CPhoneMgr`'s state (bytes, bit 0): the phone created (the scripts'
+/// `CREATE_MOBILE_PHONE`; the code deletes it too, on a load or a new
+/// session), being moved off the screen, its camera on.
+const PHONE_CREATED: u64 = 19505653;
+const PHONE_GOING: u64 = 19505660;
+const PHONE_CAMERA: u64 = 19505840;
+/// Where the phone is (`SET_MOBILE_PHONE_POSITION`): x, y, z in front of
+/// its camera (z negative).
+const PHONE_POSITION: u64 = 19505776;
+static PHONE_AT: Mutex<[f32; 3]> = Mutex::new([0.0; 3]);
+
+/// Where the phone shows on the screen while it is up, as fractions of the
+/// screen (left, top, right, bottom; its bottom may be below it), for a
+/// screen this wide over high: its position seen through the phone's 70°
+/// lens, at the HUD's aspect (16:9 at most), and its size there (measured).
+pub fn phone_rect(aspect: f32) -> Option<[f32; 4]> {
+    let [x, y, z] = *PHONE_AT.lock().unwrap();
+    if !PHONE_OUT.load(Ordering::Relaxed) || z >= -1.0 {
+        return None;
+    }
+    let depth = -z * 35f32.to_radians().tan();
+    let (u, v) = (0.5 + 0.5 * x / (depth * aspect.min(16.0 / 9.0)), 0.5 - 0.5 * y / depth);
+    // At z -113: 0.24 of the screen's height wide, 0.48 high.
+    let near = 113.0 / -z;
+    let (w, h) = (0.12 * near / aspect, 0.2417 * near);
+    Some([u - w, v - h, u + w, v + h])
+}
+/// `CPlayerInfo`'s reasons the player's controls are off (bits: a script's
+/// `SET_PLAYER_CONTROL`, an ambient script's, the pause menu's, a
+/// cutscene's...): `IS_PLAYER_CONTROL_ON` is false while any is set.
+const PLAYER_CONTROL_OFF: u64 = 936;
+const OFF_BY_PAUSE_MENU: u32 = 0x400;
+/// A script's `SET_PLAYER_CONTROL` (the mission's or an ambient one's).
+const OFF_BY_SCRIPT: u32 = 0x20 | 0x800;
 
 /// When the engine last ran each of the player's tasks.
 struct Signals {
@@ -312,8 +373,24 @@ pub struct PlayerContext {
     pub phone: bool,
     /// The pause menu (the map, the store, ...) is open.
     pub menu: bool,
-    /// A cutscene plays.
+    /// A cutscene plays that can be skipped now.
     pub cutscene: bool,
+    /// A script has the player's controls (a menu of its own, the character
+    /// creator, a shop, a minigame, a scene, a mission's end).
+    pub scripted: bool,
+    /// Who the player is (the HUD takes their colour).
+    pub character: Character,
+    /// The player holds a gun: B reloads (else it strikes).
+    pub gun: bool,
+}
+
+/// The story's characters, or anyone else (GTA Online's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Character {
+    Michael,
+    Franklin,
+    Trevor,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,6 +438,14 @@ pub fn player_context() -> PlayerContext {
         phone: PHONE_OUT.load(Ordering::Relaxed),
         menu: PAUSE_MENU.load(Ordering::Relaxed),
         cutscene: fresh(signals.cutscene),
+        scripted: SCRIPTED.load(Ordering::Relaxed),
+        character: match CHARACTER.load(Ordering::Relaxed) {
+            0 => Character::Michael,
+            1 => Character::Franklin,
+            2 => Character::Trevor,
+            _ => Character::Other,
+        },
+        gun: GUN.load(Ordering::Relaxed),
     }
 }
 
@@ -369,16 +454,46 @@ pub fn player_context() -> PlayerContext {
 /// reads the mouse.
 pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     unsafe { orig::control_update(env, this) };
-    // Every part of it (the store, Social Club, the video editor).
-    let menu = unsafe { orig::pause_menu_is_active(env, 0) } != 0;
+    let mem = unsafe { Mem::of(env) };
+    let ped = unsafe { orig::find_player_ped(env) };
+    let info = if ped != 0 { mem.u64(ped + PED_PLAYER_INFO) } else { 0 };
+    let off = if info != 0 { mem.u32(info + PLAYER_CONTROL_OFF) } else { 0 };
+    // Every part of the pause menu (the store, Social Club, the video
+    // editor), unless a script runs its own menu in it (GTA Online's
+    // character creator) or over it: it took the player's controls, or
+    // shows its own buttons.
+    let frontend = unsafe { orig::pause_menu_is_active(env, 0) } != 0;
+    let menu = frontend && off & OFF_BY_SCRIPT == 0 && !crate::prompts::script_bar_shown(env);
     PAUSE_MENU.store(menu, Ordering::Relaxed);
     let touch_play = TOUCH_PLAY.load(Ordering::Relaxed) && !menu;
-    let mem = unsafe { Mem::of(env) };
     if touch_play {
         mem.set_i32(LAST_DEVICE, 0);
     }
     update_targeting(mem, touch_play);
     update_aim_locked(env, mem);
+    // The phone as the player's tasks see it: up (or its camera), not on
+    // its way off the screen.
+    let byte = |at: u64| mem.u8(at) & 1 != 0;
+    PHONE_OUT.store((byte(PHONE_CREATED) || byte(PHONE_CAMERA)) && !byte(PHONE_GOING), Ordering::Relaxed);
+    let f = |at: u64| f32::from_bits(mem.u32(at));
+    *PHONE_AT.lock().unwrap() = [f(PHONE_POSITION), f(PHONE_POSITION + 4), f(PHONE_POSITION + 8)];
+    SCRIPTED.store(off & !OFF_BY_PAUSE_MENU != 0, Ordering::Relaxed);
+    let model = if ped != 0 { mem.u64(ped + PED_ARCHETYPE) } else { 0 };
+    let character = match if model != 0 { mem.u32(model + ARCHETYPE_HASH) } else { 0 } {
+        MICHAEL => Character::Michael,
+        FRANKLIN => Character::Franklin,
+        TREVOR => Character::Trevor,
+        _ => Character::Other,
+    };
+    CHARACTER.store(character as u32, Ordering::Relaxed);
+    static NO_RELOAD_HASHES: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    let no_reload = NO_RELOAD_HASHES.get_or_init(|| NO_RELOAD.iter().map(|w| crate::texts::label_hash(w)).collect());
+    let weapons = if ped != 0 { mem.u64(ped + PED_WEAPONS) } else { 0 };
+    let weapon = if weapons != 0 { mem.u32(weapons + WEAPON_SELECTED) } else { 0 };
+    GUN.store(weapon != 0 && !no_reload.contains(&weapon), Ordering::Relaxed);
+    let warning = unsafe { orig::warning_screen_active(env) } != 0;
+    let code_bar = warning || text_box_open() || frontend;
+    unsafe { crate::prompts::update(env, TOUCH_PLAY.load(Ordering::Relaxed), code_bar) };
 }
 
 /// Hook for `CTaskPlayerOnFoot::ProcessPreFSM`: the player is on foot.
@@ -414,21 +529,35 @@ pub(crate) unsafe extern "C" fn parachute_update(env: *mut Env, task: u64, state
     result
 }
 
-/// Hook for `CutSceneManager::UpdateSkip`: a cutscene plays.
+/// `CutSceneManager`'s state: whether its script lets it be skipped
+/// (`SET_CUTSCENE_CAN_BE_SKIPPED`), the time it plays at and after which
+/// its data forbids a skip (where it blends into the game; negative: none),
+/// a skip under way, and in a network game whether the scripts allow one.
+const CUT_CAN_SKIP: u64 = 5914;
+const CUT_TIME: u64 = 3056;
+const CUT_NO_SKIP_AFTER: u64 = 5916;
+const CUT_SKIPPING: u64 = 5899;
+const CUT_NETWORK_CAN_SKIP: u64 = 5920;
+/// A network game is on (byte).
+const NETWORK_GAME: u64 = 28501281;
+
+/// Hook for `CutSceneManager::UpdateSkip`: a cutscene plays past its first
+/// 2 s, not fading out yet. It counts if the press would skip it now, as
+/// `TriggerCutsceneSkip` decides (a created phone, for one, blocks it).
 pub(crate) unsafe extern "C" fn cutscene_update_skip(env: *mut Env, this: u64) {
     unsafe { orig::cutscene_update_skip(env, this) };
-    SIGNALS.lock().unwrap().cutscene = Some(Instant::now());
-}
-
-/// Hooks for the `CREATE_MOBILE_PHONE` and `DESTROY_MOBILE_PHONE` natives.
-pub(crate) unsafe extern "C" fn phone_create(env: *mut Env, info: u64) {
-    unsafe { orig::phone_create(env, info) };
-    PHONE_OUT.store(true, Ordering::Relaxed);
-}
-
-pub(crate) unsafe extern "C" fn phone_destroy(env: *mut Env, info: u64) {
-    unsafe { orig::phone_destroy(env, info) };
-    PHONE_OUT.store(false, Ordering::Relaxed);
+    let mem = unsafe { Mem::of(env) };
+    let f32_at = |at: u64| f32::from_bits(mem.u32(at));
+    let blocked = f32_at(this + CUT_NO_SKIP_AFTER) >= 0.0 && f32_at(this + CUT_TIME) >= f32_at(this + CUT_NO_SKIP_AFTER);
+    let network = mem.u8(NETWORK_GAME) == 1 && mem.u8(this + CUT_NETWORK_CAN_SKIP) == 0;
+    let skippable = mem.u8(this + CUT_CAN_SKIP) == 1
+        && !blocked
+        && mem.u8(PHONE_CREATED) & 1 == 0
+        && mem.u8(this + CUT_SKIPPING) == 0
+        && !network;
+    if skippable {
+        SIGNALS.lock().unwrap().cutscene = Some(Instant::now());
+    }
 }
 
 /// The player drives `vehicle`, a vehicle driven as `kind`.
@@ -588,8 +717,6 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.text_box_close = Some(text_box_close_hook);
     hooks.control_update = Some(control_update);
     hooks.player_on_foot = Some(player_on_foot);
-    hooks.phone_create = Some(phone_create);
-    hooks.phone_destroy = Some(phone_destroy);
     hooks.drive_automobile = Some(drive_automobile);
     hooks.drive_bike = Some(drive_bike);
     hooks.drive_boat = Some(drive_boat);

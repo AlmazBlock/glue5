@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align2, Color32, FontId, Id, LayerId, Order, Pos2, Rect, SafeAreaInsets, Stroke, Vec2, ViewportId, pos2, vec2,
+    Align2, Color32, FontId, Id, LayerId, Order, Pos2, Rect, SafeAreaInsets, Vec2, ViewportId, pos2, vec2,
 };
 use sdl3::event::Event;
 use sdl3::keyboard::Scancode;
@@ -167,11 +167,15 @@ pub struct Status<'a> {
     pub stream_alert: Option<StreamAlert>,
 }
 
-/// The settings button over the game: from the safe area's top right
-/// corner, in points, sized like the touch controls (next to their Start
-/// and Back buttons).
-const GEAR_AT: Vec2 = vec2(-156.0, 40.0);
-const GEAR_RADIUS: f32 = 20.0;
+/// The settings button over the game, sized like the touch controls: at the
+/// top's middle, beside their camera view and pause buttons.
+pub const GEAR_RADIUS: f32 = 20.0;
+
+/// Where the settings button is, in the safe area `safe`, at the touch
+/// controls' scale.
+pub fn gear_center(safe: Rect, scale: f32) -> Pos2 {
+    pos2(safe.center().x + 54.0 * scale, safe.min.y + 30.0 * scale)
+}
 
 const WARN: Color32 = Color32::from_rgb(240, 180, 100);
 
@@ -223,6 +227,8 @@ pub struct Ui {
     controls: Vec<Rect>,
     /// The stream's sign over the game.
     chip: chip::Chip,
+    /// The settings button's icon.
+    gear_icon: Option<egui::TextureHandle>,
 }
 
 /// A notification: as Social Club's, a title, a name and a line; the
@@ -247,6 +253,7 @@ impl Ui {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let background = theme::background(&ctx);
+        let gear_icon = crate::touch::load_icon(&ctx, "settings");
         Ui {
             ctx,
             background,
@@ -272,6 +279,7 @@ impl Ui {
             toast_area: None,
             controls: Vec::new(),
             chip: Default::default(),
+            gear_icon,
         }
     }
 
@@ -600,7 +608,8 @@ impl Ui {
         if let Some(touch) = touch {
             touch.draw(&ctx.layer_painter(LayerId::background()), settings.touch_opacity);
         }
-        self.gear = gear.map(|alpha| draw_gear(&ctx, safe, settings.touch_size, alpha));
+        let scale = crate::touch::control_scale(screen.size(), settings.touch_size);
+        self.gear = gear.map(|alpha| draw_gear(&ctx, safe, scale, alpha, self.gear_icon.as_ref()));
         let overlay = hud.then(|| self.perf.draw(&ctx, safe, settings, status));
         // The notifications and the stream's sign keep off everything else
         // drawn over the game.
@@ -609,7 +618,9 @@ impl Ui {
         taken.extend(self.gear.map(|(c, r)| Rect::from_center_size(c, Vec2::splat(2.0 * r))));
         taken.extend(overlay);
         // Under the settings button when it shows.
-        let below = if self.gear.is_some() { (GEAR_AT.y + GEAR_RADIUS) * settings.touch_size + 8.0 } else { 12.0 };
+        // Under the top's buttons (the touch controls' camera view and
+        // pause, the settings), where they show.
+        let below = if self.gear.is_some() { (30.0 + GEAR_RADIUS) * scale + 8.0 } else { 12.0 };
         self.toast_area = draw_toasts(&ctx, safe, below, &taken, &self.toasts, now);
         if !self.toasts.is_empty() {
             self.repaint_in(Duration::from_millis(33));
@@ -617,7 +628,7 @@ impl Ui {
         // The sign, legible whatever the touch controls' opacity.
         taken.extend(self.toast_area);
         let alpha = gear.unwrap_or(1.0).max(0.75);
-        self.chip.draw(&ctx, safe, alert, self.gear, &taken, settings.touch_size, alpha);
+        self.chip.draw(&ctx, safe, alert, self.gear, &taken, scale, alpha);
         if self.page.is_some() && status.started.is_none() {
             theme::backdrop(&ctx, self.background.as_ref());
         }
@@ -716,15 +727,15 @@ fn draw_toasts(
 }
 
 /// Where the notifications go (their top left), the first place where they
-/// cover nothing else on screen (`taken`): under the settings button (the
-/// top right), in the top left corner or the middle of the top, else lower
-/// in those three places (under the touch controls' top row), down to the
-/// middle of the screen at most.
+/// cover nothing else on screen (`taken`): in the top's middle under its
+/// buttons (the touch controls' camera view and pause, the settings; the
+/// game shows nothing there), in the top right or left corner, else lower
+/// in those three places, down to the middle of the screen at most.
 fn toast_place(safe: Rect, below: f32, size: Vec2, taken: &[Rect]) -> Option<Pos2> {
     let starts = [
-        pos2(safe.right() - size.x - 16.0, safe.top() + below),
+        pos2(safe.center().x - size.x / 2.0, safe.top() + below),
+        pos2(safe.right() - size.x - 16.0, safe.top() + 12.0),
         pos2(safe.left() + 16.0, safe.top() + 12.0),
-        pos2(safe.center().x - size.x / 2.0, safe.top() + 12.0),
     ];
     let lowest = safe.center().y - size.y / 2.0;
     let free = |at: Pos2| {
@@ -775,13 +786,21 @@ pub fn safe_rect(window: &Window) -> Rect {
 }
 
 /// The settings button: the touch controls' look, at their size.
-fn draw_gear(ctx: &egui::Context, safe: Rect, scale: f32, alpha: f32) -> (Pos2, f32) {
-    let c = pos2(safe.max.x + GEAR_AT.x * scale, safe.min.y + GEAR_AT.y * scale);
+fn draw_gear(ctx: &egui::Context, safe: Rect, scale: f32, alpha: f32, icon: Option<&egui::TextureHandle>) -> (Pos2, f32) {
+    let c = gear_center(safe, scale);
     let r = GEAR_RADIUS * scale;
-    let white = |a: f32| Color32::from_white_alpha((a * alpha * 255.0) as u8);
+    let look = crate::touch::Look::new(alpha, scale, glue5_runtime::input::Character::Other);
     let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("gear")));
-    painter.circle(c, r, white(0.18), Stroke::new(1.5 * scale, white(0.6)));
-    painter.text(c, Align2::CENTER_CENTER, "⚙", FontId::proportional(r * 0.95), white(0.9));
+    painter.circle(c, r, look.fill(false), look.stroke(false));
+    match icon {
+        Some(icon) => {
+            let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+            painter.image(icon.id(), Rect::from_center_size(c, Vec2::splat(r * 1.15)), uv, look.icon);
+        }
+        None => {
+            painter.text(c, Align2::CENTER_CENTER, "⚙", FontId::proportional(r * 0.95), look.icon);
+        }
+    }
     (c, r)
 }
 
@@ -806,7 +825,7 @@ fn key(sc: Scancode) -> Option<egui::Key> {
 mod tests {
     use super::*;
     use crate::touch::Touch;
-    use glue5_runtime::input::{Activity, Driving, PlayerContext};
+    use glue5_runtime::input::{Activity, Character, Driving, PlayerContext};
 
     /// Every touch layout, at every controls' size, on phones and a tablet:
     /// the notifications, where they show, cover no control and are inside
@@ -830,12 +849,21 @@ mod tests {
         for (screen, [l, t, r, b]) in screens {
             let safe = Rect::from_min_max(pos2(l, t), pos2(screen.x - r, screen.y - b));
             for scale in [0.7, 1.0, 1.5] {
-                let gear_at = pos2(safe.max.x + GEAR_AT.x * scale, safe.min.y + GEAR_AT.y * scale);
-                let gear = Rect::from_center_size(gear_at, Vec2::splat(2.0 * GEAR_RADIUS * scale));
-                let below = (GEAR_AT.y + GEAR_RADIUS) * scale + 8.0;
+                let controls = crate::touch::control_scale(screen, scale);
+                let gear = Rect::from_center_size(gear_center(safe, controls), Vec2::splat(2.0 * GEAR_RADIUS * controls));
+                let below = (30.0 + GEAR_RADIUS) * controls + 8.0;
                 for activity in activities {
                     for (vehicle_near, phone) in [(false, false), (true, false), (false, true)] {
-                        let context = PlayerContext { activity, vehicle_near, phone, menu: false, cutscene: false };
+                        let context = PlayerContext {
+                            activity,
+                            vehicle_near,
+                            phone,
+                            menu: false,
+                            cutscene: false,
+                            scripted: false,
+                            character: Character::Other,
+                            gun: false,
+                        };
                         let mut touch = Touch::new();
                         touch.layout(screen, safe, scale);
                         touch.set_context(context);

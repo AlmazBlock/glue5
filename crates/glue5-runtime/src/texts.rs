@@ -56,7 +56,7 @@ const TEXTS: &[(&str, &str)] = &[
 
 /// The engine's label hash (`rage::atStringHash`): Jenkins' one-at-a-time,
 /// case-insensitive.
-fn label_hash(label: &str) -> u32 {
+pub(crate) fn label_hash(label: &str) -> u32 {
     let mut h: u32 = 0;
     for b in label.bytes() {
         h = h.wrapping_add(u32::from(b.to_ascii_lowercase()));

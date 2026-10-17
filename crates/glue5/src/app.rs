@@ -41,6 +41,10 @@ const CAPTURE_DELAY: Duration = Duration::from_millis(150);
 
 /// Esc's Windows virtual-key code: back, in the game's menus.
 const VK_ESCAPE: u8 = 0x1B;
+/// The pause menu's touch keys, as the keyboard's (by [`touch::MenuKey`]):
+/// Esc, the arrows (left and right change the value of the row picked),
+/// Enter.
+const MENU_VKS: [u8; 6] = [VK_ESCAPE, 0x25, 0x27, 0x26, 0x28, 0x0D];
 
 pub fn run() -> Result<()> {
     // SDL's event wait on Android pumps events, which queues the poll
@@ -486,8 +490,10 @@ impl App {
                 if self.touch_mouse.down {
                     input.mouse_button(mouse::LEFT, false);
                 }
-                if self.touch_mouse.back {
-                    input.key(VK_ESCAPE, false);
+                for (held, vk) in self.touch_mouse.keys.into_iter().zip(MENU_VKS) {
+                    if held {
+                        input.key(vk, false);
+                    }
                 }
             }
             self.touch_mouse = Default::default();
@@ -498,9 +504,16 @@ impl App {
             self.touch.haptics = self.settings.haptics;
             self.touch.camera_speed = self.settings.touch_camera;
             self.touch.aim_locked = glue5_runtime::input::aim_locked();
-            self.touch.layout(ui::screen_size(&self.window), ui::safe_rect(&self.window), self.settings.touch_size);
+            let screen = ui::screen_size(&self.window);
+            self.touch.layout(screen, ui::safe_rect(&self.window), self.settings.touch_size);
             self.touch.set_context(glue5_runtime::input::player_context());
+            // What the game asks to press, where its phone is.
+            let phone = glue5_runtime::input::phone_rect(screen.x / screen.y.max(1.0));
+            self.touch.set_game(glue5_runtime::prompts::prompts(), phone);
             glue5_runtime::input::set_gamepad(0, self.touch.gamepad());
+            for input in self.touch.take_inputs() {
+                glue5_runtime::prompts::hold_input(input);
+            }
             let look = self.touch.take_look();
             let mouse = self.touch.take_mouse();
             if let Some(game) = &self.game
@@ -523,8 +536,10 @@ impl App {
                 if mouse.wheel != 0 {
                     input.mouse_wheel(mouse.wheel);
                 }
-                if mouse.back != self.touch_mouse.back {
-                    input.key(VK_ESCAPE, mouse.back);
+                for ((held, was), vk) in mouse.keys.into_iter().zip(self.touch_mouse.keys).zip(MENU_VKS) {
+                    if held != was {
+                        input.key(vk, held);
+                    }
                 }
                 self.touch_mouse = mouse;
             }

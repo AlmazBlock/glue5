@@ -25,10 +25,6 @@
     // The vehicle the player would get into: called to show the touch
     // controls' Enter button.
     ("scan_for_vehicle_to_enter", "CPlayerInfo::ScanForVehicleToEnter(CPed*, rage::Vector3 const&, bool)"),
-    // The scripts take the phone out and put it away: touch play shows the
-    // pad (its D-pad moves in the phone) meanwhile.
-    ("phone_create", "gta_commands::SetupScriptCommands()::scrWrapped_CREATE_MOBILE_PHONE::Call(rage::scrThread::Info&)"),
-    ("phone_destroy", "gta_commands::SetupScriptCommands()::scrWrapped_DESTROY_MOBILE_PHONE::Call(rage::scrThread::Info&)"),
     // The player driving, once a frame, one for each kind of vehicle: touch
     // play shows controls for it.
     ("drive_automobile", "CTaskVehiclePlayerDriveAutomobile::ProcessDriverInputsForPlayerOnUpdate(CPed*, CControl*, CVehicle*)"),
@@ -42,7 +38,8 @@
     ("player_in_vehicle", "CTaskPlayerDrive::ProcessPreFSM()"),
     // Any ped's parachute (skydiving too), once a frame.
     ("parachute_update", "CTaskParachute::UpdateFSM(int, rage::aiTask::FSM_Event)"),
-    // A cutscene's skip, checked once a frame while one plays.
+    // A cutscene's skip, checked once a frame while one plays (after its
+    // first 2 s, until it fades out).
     ("cutscene_update_skip", "CutSceneManager::UpdateSkip()"),
     // Whether the pause menu (the map, the store, ...) is open: called once
     // a frame for the touch controls, which then act as a mouse.

@@ -72,20 +72,24 @@ impl Chip {
             StreamAlert::Offline => AMBER,
         });
         // The words, for a moment after a change: in the sign opened to the
-        // left, else under it, wherever they cover nothing.
+        // right (beside the settings button) or the left, else under it,
+        // wherever they cover nothing.
         let words = match alert {
             StreamAlert::Waiting => "Waiting for the server",
             StreamAlert::Offline => "Server not answering",
         };
         let galley = painter.layout_no_wrap(words.into(), FontId::proportional(12.0 * scale), white(1.0));
         let text = galley.size();
-        let opened = Rect::from_min_max(pos2(c.x + r - (text.x + 2.0 * r + 12.0 * scale), c.y - r), pos2(c.x + r, c.y + r));
+        let wide = text.x + 2.0 * r + 12.0 * scale;
+        let right = Rect::from_min_max(pos2(c.x - r, c.y - r), pos2(c.x - r + wide, c.y + r));
+        let left = Rect::from_min_max(pos2(c.x + r - wide, c.y - r), pos2(c.x + r, c.y + r));
         let under = Rect::from_min_max(
             pos2(c.x + r - (text.x + 20.0 * scale), c.y + r + gap * 0.5),
             pos2(c.x + r, c.y + r + gap * 0.5 + 2.0 * r),
         );
-        let place = (now - since < SAY).then(|| [opened, under].into_iter().find(|&w| free(w))).flatten();
-        let body = if place == Some(opened) { opened } else { circle(c) };
+        let place = (now - since < SAY).then(|| [right, left, under].into_iter().find(|&w| free(w))).flatten();
+        let opened = place.filter(|&w| w != under);
+        let body = opened.unwrap_or_else(|| circle(c));
         let stroke = Stroke::new(1.5 * scale, stroke);
         painter.rect(body, r, fill, stroke, egui::StrokeKind::Inside);
         self.rects.push(body);
@@ -94,7 +98,13 @@ impl Chip {
                 painter.rect(under, r, fill, stroke, egui::StrokeKind::Inside);
                 self.rects.push(under);
             }
-            let at = if w == opened { pos2(w.min.x + 10.0 * scale, c.y) } else { pos2(w.min.x + 10.0 * scale, w.center().y) };
+            let at = if w == right {
+                pos2(c.x + r + 2.0 * scale, c.y)
+            } else if w == left {
+                pos2(w.min.x + 10.0 * scale, c.y)
+            } else {
+                pos2(w.min.x + 10.0 * scale, w.center().y)
+            };
             painter.galley(at - vec2(0.0, text.y * 0.5), galley, white(1.0));
         }
         match alert {
@@ -117,13 +127,13 @@ impl Chip {
     }
 }
 
-/// Where the sign may go, in order: left of the settings button, under it,
-/// the top corners, under the middle of the top (where the touch controls'
-/// pause and camera view are).
+/// Where the sign may go, in order: right of the settings button (the last
+/// of the top's buttons: the touch controls' camera view and pause, the
+/// settings), under it, the top corners, under the middle of the top.
 fn places(safe: Rect, gear: Option<(Pos2, f32)>, r: f32, gap: f32) -> Vec<Pos2> {
     let mut out = Vec::new();
     if let Some((g, gr)) = gear {
-        out.push(pos2(g.x - gr - gap - r, g.y));
+        out.push(pos2(g.x + gr + gap + r, g.y));
         out.push(pos2(g.x, g.y + gr + gap + r));
     }
     let corner = 12.0 * r / RADIUS + r;
@@ -137,7 +147,7 @@ fn places(safe: Rect, gear: Option<(Pos2, f32)>, r: f32, gap: f32) -> Vec<Pos2> 
 mod tests {
     use super::*;
     use crate::touch::Touch;
-    use glue5_runtime::input::{Activity, Driving, PlayerContext};
+    use glue5_runtime::input::{Activity, Character, Driving, PlayerContext};
 
     /// Every touch layout, at every controls' size, on phones, a tablet and a
     /// window, with the overlay in a top corner or not: the sign and its
@@ -159,7 +169,7 @@ mod tests {
             for (vehicle_near, phone, menu, cutscene) in
                 [(false, false, false, false), (true, false, false, false), (false, true, false, false), (false, false, true, false), (false, false, false, true)]
             {
-                contexts.push(PlayerContext { activity, vehicle_near, phone, menu, cutscene });
+                contexts.push(PlayerContext { activity, vehicle_near, phone, menu, cutscene, scripted: false, character: Character::Other, gun: false });
             }
         }
         // Screens in points, and their safe areas' insets (left, top, right, bottom).
@@ -187,10 +197,11 @@ mod tests {
                             let mut taken = touch.occupied();
                             let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), ..Default::default() };
                             let mut out = ctx.run_ui(raw, |ui| {
-                                let gear = super::super::draw_gear(ui.ctx(), safe, scale, 1.0);
+                                let controls = crate::touch::control_scale(screen, scale);
+                                let gear = super::super::draw_gear(ui.ctx(), safe, controls, 1.0, None);
                                 taken.push(Rect::from_center_size(gear.0, Vec2::splat(2.0 * gear.1)));
                                 taken.extend(overlay);
-                                chip.draw(ui.ctx(), safe, Some(alert), Some(gear), &taken, scale, 1.0);
+                                chip.draw(ui.ctx(), safe, Some(alert), Some(gear), &taken, controls, 1.0);
                             });
                             out.textures_delta.clear();
                             if chip.rects.is_empty() {

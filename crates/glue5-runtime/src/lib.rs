@@ -28,6 +28,7 @@ pub mod memory;
 mod online;
 mod overlay;
 mod p2p;
+pub mod prompts;
 pub mod qos;
 mod readback;
 mod scenario;
@@ -295,6 +296,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     upscale::hooks(&mut hooks);
     boot_screen::hooks(&mut hooks);
     stream::hooks(&mut hooks);
+    prompts::hooks(&mut hooks);
     if let Some(online) = &rt().config.online {
         online::start(online, &mut hooks);
     }
