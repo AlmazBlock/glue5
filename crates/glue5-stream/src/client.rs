@@ -158,8 +158,8 @@ pub struct Client {
     no_gain: AtomicBool,
     /// A copy from an earlier run was tried without the server.
     tried_offline: AtomicBool,
-    /// The boot set's progress, counted at most twice a second (the UI asks
-    /// every frame).
+    /// The boot set's progress, counted (a word of the bitmap at a time) at
+    /// most twice a second: the UI asks every frame.
     boot: Mutex<Option<(Instant, (u64, u64))>>,
 }
 
@@ -324,10 +324,8 @@ impl Client {
                     let boot = self.ready.get().map_or((0, 0), |r| {
                         let (mut have, mut total) = (0, 0);
                         for &(id, first, last) in &r.boot {
-                            for b in first..=last {
-                                total += 1;
-                                have += r.cache.has_block(id, b) as u64;
-                            }
+                            total += last - first + 1;
+                            have += r.cache.count(id, first, last);
                         }
                         (have * BLOCK, total * BLOCK)
                     });
@@ -1233,10 +1231,14 @@ fn boot_runs(catalog: &Catalog, json: &[u8]) -> Vec<(u32, u64, u64)> {
         let (Some(path), Some(ranges)) = (f[0].as_str(), f[1].as_array()) else { continue };
         let Some(id) = catalog.find(&format!("data/{path}")) else { continue };
         let blocks = catalog.entries[id as usize].size.div_ceil(BLOCK);
+        // An empty file has no blocks to fetch.
+        if blocks == 0 {
+            continue;
+        }
         let mut cur: Option<(u64, u64)> = None;
         for r in ranges {
             let (Some(a), Some(b)) = (r[0].as_u64(), r[1].as_u64()) else { continue };
-            let (a, b) = (a / BLOCK, (b / BLOCK).min(blocks.saturating_sub(1)));
+            let (a, b) = (a / BLOCK, (b / BLOCK).min(blocks - 1));
             if a > b {
                 continue;
             }
@@ -1340,6 +1342,20 @@ fn takes_a_slow_chunk() {
     assert_eq!(buf, [1; 10]);
     let mut slower = Slow(Instant::now() + Duration::from_millis(200));
     assert!(read_exact_retrying(&mut slower, &mut buf, Duration::from_millis(100)).is_err());
+}
+
+/// The boot set's ranges as runs of blocks, an empty file's left out (it
+/// has none: its bitmap is empty).
+#[test]
+fn boot_runs_of_files_with_blocks() {
+    use crate::catalog::Entry;
+    let entries = vec![
+        Entry { path: "data/a.rpf".into(), size: 10 * BLOCK, mtime: 1 },
+        Entry { path: "data/empty.rpf".into(), size: 0, mtime: 1 },
+    ];
+    let catalog = Catalog::new("x".into(), entries, 2);
+    let json = br#"[["a.rpf", [[0, 100], [8192, 9000], [1000000, 2000000]]], ["empty.rpf", [[0, 10]]]]"#;
+    assert_eq!(boot_runs(&catalog, json), vec![(0, 0, 2)]);
 }
 
 #[test]

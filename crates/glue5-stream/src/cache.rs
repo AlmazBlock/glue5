@@ -218,6 +218,11 @@ impl Cache {
         all_set(&self.slots[id as usize].present, first, last)
     }
 
+    /// How many of the blocks `first..=last` of file `id` are here.
+    pub fn count(&self, id: u32, first: u64, last: u64) -> u64 {
+        count_set(&self.slots[id as usize].present, first, last)
+    }
+
     pub fn has_block(&self, id: u32, block: u64) -> bool {
         let w = self.slots[id as usize].present[(block / 64) as usize].load(Ordering::Acquire);
         w & (1 << (block % 64)) != 0
@@ -656,6 +661,18 @@ fn all_set(bits: &[AtomicU64], first: u64, last: u64) -> bool {
     true
 }
 
+/// How many of the bits `first..=last` are set.
+fn count_set(bits: &[AtomicU64], first: u64, last: u64) -> u64 {
+    let (mut b, mut n) = (first, 0);
+    while b <= last {
+        let word = b / 64;
+        let m = mask(b % 64, (last - word * 64).min(63));
+        n += (bits[word as usize].load(Ordering::Acquire) & m).count_ones() as u64;
+        b = (word + 1) * 64;
+    }
+    n
+}
+
 /// Sets the bits `first..=last`; returns how many were not set.
 fn set_range(bits: &[AtomicU64], first: u64, last: u64) -> u64 {
     let (mut b, mut added) = (first, 0);
@@ -679,6 +696,7 @@ mod tests {
         let bits: Vec<AtomicU64> = (0..3).map(|_| AtomicU64::new(0)).collect();
         assert_eq!(set_range(&bits, 3, 130), 128);
         assert!(all_set(&bits, 3, 130) && !all_set(&bits, 2, 130) && !all_set(&bits, 3, 131));
+        assert_eq!((count_set(&bits, 0, 191), count_set(&bits, 60, 70), count_set(&bits, 130, 131)), (128, 11, 1));
         assert_eq!(set_range(&bits, 0, 191), 64);
         assert!(all_set(&bits, 0, 191));
     }
