@@ -32,7 +32,7 @@ mod session;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,9 @@ use crate::dht;
 
 /// The file of friends, the player's key and code, in the user directory.
 const FILE: &str = "friends.json";
+/// Changes are written to it at once, then at most this often (the
+/// network's: a player met changing its name at every greeting).
+const SAVE_EVERY: Duration = Duration::from_secs(5);
 /// Friends at most, requests waiting at most.
 const MAX_FRIENDS: usize = 200;
 const MAX_REQUESTS: usize = 8;
@@ -477,6 +480,36 @@ pub(crate) struct Service {
     summarized: bool,
     /// Bumped at every change the application shows.
     generation: u64,
+    /// Whether there are changes to write to the file, and when it was
+    /// last; the writes in order (`Saving`).
+    unsaved: bool,
+    saved: Option<Instant>,
+    version: u64,
+    written: Arc<Mutex<u64>>,
+}
+
+/// The file's content, written outside the service's lock (the system may
+/// take a while to write it through).
+pub(crate) struct Saving {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    version: u64,
+    written: Arc<Mutex<u64>>,
+}
+
+impl Saving {
+    /// Writes the file, unless newer content was written already.
+    fn write(self) {
+        let mut written = self.written.lock().unwrap();
+        if self.version <= *written {
+            return;
+        }
+        let temp = self.path.with_file_name(format!("{FILE}.new"));
+        match write_private(&temp, &self.bytes).and_then(|()| std::fs::rename(&temp, &self.path)) {
+            Ok(()) => *written = self.version,
+            Err(e) => log::warn!("friends: saving {}: {e}", self.path.display()),
+        }
+    }
 }
 
 /// What the service wants sent.
@@ -547,6 +580,10 @@ impl Service {
             started: Instant::now(),
             summarized: false,
             generation: 1,
+            unsaved: false,
+            saved: None,
+            version: 0,
+            written: Arc::new(Mutex::new(0)),
         };
         for f in store.friends {
             if let Some(key) = crypto::unhex(&f.key) {
@@ -565,7 +602,20 @@ impl Service {
         service
     }
 
-    fn save(&self) {
+    /// There are changes to keep: the file is written soon (`saving`).
+    fn save(&mut self) {
+        self.unsaved = true;
+    }
+
+    /// The file's content to write now, when there are changes: at once,
+    /// or at most every `SAVE_EVERY`.
+    fn saving(&mut self, now: Instant, at_once: bool) -> Option<Saving> {
+        if !self.unsaved || !at_once && self.saved.is_some_and(|t| now - t < SAVE_EVERY) {
+            return None;
+        }
+        self.unsaved = false;
+        self.saved = Some(now);
+        self.version += 1;
         let store = Store {
             key: self.identity.as_ref().map(|i| crypto::hex(i.private())),
             code: self.code.clone(),
@@ -583,15 +633,8 @@ impl Service {
                 .map(|r| StoredFriend { key: crypto::hex(&r.key), name: r.name.clone(), id: r.id, since: r.seen })
                 .collect(),
         };
-        let path = self.dir.join(FILE);
-        let temp = self.dir.join(format!("{FILE}.new"));
-        let written = serde_json::to_vec_pretty(&store)
-            .map_err(std::io::Error::other)
-            .and_then(|b| write_private(&temp, &b))
-            .and_then(|()| std::fs::rename(&temp, &path));
-        if let Err(e) = written {
-            log::warn!("friends: saving {}: {e}", path.display());
-        }
+        let bytes = serde_json::to_vec_pretty(&store).map_err(|e| log::warn!("friends: saving: {e}")).ok()?;
+        Some(Saving { path: self.dir.join(FILE), bytes, version: self.version, written: self.written.clone() })
     }
 
     /// Whether there is anything to do on the network.
@@ -1461,18 +1504,34 @@ fn with<R>(f: impl FnOnce(&mut Service, &mut Out) -> R) -> Option<R> {
     Some(r)
 }
 
+/// `with`, for what the player changes: the file is written at once (on
+/// the caller's thread, never the game's).
+fn with_saved<R>(f: impl FnOnce(&mut Service, &mut Out) -> R) -> Option<R> {
+    let (r, saving) = with(|s, out| {
+        let r = f(s, out);
+        (r, s.saving(Instant::now(), true))
+    })?;
+    if let Some(saving) = saving {
+        saving.write();
+    }
+    Some(r)
+}
+
 /// Every quarter of a second, on the network thread.
 pub(crate) fn tick(p2p: &crate::p2p::P2p, now: Instant) {
     let lobbies = p2p.lobbies();
     let players = p2p.players();
     let mut out = Out::default();
-    let wanted = {
+    let (wanted, saving) = {
         let mut service = SERVICE.lock().unwrap();
         let Some(s) = service.as_mut() else { return };
         s.tick(now, lobbies, &players, p2p.port(), &mut out);
-        s.lookups(unix())
+        (s.lookups(unix()), s.saving(now, false))
     };
     send(p2p, out);
+    if let Some(saving) = saving {
+        saving.write();
+    }
     let mut current = LOOKUPS.lock().unwrap();
     let keys: Vec<dht::Id> = wanted.iter().map(|(k, _)| *k).collect();
     p2p.dht(|dht| {
@@ -1515,10 +1574,14 @@ pub fn start(user_dir: &Path, name: &str) {
     if service.is_some() {
         return;
     }
-    let s = Service::load(user_dir, name, id);
+    let mut s = Service::load(user_dir, name, id);
     let active = s.active();
+    let saving = s.saving(Instant::now(), true);
     *service = Some(s);
     drop(service);
+    if let Some(saving) = saving {
+        saving.write();
+    }
     if active {
         start_network();
     }
@@ -1537,7 +1600,7 @@ pub fn set_name(name: &str) {
 
 /// What the player is doing.
 pub(crate) fn set_playing(playing: Playing) {
-    with(|s, _| {
+    with_saved(|s, _| {
         // Online, the player has its key, as it had a Social Club account:
         // the players it meets can ask it to be friends.
         if playing == Playing::Online {
@@ -1666,7 +1729,7 @@ pub fn snapshot() -> Snapshot {
 
 /// The player's friend code, made the first time (the network starts).
 pub fn my_code() -> Option<String> {
-    let code = with(|s, _| {
+    let code = with_saved(|s, _| {
         s.identity();
         s.code.as_deref().map(crypto::format_code)
     })?;
@@ -1676,7 +1739,7 @@ pub fn my_code() -> Option<String> {
 
 /// A new friend code: the old one no longer reaches the player.
 pub fn new_code() {
-    with(|s, _| {
+    with_saved(|s, _| {
         s.identity();
         s.new_code();
     });
@@ -1696,7 +1759,7 @@ pub enum AddError {
 /// Asks the owner of a friend code to be friends (it says yes or no).
 pub fn ask(code: &str) -> Result<(), AddError> {
     let code = crypto::parse_code(code).ok_or(AddError::Invalid)?;
-    with(|s, _| {
+    with_saved(|s, _| {
         s.identity();
         if s.code.as_deref() == Some(code.as_str()) {
             return Err(AddError::Own);
@@ -1737,7 +1800,7 @@ pub fn ask_player(key: &str) {
 /// or forgets a no.
 pub fn cancel(id: &str) {
     let id = crypto::parse_code(id).unwrap_or_else(|| id.to_owned());
-    with(|s, _| {
+    with_saved(|s, _| {
         if let Some(i) = s.asked.iter().position(|a| a.id == id) {
             let a = s.asked.remove(i);
             s.drop_channel(a.transport);
@@ -1750,7 +1813,7 @@ pub fn cancel(id: &str) {
 /// Answers a request (by the asker's key).
 pub fn answer(key: &str, yes: bool) {
     let Some(key) = crypto::unhex::<32>(key) else { return };
-    with(|s, out| s.answer(&key, yes, Instant::now(), out));
+    with_saved(|s, out| s.answer(&key, yes, Instant::now(), out));
 }
 
 /// Joins a friend's session (by its key) from GTA Online: the game asks
@@ -1809,7 +1872,7 @@ fn game_lobby() -> Option<String> {
 /// No longer friends (the friend is told when connected).
 pub fn remove(key: &str) {
     let Some(key) = crypto::unhex::<32>(key) else { return };
-    with(|s, out| s.remove_friend(&key, out));
+    with_saved(|s, out| s.remove_friend(&key, out));
 }
 
 // ---- for the game (game.rs) -------------------------------------------------------

@@ -27,8 +27,16 @@ impl Player {
         Player { s, addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, port), dir }
     }
 
+    /// The file written now.
+    fn flush(&mut self) {
+        if let Some(saving) = self.s.saving(Instant::now(), true) {
+            saving.write();
+        }
+    }
+
     /// The same player started again (from its file).
-    fn restarted(&self) -> Player {
+    fn restarted(&mut self) -> Player {
+        self.flush();
         let s = Service::load(&self.dir, &self.s.local.name, self.s.local.id);
         Player { s, addr: self.addr, dir: self.dir.clone() }
     }
@@ -438,4 +446,24 @@ fn probes_find_friends_by_this_epoch_s_tag_and_the_last_one_s() {
         a.s.on_probe(b.addr, &d, now, &mut out);
         assert_eq!(out.send.iter().any(|(to, _)| *to == b.addr), found, "{e}");
     }
+}
+
+#[test]
+fn the_file_is_written_at_most_every_few_seconds() {
+    let mut now = Instant::now();
+    let (mut a, c) = (Player::new("Ann", 1), Player::new("Carl", 3));
+    a.flush();
+    // A player met changes its name at every greeting, for 10 s.
+    let mut writes = 0;
+    for i in 0..40 {
+        let card = crate::p2p::Card { gamer: 3000, key: c.key(), name: format!("Carl {i}") };
+        a.s.meet(&[(card, c.addr)], now, &mut Out::default());
+        if let Some(saving) = a.s.saving(now, false) {
+            saving.write();
+            writes += 1;
+        }
+        now += Duration::from_millis(250);
+    }
+    assert!((1..=2).contains(&writes), "{writes}");
+    assert_eq!(a.restarted().s.recent[0].name, "Carl 39");
 }
