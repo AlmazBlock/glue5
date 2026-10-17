@@ -396,3 +396,28 @@ fn a_code_from_before_is_replaced_by_one_from_the_key() {
     assert!(s.code.is_some() && s.code != a.s.code);
     assert_eq!(s.code, crypto::code_of(&a.key(), &s.salt));
 }
+
+#[test]
+fn one_address_does_not_use_up_the_handshakes_of_all() {
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    befriend(&mut a, &mut b, true, &mut now);
+    let (lower, higher) = if a.key() < b.key() { (&mut a, &mut b) } else { (&mut b, &mut a) };
+    // Handshakes from one address, more than are answered in all.
+    let flood = SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 1), 5000);
+    let mut junk = vec![1];
+    junk.extend_from_slice(&7u32.to_be_bytes());
+    junk.extend_from_slice(&[0; 48]);
+    for _ in 0..RATE_ALL + 10 {
+        higher.s.receive(flood, session::HS1, &junk, now, &mut Out::default());
+    }
+    // The friend's own is answered.
+    let key = higher.key();
+    let shared = lower.s.friends[&key].shared;
+    let mut out = Out::default();
+    lower.s.found(crypto::meeting_key(&shared, crypto::epoch(unix())), higher.addr, now + REKEY * 2, &mut out);
+    let hs1 = out.send.iter().find(|(_, d)| d[3] == session::HS1).unwrap().1.clone();
+    let mut answer = Out::default();
+    higher.s.receive(lower.addr, hs1[3], &hs1[4..], now, &mut answer);
+    assert!(!answer.send.is_empty());
+}

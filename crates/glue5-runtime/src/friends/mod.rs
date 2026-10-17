@@ -713,8 +713,9 @@ impl Service {
                 self.notices.push_back(Notice::Summary { online, requests });
             }
         }
-        // Handshakes not answered.
+        // Handshakes not answered, and the count of the ones answered.
         self.handshakes.retain(|_, (h, _)| now - h.started < HANDSHAKE);
+        self.answered.retain(|_, (t, _)| now - *t < RATE_WINDOW);
         let presence = self.presence_for_friends(lobbies);
         let me = *self.identity.as_ref().unwrap().public();
         let keys: Vec<Key> = self.friends.keys().copied().collect();
@@ -989,16 +990,26 @@ impl Service {
     }
 
     /// Whether a handshake from `from` is answered: at most so many per
-    /// address and in all.
+    /// address and in all, the ones an address may not have not counted in
+    /// all (one address does not hold up everyone's). The addresses kept
+    /// are the ones answered (`RATE_ALL` per window), until `tick` lets
+    /// them go.
     fn allowed(&mut self, from: SocketAddrV4, now: Instant) -> bool {
         if now - self.answered_all.0 > RATE_WINDOW {
             self.answered_all = (now, 0);
         }
-        self.answered.retain(|_, (t, _)| now - *t < RATE_WINDOW);
-        let (_, n) = self.answered.entry(*from.ip()).or_insert((now, 0));
-        *n += 1;
+        let ip = *from.ip();
+        let n = self.answered.get(&ip).filter(|(t, _)| now - *t < RATE_WINDOW).map_or(0, |(_, n)| *n);
+        if n >= RATE_PER_ADDRESS || self.answered_all.1 >= RATE_ALL {
+            return false;
+        }
         self.answered_all.1 += 1;
-        *n <= RATE_PER_ADDRESS && self.answered_all.1 <= RATE_ALL
+        let count = self.answered.entry(ip).or_insert((now, 0));
+        if now - count.0 >= RATE_WINDOW {
+            *count = (now, 0);
+        }
+        count.1 += 1;
+        true
     }
 
     fn on_probe(&mut self, from: SocketAddrV4, d: &[u8], now: Instant, out: &mut Out) {
