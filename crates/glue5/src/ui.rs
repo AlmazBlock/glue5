@@ -218,6 +218,9 @@ pub struct Ui {
     /// the oldest first, and where they were last drawn (to tap them).
     toasts: std::collections::VecDeque<Toast>,
     toast_area: Option<Rect>,
+    /// The touch controls as last drawn: their taps are the game's, even
+    /// under a notification.
+    controls: Vec<Rect>,
     /// The stream's sign over the game.
     chip: chip::Chip,
 }
@@ -231,10 +234,12 @@ struct Toast {
 }
 
 /// How long a notification shows (each one more after the ones before),
-/// how many at most, how wide, how long it fades.
+/// how many at most, how wide and high, how long it fades.
 const TOAST_FOR: Duration = Duration::from_millis(3500);
 const TOASTS: usize = 3;
 const TOAST_WIDTH: f32 = 300.0;
+/// A notification's height at most (title, name, line; avatar beside).
+const TOAST_HEIGHT: f32 = 72.0;
 const TOAST_FADE: f32 = 0.35;
 
 impl Ui {
@@ -265,6 +270,7 @@ impl Ui {
             perf: Default::default(),
             toasts: Default::default(),
             toast_area: None,
+            controls: Vec::new(),
             chip: Default::default(),
         }
     }
@@ -284,14 +290,13 @@ impl Ui {
         self.show(None);
     }
 
-    /// The settings (from the game or the start page); again, back.
     /// A friends' notification, over the game or the pages.
     pub fn notify(&mut self, notice: &glue5_runtime::friends::Notice) {
         let now = Instant::now();
         while self.toasts.len() >= TOASTS {
             self.toasts.pop_front();
         }
-        // After the ones before it: they go one at a time.
+        // Each leaves its time after the one before it: they go one at a time.
         let after = self.toasts.back().map_or(now, |t| t.until.max(now));
         let toast = friends::toast(notice);
         self.toasts.push_back(Toast { toast, since: now, until: after + TOAST_FOR });
@@ -307,7 +312,7 @@ impl Ui {
         }
     }
 
-    /// The friends at the tab of the notification at the top (tapped).
+    /// The friends at the tab of the newest notification (one was tapped).
     pub fn open_toast(&mut self) {
         if let Some(t) = self.toasts.back() {
             self.friends.tab = t.toast.tab;
@@ -320,9 +325,11 @@ impl Ui {
     /// notification.
     pub fn toast_hit(&self, x: f32, y: f32, window: &Window) -> bool {
         let size = screen_size(window);
-        self.toast_area.is_some_and(|r| r.contains(pos2(x * size.x, y * size.y)))
+        let p = pos2(x * size.x, y * size.y);
+        self.toast_area.is_some_and(|r| r.contains(p)) && !self.controls.iter().any(|r| r.contains(p))
     }
 
+    /// The settings (from the game or the start page); again, back.
     pub fn toggle_settings(&mut self) {
         if self.page == Some(Page::Settings) {
             self.back();
@@ -595,17 +602,19 @@ impl Ui {
         }
         self.gear = gear.map(|alpha| draw_gear(&ctx, safe, settings.touch_size, alpha));
         let overlay = hud.then(|| self.perf.draw(&ctx, safe, settings, status));
+        // The notifications and the stream's sign keep off everything else
+        // drawn over the game.
+        self.controls = touch.map_or_else(Vec::new, Touch::occupied);
+        let mut taken = self.controls.clone();
+        taken.extend(self.gear.map(|(c, r)| Rect::from_center_size(c, Vec2::splat(2.0 * r))));
+        taken.extend(overlay);
         // Under the settings button when it shows.
         let below = if self.gear.is_some() { (GEAR_AT.y + GEAR_RADIUS) * settings.touch_size + 8.0 } else { 12.0 };
-        self.toast_area = draw_toasts(&ctx, safe, below, &self.toasts, now);
+        self.toast_area = draw_toasts(&ctx, safe, below, &taken, &self.toasts, now);
         if !self.toasts.is_empty() {
             self.repaint_in(Duration::from_millis(33));
         }
-        // The stream's sign, off everything else drawn over the game; legible
-        // whatever the touch controls' opacity.
-        let mut taken = touch.map_or_else(Vec::new, Touch::occupied);
-        taken.extend(self.gear.map(|(c, r)| Rect::from_center_size(c, Vec2::splat(2.0 * r))));
-        taken.extend(overlay);
+        // The sign, legible whatever the touch controls' opacity.
         taken.extend(self.toast_area);
         let alpha = gear.unwrap_or(1.0).max(0.75);
         self.chip.draw(&ctx, safe, alert, self.gear, &taken, settings.touch_size, alpha);
@@ -672,6 +681,7 @@ fn draw_toasts(
     ctx: &egui::Context,
     safe: Rect,
     below: f32,
+    taken: &[Rect],
     toasts: &std::collections::VecDeque<Toast>,
     now: Instant,
 ) -> Option<Rect> {
@@ -680,14 +690,20 @@ fn draw_toasts(
     }
     let scale = theme::layout_scale(safe);
     let width = (TOAST_WIDTH * scale).min(safe.width() - 32.0);
+    // All of them where they fit, else the newest alone; nowhere free (the
+    // touch controls fill the top): none over the game, the page has them.
+    let (at, shown) = [toasts.len(), 1].into_iter().find_map(|n| {
+        let height = n as f32 * TOAST_HEIGHT * scale + (n - 1) as f32 * 8.0 * scale;
+        toast_place(safe, below, vec2(width, height), taken).map(|at| (at, n))
+    })?;
     let response = egui::Area::new(Id::new("toasts"))
         .order(Order::Tooltip)
-        .fixed_pos(pos2(safe.right() - width - 16.0, safe.top() + below))
+        .fixed_pos(at)
         .interactable(false)
         .show(ctx, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = 8.0 * scale;
-            for t in toasts {
+            for t in toasts.iter().skip(toasts.len() - shown) {
                 let shown = now.duration_since(t.since).as_secs_f32();
                 let left = t.until.saturating_duration_since(now).as_secs_f32();
                 ui.scope(|ui| {
@@ -697,6 +713,29 @@ fn draw_toasts(
             }
         });
     Some(response.response.rect)
+}
+
+/// Where the notifications go (their top left), the first place where they
+/// cover nothing else on screen (`taken`): under the settings button (the
+/// top right), in the top left corner or the middle of the top, else lower
+/// in those three places (under the touch controls' top row), down to the
+/// middle of the screen at most.
+fn toast_place(safe: Rect, below: f32, size: Vec2, taken: &[Rect]) -> Option<Pos2> {
+    let starts = [
+        pos2(safe.right() - size.x - 16.0, safe.top() + below),
+        pos2(safe.left() + 16.0, safe.top() + 12.0),
+        pos2(safe.center().x - size.x / 2.0, safe.top() + 12.0),
+    ];
+    let lowest = safe.center().y - size.y / 2.0;
+    let free = |at: Pos2| {
+        let rect = Rect::from_min_size(at, size);
+        safe.contains_rect(rect) && !taken.iter().any(|t| t.intersects(rect.expand(4.0)))
+    };
+    (0..)
+        .map(|step| step as f32 * 8.0)
+        .take_while(|down| starts.iter().any(|s| s.y + down <= lowest))
+        .flat_map(|down| starts.map(|s| s + vec2(0.0, down)))
+        .find(|&at| at.y <= lowest && free(at))
 }
 
 // Points: the UI's unit, the same physical size everywhere. As SDL's
@@ -762,3 +801,62 @@ fn key(sc: Scancode) -> Option<egui::Key> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::touch::Touch;
+    use glue5_runtime::input::{Activity, Driving, PlayerContext};
+
+    /// Every touch layout, at every controls' size, on phones and a tablet:
+    /// the notifications, where they show, cover no control and are inside
+    /// the safe area.
+    #[test]
+    fn notifications_cover_no_control() {
+        let activities = [
+            Activity::OnFoot,
+            Activity::Driving(Driving::Car),
+            Activity::Driving(Driving::Heli),
+            Activity::Driving(Driving::Plane),
+            Activity::Passenger,
+            Activity::Parachute,
+        ];
+        let screens = [
+            (vec2(874.0, 402.0), [62.0, 0.0, 62.0, 21.0]),
+            (vec2(844.0, 390.0), [47.0, 0.0, 47.0, 21.0]),
+            (vec2(1194.0, 834.0), [0.0, 24.0, 0.0, 20.0]),
+        ];
+        let (mut placed, mut tried) = (0, 0);
+        for (screen, [l, t, r, b]) in screens {
+            let safe = Rect::from_min_max(pos2(l, t), pos2(screen.x - r, screen.y - b));
+            for scale in [0.7, 1.0, 1.5] {
+                let gear_at = pos2(safe.max.x + GEAR_AT.x * scale, safe.min.y + GEAR_AT.y * scale);
+                let gear = Rect::from_center_size(gear_at, Vec2::splat(2.0 * GEAR_RADIUS * scale));
+                let below = (GEAR_AT.y + GEAR_RADIUS) * scale + 8.0;
+                for activity in activities {
+                    for (vehicle_near, phone) in [(false, false), (true, false), (false, true)] {
+                        let context = PlayerContext { activity, vehicle_near, phone, menu: false, cutscene: false };
+                        let mut touch = Touch::new();
+                        touch.layout(screen, safe, scale);
+                        touch.set_context(context);
+                        let mut taken = touch.occupied();
+                        taken.push(gear);
+                        let width = (TOAST_WIDTH * theme::layout_scale(safe)).min(safe.width() - 32.0);
+                        let size = vec2(width, TOAST_HEIGHT * theme::layout_scale(safe));
+                        tried += 1;
+                        let Some(at) = toast_place(safe, below, size, &taken) else { continue };
+                        placed += 1;
+                        let rect = Rect::from_min_size(at, size);
+                        assert!(safe.contains_rect(rect), "{screen:?} {scale} {context:?}: {rect:?}");
+                        for t in &taken {
+                            assert!(!t.intersects(rect), "{screen:?} {scale} {context:?}: {rect:?} on {t:?}");
+                        }
+                    }
+                }
+            }
+        }
+        // They show almost always.
+        assert!(placed * 10 >= tried * 9, "shown {placed} of {tried} times");
+    }
+}
+
