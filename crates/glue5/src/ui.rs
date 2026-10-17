@@ -117,7 +117,6 @@ pub struct Started {
     pub source: crate::settings::Source,
     pub max_fps: u32,
     pub low_memory: bool,
-    pub render_scale: f32,
 }
 
 /// What the pages show about the application.

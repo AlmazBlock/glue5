@@ -804,8 +804,7 @@ impl App {
                 None
             }
         };
-        let started =
-            Started { game_dir, source: self.source, max_fps: s.max_fps, low_memory: s.low_memory, render_scale: s.render_scale() };
+        let started = Started { game_dir, source: self.source, max_fps: s.max_fps, low_memory: s.low_memory };
         self.game = Some(Running { game, input: None, started, back_buffer, _audio: audio });
         self.ui.game_started();
         Ok(())
