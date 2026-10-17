@@ -468,8 +468,8 @@ pub(crate) struct Service {
     /// A friend to join in its session (game.rs).
     follow: Option<Follow>,
     /// Friends whose sessions the player chose to join, for the game (gamer
-    /// ids).
-    joins: VecDeque<u64>,
+    /// ids, when), kept while the game is between sessions.
+    joins: VecDeque<(u64, Instant)>,
     /// Players met in lobbies, the latest first, and the ones in them now
     /// (their keys, addresses and gamer ids).
     recent: Vec<Recent>,
@@ -1991,10 +1991,12 @@ pub fn answer(key: &str, yes: bool) {
 pub fn join(key: &str) {
     let Some(key) = crypto::unhex::<32>(key) else { return };
     with(|s, _| {
-        if let Some(f) = s.friends.get(&key)
-            && !s.joins.contains(&f.id)
-        {
-            s.joins.push_back(f.id);
+        let Some(id) = s.friends.get(&key).map(|f| f.id).filter(|id| *id != 0) else { return };
+        if !s.joins.iter().any(|(i, _)| *i == id) {
+            if s.joins.len() >= 4 {
+                s.joins.pop_front();
+            }
+            s.joins.push_back((id, Instant::now()));
         }
     });
 }
@@ -2176,9 +2178,10 @@ pub(crate) fn finding_friends() -> bool {
 }
 
 /// The friends (gamer ids) whose sessions the player chose to join since
-/// the last call.
+/// the last call (a minute ago at most: the game may be between sessions).
 pub(crate) fn take_joins() -> Vec<u64> {
-    with(|s, _| s.joins.drain(..).collect()).unwrap_or_default()
+    let fresh = |at: &Instant| at.elapsed() < Duration::from_secs(60);
+    with(|s, _| s.joins.drain(..).filter(|(_, at)| fresh(at)).map(|(id, _)| id).collect()).unwrap_or_default()
 }
 
 /// How this player's session is joined (the game's choice of session).

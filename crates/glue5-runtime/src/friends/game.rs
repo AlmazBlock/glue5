@@ -217,10 +217,9 @@ pub(crate) unsafe fn update(env: *mut Env) {
         }
     }
     // Friends' sessions the player chose to join: the game asks whether to
-    // leave this one.
-    let joins = super::take_joins();
+    // leave this one (kept until it is in one).
     if let Some((ours, _)) = state.session {
-        for id in joins {
+        for id in super::take_joins() {
             unsafe { join(env, ours, id, true, false) };
         }
     }
