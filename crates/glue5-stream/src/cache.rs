@@ -46,6 +46,8 @@ pub struct Cache {
     keep_at_most: usize,
     slots: Vec<Slot>,
     session: u32,
+    /// When the copy was opened (what `touched` counts from).
+    opened: std::time::Instant,
     used: AtomicU64,
     /// Files written to since the last save (their data is synced first).
     dirty: Mutex<Vec<u32>>,
@@ -62,6 +64,11 @@ struct Slot {
     /// Shared by reads, exclusive while the file is emptied.
     guard: RwLock<()>,
     last_used: AtomicU32,
+    /// When this run last read or wrote the file: milliseconds since the
+    /// copy was opened (0: not yet).
+    touched: AtomicU32,
+    /// One of a pack's files: every start needs it (without the server too).
+    pack: bool,
     dirty: AtomicBool,
 }
 
@@ -107,6 +114,8 @@ impl Cache {
                 file: OnceLock::new(),
                 guard: RwLock::new(()),
                 last_used: AtomicU32::new(last_used),
+                touched: AtomicU32::new(0),
+                pack: crate::pack::kind_of(catalog, slots.len()).is_some(),
                 dirty: AtomicBool::new(false),
             };
             used += slot.bytes();
@@ -132,6 +141,7 @@ impl Cache {
             keep_at_most: sys::open_file_budget(),
             slots,
             session,
+            opened: std::time::Instant::now(),
             used: AtomicU64::new(used),
             dirty: Mutex::new(Vec::new()),
             changed: AtomicBool::new(true),
@@ -226,7 +236,7 @@ impl Cache {
             return Ok(None);
         }
         let got = sys::read_full_at(&*self.handle(id)?, &mut buf[..n], off)?;
-        s.last_used.store(self.session, Ordering::Relaxed);
+        self.touch(s);
         Ok(Some(got))
     }
 
@@ -253,7 +263,7 @@ impl Cache {
             let added = set_range(&s.present, off / BLOCK, last);
             self.used.fetch_add(added * BLOCK, Ordering::Relaxed);
         }
-        s.last_used.store(self.session, Ordering::Relaxed);
+        self.touch(s);
         if !s.dirty.swap(true, Ordering::AcqRel) {
             self.dirty.lock().unwrap().push(id);
         }
@@ -277,7 +287,7 @@ impl Cache {
             let added = set_range(&s.present, 0, s.blocks() - 1);
             self.used.fetch_add((added * BLOCK).min(s.size), Ordering::Relaxed);
         }
-        s.last_used.store(self.session, Ordering::Relaxed);
+        self.touch(s);
         if !s.dirty.swap(true, Ordering::AcqRel) {
             self.dirty.lock().unwrap().push(id);
         }
@@ -413,11 +423,23 @@ impl Cache {
         Ok(())
     }
 
+    /// A file was read or written: used by this run, now.
+    fn touch(&self, s: &Slot) {
+        s.last_used.store(self.session, Ordering::Relaxed);
+        let ms = self.opened.elapsed().as_millis().min(u32::MAX as u128 - 1) as u32;
+        s.touched.store(ms + 1, Ordering::Relaxed);
+    }
+
     /// Empties the files used longest ago until `want` bytes are freed:
-    /// first those this run has not read, then any. Returns the bytes freed.
+    /// those of earlier runs first, then this run's, least recently used
+    /// first; the packs' files last (every start needs them, and a start
+    /// without the server cannot have them again). Returns the bytes freed.
     pub fn evict(&self, want: u64) -> u64 {
         let mut order: Vec<u32> = (0..self.slots.len() as u32).filter(|&i| self.slots[i as usize].bytes() > 0).collect();
-        order.sort_by_key(|&i| self.slots[i as usize].last_used.load(Ordering::Relaxed));
+        order.sort_by_key(|&i| {
+            let s = &self.slots[i as usize];
+            (s.pack, s.last_used.load(Ordering::Relaxed), s.touched.load(Ordering::Relaxed))
+        });
         let mut freed = 0;
         for id in order {
             if freed >= want {
@@ -598,6 +620,36 @@ mod tests {
         assert_eq!(c.read(0, 0, &mut buf).unwrap(), Some(4));
         assert_eq!(buf, [7; 4]);
         assert!(c.evict(1) > 0 && !c.has(0, 0, 0));
+        let _ = clear(&root);
+    }
+
+    /// Emptying takes the files this run used least recently first, the
+    /// packs' files last.
+    #[test]
+    fn evicts_the_least_recent_and_the_packs_last() {
+        let root = std::env::temp_dir().join(format!("glue5-cache-evict-{}", std::process::id()));
+        let _ = clear(&root);
+        let entries = vec![
+            Entry { path: "data/x64/a.rpf".into(), size: 2 * BLOCK, mtime: 1 },
+            Entry { path: "data/x64/b.rpf".into(), size: 2 * BLOCK, mtime: 1 },
+            Entry { path: "data/common/data/c.xml".into(), size: 10, mtime: 1 },
+        ];
+        let c = Cache::open(&root, &Catalog::new("x".into(), entries, 3)).unwrap();
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        c.write_whole(2, b"<c>hi</c>!").unwrap();
+        c.write(0, 0, &vec![1; 2 * BLOCK as usize]).unwrap();
+        pause();
+        c.write(1, 0, &vec![2; 2 * BLOCK as usize]).unwrap();
+        pause();
+        // a is read again: b is now the least recent.
+        c.read(0, 0, &mut [0; 8]).unwrap();
+        assert_eq!(c.evict(1), 2 * BLOCK);
+        assert!(c.has(0, 0, 1) && !c.has(1, 0, 0) && c.complete(2));
+        // Then a, and only then the pack's file, though used before both.
+        assert_eq!(c.evict(1), 2 * BLOCK);
+        assert!(!c.has(0, 0, 0) && c.complete(2));
+        assert_eq!(c.evict(1), 10);
+        assert!(!c.complete(2));
         let _ = clear(&root);
     }
 

@@ -45,6 +45,10 @@ pub struct Options {
 /// Free space the copy leaves on its volume: below it, files read longest
 /// ago are emptied (or, downloading the whole game, the download waits).
 const FLOOR: u64 = 1 << 30;
+/// What emptying frees above [`FLOOR`]: enough not to come back at once,
+/// little enough that a full phone keeps most of its copy (it gave away a
+/// gigabyte at a time, much of it the start's own files, fetched again).
+const ROOM: u64 = 256 << 20;
 /// Blocks per request: one chunk (64 KB). When the engine comes to wait for
 /// a prefetched block, the request holding it moves ahead whole: small
 /// requests keep that to one chunk (with 1 MB requests, a read waited 134 ms
@@ -773,7 +777,7 @@ impl Client {
             && is_full(e)
             && !self.fill.load(Ordering::Acquire)
         {
-            r.cache.evict(2 * FLOOR);
+            r.cache.evict(FLOOR + ROOM);
             result = r.cache.write(id, off, data);
         }
         if let Err(e) = result {
@@ -846,7 +850,7 @@ impl Client {
         if let Some(free) = r.cache.free_space()
             && free < FLOOR
         {
-            r.cache.evict(2 * FLOOR - free);
+            r.cache.evict(FLOOR + ROOM - free);
         }
     }
 
