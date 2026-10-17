@@ -954,14 +954,6 @@ impl App {
             {
                 self.settings.game_dir = Some(stream.root().to_owned());
             }
-            // Beside the whole game (downloaded, or on its way), a partial
-            // copy left in the cache is of no use, and takes room it needs.
-            let cache = paths::stream_copy(&self.user_dir);
-            if stream.root() != cache && cache.join(glue5_stream::cache::MARKER).exists() {
-                if let Err(e) = glue5_stream::cache::clear(&cache) {
-                    log::warn!("stream: deleting the copy in the cache: {e}");
-                }
-            }
             let ready = stream.is_ready().then(|| stream.root().to_owned());
             if source == Source::Server && ready != self.game_dir {
                 self.game_dir = ready;
@@ -998,7 +990,9 @@ impl App {
             old.stop();
             old.root().to_owned()
         });
-        let earlier = [Some(paths::stream_copy(&self.user_dir)), paths::download_dir(&self.user_dir)];
+        let cache = paths::stream_copy(&self.user_dir);
+        let earlier = [Some(cache.clone()), paths::download_dir(&self.user_dir)];
+        let streaming = server.is_some();
         // Once the old client has finished (it saves its index last), before
         // the next one opens the copy.
         let to = root.clone();
@@ -1007,7 +1001,10 @@ impl App {
             // At start, where an earlier run left it: the download setting
             // changed while the game ran, which the stream never follows.
             let old = old.or_else(|| {
-                earlier.into_iter().flatten().find(|dir| *dir != root && dir.join(glue5_stream::cache::CATALOG).is_file())
+                earlier
+                    .into_iter()
+                    .flatten()
+                    .find(|dir| *dir != root && dir.join(glue5_stream::cache::CATALOG).is_file())
             });
             // Only a partial copy moves: the whole game, downloaded, stays a game
             // folder (moved into the cache, an iPhone's system emptied most of it).
@@ -1024,6 +1021,15 @@ impl App {
                 if let Err(e) = std::fs::rename(&old, &root) {
                     log::warn!("stream: moving the copy to {}: {e}", root.display());
                 }
+            }
+            // Beside the whole game (downloaded, or on its way), a partial
+            // copy left in the cache is of no use, and takes room it needs.
+            if streaming
+                && root != cache
+                && cache.join(glue5_stream::cache::MARKER).exists()
+                && let Err(e) = glue5_stream::cache::clear(&cache)
+            {
+                log::warn!("stream: deleting the copy in the cache: {e}");
             }
         });
         self.stream = server.map(|server| {
