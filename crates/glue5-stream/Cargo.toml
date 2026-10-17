@@ -22,6 +22,10 @@ crc32fast = "1"
 # compression makes the server's first pack build a matter of seconds.
 zstd = { version = "0.14", default-features = false, features = ["zstdmt"] }
 
+# The mDNS responder's socket: port 5353 shared with the system's
+# responder, multicast on each interface (Linux and Windows servers).
+socket2 = { version = "0.6", features = ["all"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

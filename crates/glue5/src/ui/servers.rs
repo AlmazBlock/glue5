@@ -168,7 +168,7 @@ fn by_address(ui: &mut egui::Ui, page: &mut ServersPage, actions: &mut Vec<Actio
             page.address.clear();
         }
     });
-    muted(ui, "Port 47100 unless another is given. Linux and Windows servers are not found by the search: type theirs.");
+    muted(ui, "For a server the search does not reach (another network, a VPN); port 47100 unless another is given.");
 }
 
 /// What this device keeps: the whole game or what was read, and deleting it.
