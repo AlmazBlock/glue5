@@ -498,6 +498,21 @@ impl Touch {
         STICK_RADIUS * self.scale
     }
 
+    /// Where the controls shown now are (the stick where it rests, with its
+    /// sprint ring on foot): what else is drawn keeps off them.
+    pub fn occupied(&self) -> Vec<Rect> {
+        let circle = |c: Pos2, r: f32| Rect::from_center_size(c, Vec2::splat(2.0 * r));
+        if self.context.menu {
+            return vec![circle(self.pos(MENU_BACK.at), MENU_BACK.radius * self.scale)];
+        }
+        let mut out: Vec<Rect> = self.actions().map(|a| circle(self.pos(a.at), a.radius * self.scale)).collect();
+        if self.has_stick() {
+            let reach = if self.on_foot() { SPRINT_REACH } else { 1.0 };
+            out.push(circle(self.pos(MOVE_REST), self.stick_radius() * reach));
+        }
+        out
+    }
+
     pub fn finger_down(&mut self, id: u64, x: f32, y: f32) {
         let p = pos2(x * self.screen.x, y * self.screen.y);
         let finger = if self.context.menu { self.menu_finger(p) } else { self.touch_finger(p) };

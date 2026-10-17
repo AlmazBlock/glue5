@@ -1016,7 +1016,7 @@ mod tests {
             sharing: None,
             servers: &[],
             searching: false,
-            banner: None,
+            stream_alert: None,
         }
     }
 

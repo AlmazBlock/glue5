@@ -401,6 +401,11 @@ impl App {
                 self.ui.open_toast();
                 return false;
             }
+            // So does the stream's sign: the Servers page.
+            if !self.ui.is_open() && self.ui.chip_hit(x, y, &self.window) {
+                self.ui.show_servers();
+                return false;
+            }
             self.touch_input = true;
             // A tap above the on-screen keyboard puts it away (it covers the
             // touch controls, and a phone's has no key to hide it).
@@ -537,7 +542,7 @@ impl App {
         let mut actions = Vec::new();
         let stream = self.stream.clone();
         let stream = stream.as_ref().map(|c| (c.server(), c.status()));
-        let banner = self.banner(stream.as_ref().map(|(_, s)| s));
+        let stream_alert = self.stream_alert(stream.as_ref().map(|(_, s)| s));
         let servers = self.servers.lock().unwrap().clone();
         if in_game || (!self.lifecycle.background.load(Ordering::Relaxed) && self.ui.wants_frame()) {
             let status = Status {
@@ -565,7 +570,7 @@ impl App {
                 sharing: self.sharing.as_ref().map(crate::sharing::Sharing::state),
                 servers: &servers.1,
                 searching: servers.0,
-                banner,
+                stream_alert,
             };
             // The settings button: on touch screens always, so that it stays
             // with a controller in use or the touch controls off.
@@ -1016,8 +1021,8 @@ impl App {
         self.ui.repaint();
     }
 
-    /// The line over the game while it waits for the server.
-    fn banner(&mut self, stream: Option<&glue5_stream::Status>) -> Option<&'static str> {
+    /// The sign over the game while it waits for the server.
+    fn stream_alert(&mut self, stream: Option<&glue5_stream::Status>) -> Option<ui::StreamAlert> {
         let stream = stream.filter(|_| self.game.is_some() && self.source == Source::Server)?;
         if stream.waiting == 0 {
             self.stream_waiting = None;
@@ -1025,9 +1030,9 @@ impl App {
             self.stream_waiting.get_or_insert_with(Instant::now);
         }
         if !stream.connected {
-            Some("The server does not answer: trying again…")
+            Some(ui::StreamAlert::Offline)
         } else if self.stream_waiting.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
-            Some("Waiting for the game's files from the server…")
+            Some(ui::StreamAlert::Waiting)
         } else {
             None
         }

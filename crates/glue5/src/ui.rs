@@ -21,6 +21,7 @@ use sdl3::video::Window;
 
 use crate::settings::{PerfOverlay, Settings};
 
+mod chip;
 mod credits;
 mod friends;
 mod pages;
@@ -83,6 +84,15 @@ pub enum Action {
     FindServers,
     /// Stream from this server (an address found or typed).
     UseServer(String),
+}
+
+/// What the stream says over the game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamAlert {
+    /// The engine's reads have waited for the server for a moment.
+    Waiting,
+    /// The server does not answer (the game plays on from the copy).
+    Offline,
 }
 
 /// A server found on the network, and what it answered when asked whether
@@ -154,8 +164,8 @@ pub struct Status<'a> {
     /// Servers found on the network, and whether a search runs.
     pub servers: &'a [FoundServer],
     pub searching: bool,
-    /// A line over the game: it waits for the server.
-    pub banner: Option<&'a str>,
+    /// A sign over the game: it waits for the server, or the server is away.
+    pub stream_alert: Option<StreamAlert>,
 }
 
 /// The settings button over the game: from the safe area's top right
@@ -209,6 +219,8 @@ pub struct Ui {
     /// the oldest first, and where they were last drawn (to tap them).
     toasts: std::collections::VecDeque<Toast>,
     toast_area: Option<Rect>,
+    /// The stream's sign over the game.
+    chip: chip::Chip,
 }
 
 /// A notification: as Social Club's, a title, a name and a line; the
@@ -254,6 +266,7 @@ impl Ui {
             perf: Default::default(),
             toasts: Default::default(),
             toast_area: None,
+            chip: Default::default(),
         }
     }
 
@@ -392,6 +405,17 @@ impl Ui {
         self.gear.is_some_and(|(c, r)| c.distance(pos2(x * size.x, y * size.y)) <= r * 1.4)
     }
 
+    /// Whether a finger at `x`, `y` (0..1) is on the stream's sign.
+    pub fn chip_hit(&self, x: f32, y: f32, window: &Window) -> bool {
+        let size = screen_size(window);
+        self.chip.hit(pos2(x * size.x, y * size.y))
+    }
+
+    /// The Servers page (from the stream's sign over the game).
+    pub fn show_servers(&mut self) {
+        self.show(Some(Page::Servers));
+    }
+
     /// Input for a page while one is open.
     pub fn event(&mut self, event: &Event, window: &Window) {
         let size = screen_size(window);
@@ -519,7 +543,7 @@ impl Ui {
         if !hud {
             self.perf.hide();
         }
-        let banner = status.banner.filter(|_| self.page.is_none());
+        let alert = status.stream_alert.filter(|_| self.page.is_none());
         let now = Instant::now();
         self.toasts.retain(|t| now < t.until);
         if self.toasts.is_empty() {
@@ -528,7 +552,7 @@ impl Ui {
         if self.page.is_none()
             && touch.is_none()
             && gear.is_none()
-            && banner.is_none()
+            && alert.is_none()
             && self.toasts.is_empty()
             && (!hud || !self.perf.due(settings.overlay_detail))
         {
@@ -538,6 +562,7 @@ impl Ui {
             }
             self.events.clear();
             self.gear = None;
+            self.chip = Default::default();
             return actions;
         }
         // Play was chosen at the last frame: this one shows that the game
@@ -570,18 +595,21 @@ impl Ui {
             touch.draw(&ctx.layer_painter(LayerId::background()), settings.touch_opacity);
         }
         self.gear = gear.map(|alpha| draw_gear(&ctx, safe, settings.touch_size, alpha));
-        if hud {
-            self.perf.draw(&ctx, safe, settings, status);
-        }
-        if let Some(text) = banner {
-            draw_banner(&ctx, safe, text);
-        }
+        let overlay = hud.then(|| self.perf.draw(&ctx, safe, settings, status));
         // Under the settings button when it shows.
         let below = if self.gear.is_some() { (GEAR_AT.y + GEAR_RADIUS) * settings.touch_size + 8.0 } else { 12.0 };
         self.toast_area = draw_toasts(&ctx, safe, below, &self.toasts, now);
         if !self.toasts.is_empty() {
             self.repaint_in(Duration::from_millis(33));
         }
+        // The stream's sign, off everything else drawn over the game; legible
+        // whatever the touch controls' opacity.
+        let mut taken = touch.map_or_else(Vec::new, Touch::occupied);
+        taken.extend(self.gear.map(|(c, r)| Rect::from_center_size(c, Vec2::splat(2.0 * r))));
+        taken.extend(overlay);
+        taken.extend(self.toast_area);
+        let alpha = gear.unwrap_or(1.0).max(0.75);
+        self.chip.draw(&ctx, safe, alert, self.gear, &taken, settings.touch_size, alpha);
         if self.page.is_some() && status.started.is_none() {
             theme::backdrop(&ctx, self.background.as_ref());
         }
@@ -670,16 +698,6 @@ fn draw_toasts(
             }
         });
     Some(response.response.rect)
-}
-
-/// A line at the top of the game, centred: what it waits for.
-fn draw_banner(ctx: &egui::Context, safe: Rect, text: &str) {
-    let painter = ctx.layer_painter(LayerId::new(egui::Order::Foreground, egui::Id::new("banner")));
-    let galley = painter.layout_no_wrap(text.into(), egui::FontId::proportional(14.0), egui::Color32::WHITE);
-    let size = galley.size() + egui::vec2(32.0, 16.0);
-    let rect = Rect::from_center_size(egui::pos2(safe.center().x, safe.top() + 16.0 + size.y / 2.0), size);
-    painter.rect_filled(rect, size.y / 2.0, egui::Color32::from_black_alpha(190));
-    painter.galley(rect.center() - galley.size() / 2.0, galley, egui::Color32::WHITE);
 }
 
 // Points: the UI's unit, the same physical size everywhere. As SDL's
