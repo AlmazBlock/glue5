@@ -1066,13 +1066,14 @@ impl Service {
 
     /// Message 2 or 3.
     fn on_next(&mut self, from: SocketAddrV4, sender: u32, receiver: u32, msg: &[u8], now: Instant, out: &mut Out) {
-        let Some((mut h, owner)) = self.handshakes.remove(&receiver) else { return };
-        if h.remote_index == 0 {
-            h.remote_index = sender;
-        }
-        if h.remote_index != sender || h.read(msg).is_none() {
+        // Read first: one that does not open (forged, by someone who saw
+        // message 1) leaves the handshake as it was, for the real one.
+        let Some((h, _)) = self.handshakes.get_mut(&receiver) else { return };
+        if h.remote_index != 0 && h.remote_index != sender || h.read(msg).is_none() {
             return;
         }
+        let (mut h, owner) = self.handshakes.remove(&receiver).unwrap();
+        h.remote_index = sender;
         h.to = from;
         if !h.finished() {
             // XX, message 2 read: message 3 finishes it.

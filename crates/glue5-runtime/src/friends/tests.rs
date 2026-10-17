@@ -346,3 +346,25 @@ fn a_stale_address_first_does_not_hold_up_the_others() {
     run(&mut [&mut a, &mut c], out, from, &mut now, 2, &keep);
     assert!(a.s.requests.get(&c.key()).is_some_and(|r| r.asked));
 }
+
+#[test]
+fn a_forged_answer_does_not_cancel_the_handshake() {
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    befriend(&mut a, &mut b, true, &mut now);
+    let (mut a, mut b) = (a.restarted(), b.restarted());
+    let (lower, higher) = if a.key() < b.key() { (&mut a, &mut b) } else { (&mut b, &mut a) };
+    let shared = lower.s.friends[&higher.key()].shared;
+    let mut out = Out::default();
+    lower.s.found(crypto::meeting_key(&shared, crypto::epoch(unix())), higher.addr, now, &mut out);
+    let hs1 = &out.send.iter().find(|(_, d)| d[3] == session::HS1).unwrap().1;
+    // Someone who saw message 1 answers first.
+    let mut forged = vec![1];
+    forged.extend_from_slice(&999u32.to_be_bytes());
+    forged.extend_from_slice(&hs1[5..9]);
+    forged.extend_from_slice(&[0; 48]);
+    lower.s.receive(nowhere(), session::HS2, &forged, now, &mut Out::default());
+    let from = lower.addr;
+    run(&mut [&mut *lower, &mut *higher], out, from, &mut now, 2, &keep);
+    assert!(lower.connected_to(higher) && higher.connected_to(lower));
+}
