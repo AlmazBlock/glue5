@@ -179,8 +179,9 @@ impl Config {
         // for the GPU to finish the previous frame before it starts the
         // next. The game's benchmark ran 11-32 % faster with two on Windows
         // and 8 % on a Pixel 8a, for a frame more of latency. iPhones gained
-        // nothing (their CPU sets the pace): they keep one.
-        let ios = cfg!(target_os = "ios");
+        // nothing (their CPU sets the pace): they keep one, and so does the
+        // Apple TV (the same chips, and less memory).
+        let ios = cfg!(any(target_os = "ios", target_os = "tvos"));
         if !ios && !extra.iter().any(|a| a.to_ascii_lowercase().starts_with("-framequeuelimit")) {
             args.push("-FrameQueueLimit=2".into());
         }

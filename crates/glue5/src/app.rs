@@ -951,7 +951,11 @@ impl App {
         if let Some(stream) = &self.stream {
             let status = stream.status();
             // A complete download is a game folder: the local mode finds it too.
-            if status.complete && self.settings.download_all && self.settings.game_dir.is_none() {
+            if status.complete
+                && self.settings.download_all
+                && paths::can_download_all()
+                && self.settings.game_dir.is_none()
+            {
                 self.settings.game_dir = Some(stream.root().to_owned());
             }
             // Beside the whole game (downloaded, or on its way), a partial
