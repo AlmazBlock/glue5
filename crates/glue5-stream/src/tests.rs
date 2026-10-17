@@ -763,6 +763,8 @@ fn checks_a_server_before_it_is_chosen() {
     assert!(matches!(crate::check(&addr, "otherbuild"), crate::Check::Unusable(why) if why.contains("otherbuild")));
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
     assert!(matches!(crate::check(&closed, BUILD), crate::Check::Unreachable(_)));
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
