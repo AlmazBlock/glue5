@@ -18,6 +18,13 @@
 //!   are the sticks. With the phone out, its keys sit beside it and only
 //!   the controls it leaves free stay. Cutscenes have their skip.
 //! - In the pause menu, a finger is the mouse, with keys beside it.
+//! - Direct touch (experimental): the menus made for the mouse (the pause
+//!   menu, and the scripts' that show its cursor: shops, the interaction
+//!   menu, the character creator) take fingers as on a phone's own screens:
+//!   a tap clicks where it lands, a drag up or down scrolls, left or right
+//!   changes the value of the row picked (its arrows take no click), on the
+//!   map it moves it, two fingers zoom; Back alone stays, and the D-pad
+//!   and Select go.
 //!
 //! They make a [`Gamepad`] (and the camera a mouse's motion): the game plays
 //! as with a controller (its prompts, aim assist).
@@ -368,10 +375,19 @@ const GESTURE_CLEAR: f32 = 10.0;
 /// A tap's click or key lasts this long at least: the engine reads the
 /// mouse and keys once a frame.
 const MIN_PRESS: Duration = Duration::from_millis(60);
+/// With direct touch, a finger that moves this many points is a drag, not a
+/// tap.
+const TAP_SLOP: f32 = 10.0;
+/// A sideways drag this many points long presses Left or Right once.
+const SWIPE_STEP: f32 = 48.0;
 /// A click starts this long after the pointer moves under the finger: the
 /// menus take a press only where the pointer already was (the first tap's
 /// was lost).
 const CLICK_DELAY: Duration = Duration::from_millis(40);
+
+/// A tap's second click waits this long after the first went into a
+/// column (the menu takes no click on it meanwhile).
+const AGAIN_DELAY: Duration = Duration::from_millis(250);
 
 /// The buttons of the game's prompts that no layout's button does.
 const PROMPT_RADIUS: f32 = 22.0;
@@ -427,8 +443,9 @@ enum Finger {
     /// A button held: what it presses, where the finger landed, where it
     /// was last.
     Button { key: Key, bits: u16, input: Option<u32>, kind: Kind, origin: Pos2, last: Pos2 },
-    /// In the pause menu: the mouse, or a second finger pinching, or a key.
-    Mouse(Pos2),
+    /// In the pause menu: the mouse (where the finger landed and is, when,
+    /// what its drag does), or a second finger pinching, or a key.
+    Mouse { origin: Pos2, at: Pos2, since: Instant, drag: Option<Drag> },
     Pinch(Pos2),
     MenuKey(MenuKey),
 }
@@ -465,6 +482,8 @@ pub struct Touch {
     /// The player's aim is locked on to a target: drags push the right
     /// stick instead of turning the camera.
     pub aim_locked: bool,
+    /// Direct touch (the experimental setting): see the module's notes.
+    pub direct: bool,
     /// What the player is doing: the layout follows.
     context: PlayerContext,
     /// What the game asks to press, and where the phone is (points).
@@ -486,6 +505,12 @@ pub struct Touch {
     click: Option<(Instant, Instant)>,
     key_until: [Option<Instant>; 6],
     wheel: f32,
+    /// A sideways drag's steps not pressed yet (+ = right), and when the
+    /// next may be (a key's press and release each take a frame).
+    steps: f32,
+    next_step: Option<Instant>,
+    /// Direct touch: when the last tap clicked (it may click again, once).
+    tapped: Option<Instant>,
     two: Option<TwoFingers>,
 }
 
@@ -498,6 +523,20 @@ struct TwoFingers {
     middle: f32,
     unclear: Vec2,
     gesture: Option<Gesture>,
+}
+
+/// What a mouse finger's drag does, with direct touch (else it drags the
+/// mouse held).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Drag {
+    /// Turns the wheel: lists scroll.
+    Scroll,
+    /// Left and right, as the arrow keys: the row's value changes.
+    Swipe,
+    /// The mouse held: the map moves.
+    Hold,
+    /// A second finger came: a pinch or a scroll, not a click.
+    Two,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -519,6 +558,7 @@ impl Touch {
             haptics: false,
             camera_speed: 1.0,
             aim_locked: false,
+            direct: false,
             context: PlayerContext {
                 activity: Activity::OnFoot,
                 vehicle_near: false,
@@ -528,6 +568,8 @@ impl Touch {
                 scripted: false,
                 character: Character::Other,
                 gun: false,
+                cursor: false,
+                map: false,
             },
             prompts: Vec::new(),
             phone: None,
@@ -539,6 +581,9 @@ impl Touch {
             click: None,
             key_until: [None; 6],
             wheel: 0.0,
+            steps: 0.0,
+            next_step: None,
+            tapped: None,
             two: None,
         }
     }
@@ -553,12 +598,35 @@ impl Touch {
 
     /// What the player is doing now. Fingers down keep what they hold.
     pub fn set_context(&mut self, context: PlayerContext) {
-        // In and out of the pause menu, fingers start over (a finger on a
-        // button is not the mouse, nor the other way round).
-        if context.menu != self.context.menu {
-            self.clear();
-        }
+        let (menu, over) = (self.menu_mode(), self.cursor_over_play());
         self.context = context;
+        // In and out of a menu, fingers start over (a finger on a button is
+        // not the mouse, nor the other way round).
+        if self.menu_mode() != menu {
+            self.clear();
+        } else if self.cursor_over_play() != over {
+            self.fingers.retain(|_, f| !matches!(f, Finger::Mouse { .. } | Finger::Pinch(_)));
+            (self.click, self.two) = (None, None);
+        }
+    }
+
+    /// The screen is a menu that takes the mouse, without a touch layout:
+    /// the pause menu; with direct touch, a script's menu showing its cursor
+    /// while the player's controls are off (a shop, the character creator).
+    fn menu_mode(&self) -> bool {
+        self.context.menu || (self.direct && self.context.cursor && self.context.scripted)
+    }
+
+    /// With direct touch, a script's menu shows its cursor over play (the
+    /// interaction menu): fingers off the controls are its mouse.
+    fn cursor_over_play(&self) -> bool {
+        self.direct && self.context.cursor && !self.menu_mode()
+    }
+
+    /// The pause menu's keys shown: with direct touch, Back alone (the menu
+    /// takes taps and drags itself).
+    fn menu_keys(&self) -> &'static [(MenuKey, Action)] {
+        if self.direct { &MENU_KEYS[..1] } else { &MENU_KEYS }
     }
 
     /// What the game asks to press now, and where the phone is on the
@@ -573,7 +641,7 @@ impl Touch {
     /// The touch layout for what the player is doing (kept from the last
     /// activity seen through the moments between), or none: the pause menu.
     fn touch_layout(&self) -> Option<&'static [Action]> {
-        if self.context.menu {
+        if self.menu_mode() {
             return None;
         }
         if self.context.cutscene {
@@ -814,8 +882,8 @@ impl Touch {
     /// sprint ring on foot): what else is drawn keeps off them.
     pub fn occupied(&self) -> Vec<Rect> {
         let circle = |c: Pos2, r: f32| Rect::from_center_size(c, Vec2::splat(2.0 * r));
-        if self.context.menu {
-            return MENU_KEYS.iter().map(|(_, a)| circle(self.pos(a.at), a.radius * self.scale)).collect();
+        if self.menu_mode() {
+            return self.menu_keys().iter().map(|(_, a)| circle(self.pos(a.at), a.radius * self.scale)).collect();
         }
         let mut out: Vec<Rect> = self.buttons().iter().map(Button::rect).collect();
         if self.has_stick() {
@@ -827,7 +895,11 @@ impl Touch {
 
     pub fn finger_down(&mut self, id: u64, x: f32, y: f32) {
         let p = pos2(x * self.screen.x, y * self.screen.y);
-        let finger = if self.context.menu { self.menu_finger(p) } else { self.touch_finger(p) };
+        let finger = if self.menu_mode() || (self.cursor_over_play() && self.takes_mouse(p)) {
+            self.menu_finger(p)
+        } else {
+            self.touch_finger(p)
+        };
         if let Finger::Button { bits, input, kind, .. } = finger {
             self.pressed |= bits;
             self.pressed_inputs.extend(input);
@@ -862,9 +934,17 @@ impl Touch {
         }
     }
 
-    /// In the pause menu: a key, else the mouse, or a pinch with it.
+    /// Over play, a script's menu with its cursor takes a finger off the
+    /// controls (and off the stick where it rests).
+    fn takes_mouse(&self, p: Pos2) -> bool {
+        let stick = self.has_stick() && p.distance(self.pos(MOVE_REST)) <= FOLLOW_REACH * self.stick_radius();
+        !stick && !self.buttons().iter().any(|b| b.hit(p))
+    }
+
+    /// In a menu: a key, else the mouse, or a pinch with it.
     fn menu_finger(&mut self, p: Pos2) -> Finger {
-        for (i, (key, a)) in MENU_KEYS.iter().enumerate() {
+        let keys = if self.menu_mode() { self.menu_keys() } else { &[] };
+        for (i, (key, a)) in keys.iter().enumerate() {
             if self.pos(a.at).distance(p) <= a.radius * self.scale * 1.2 {
                 self.key_until[i] = Some(Instant::now() + MIN_PRESS);
                 if self.haptics {
@@ -873,20 +953,48 @@ impl Touch {
                 return Finger::MenuKey(*key);
             }
         }
-        let mouse = self.fingers.values().find_map(|f| if let Finger::Mouse(at) = f { Some(*at) } else { None });
+        let mouse = self.fingers.values_mut().find_map(|f| match f {
+            Finger::Mouse { at, drag, .. } => Some((*at, drag)),
+            _ => None,
+        });
         match mouse {
-            Some(at) => {
+            Some((at, drag)) => {
                 // A second finger: a pinch or a scroll, not a click.
+                *drag = Some(Drag::Two);
                 let (width, middle) = (at.distance(p), (at.y + p.y) / 2.0);
                 self.two = Some(TwoFingers { width, middle, unclear: Vec2::ZERO, gesture: None });
                 self.click = None;
                 Finger::Pinch(p)
             }
             None => {
+                // The pointer comes under the finger. With direct touch, the
+                // click waits for it to lift without moving; else it comes
+                // at once and lasts while it is held (a drag drags). A new
+                // gesture drops what was left of a step or a notch.
                 self.mouse_at = Some(p);
-                let from = Instant::now() + CLICK_DELAY;
+                (self.steps, self.wheel) = (self.steps.trunc(), self.wheel.trunc());
+                let now = Instant::now();
+                if !self.direct {
+                    self.click = Some((now + CLICK_DELAY, now + CLICK_DELAY + MIN_PRESS));
+                }
+                Finger::Mouse { origin: p, at: p, since: now, drag: None }
+            }
+        }
+    }
+
+    /// The pause menu went a level deeper at `at` (its last time): when that
+    /// was the last tap's click, it only went into the column or list
+    /// tapped (the mouse picks in the one it is in), so it clicks again,
+    /// once, where it was: a tap picks what it lands on. Not on the map
+    /// (a click there marks it).
+    pub fn menu_went_deeper(&mut self, at: Option<Instant>) {
+        if let (Some(tap), Some(at)) = (self.tapped, at)
+            && at >= tap
+        {
+            self.tapped = None;
+            if at < tap + Duration::from_millis(500) && self.direct && !self.context.map {
+                let from = Instant::now() + AGAIN_DELAY;
                 self.click = Some((from, from + MIN_PRESS));
-                Finger::Mouse(p)
             }
         }
     }
@@ -894,10 +1002,19 @@ impl Touch {
     /// Takes what the fingers do with the mouse and keys in the pause menu.
     pub fn take_mouse(&mut self) -> Mouse {
         let now = Instant::now();
-        let held = |f: &Finger| matches!(f, Finger::Mouse(_));
+        let direct = self.direct;
+        let held = |f: &Finger| matches!(f, Finger::Mouse { drag, .. } if !direct || *drag == Some(Drag::Hold));
         let pinching = self.fingers.values().any(|f| matches!(f, Finger::Pinch(_)));
         let down = !pinching
             && self.click.is_some_and(|(from, until)| now >= from && (now < until || self.fingers.values().any(held)));
+        // A sideways drag's steps: Left or Right pressed once each, a frame
+        // apart.
+        if self.steps.abs() >= 1.0 && self.next_step.is_none_or(|t| now >= t) {
+            let (i, one) = if self.steps > 0.0 { (2, 1.0) } else { (1, -1.0) };
+            self.key_until[i] = Some(now + MIN_PRESS);
+            self.next_step = Some(now + 2 * MIN_PRESS);
+            self.steps -= one;
+        }
         let keys = std::array::from_fn(|i| {
             let key = MENU_KEYS[i].0;
             self.fingers.values().any(|f| matches!(f, Finger::MenuKey(k) if *k == key))
@@ -911,18 +1028,52 @@ impl Touch {
 
     pub fn finger_motion(&mut self, id: u64, x: f32, y: f32) {
         let p = pos2(x * self.screen.x, y * self.screen.y);
-        if self.context.menu {
-            if let Some(Finger::Mouse(at) | Finger::Pinch(at)) = self.fingers.get_mut(&id) {
-                *at = p;
+        if matches!(self.fingers.get(&id), Some(Finger::Mouse { .. } | Finger::Pinch(_))) {
+            let (direct, map, slop) = (self.direct, self.context.map, TAP_SLOP * self.scale);
+            let (mut scroll, mut swipe) = (0.0, 0.0);
+            match self.fingers.get_mut(&id) {
+                Some(Finger::Mouse { origin, at, drag, .. }) => {
+                    // Direct touch: past a tap, the drag scrolls, or moves
+                    // the map with the mouse held.
+                    // The drag counts from where the finger landed.
+                    let mut from = *at;
+                    if direct && drag.is_none() && origin.distance(p) > slop {
+                        let d = p - *origin;
+                        from = *origin;
+                        *drag = Some(if map {
+                            Drag::Hold
+                        } else if d.x.abs() > d.y.abs() {
+                            Drag::Swipe
+                        } else {
+                            Drag::Scroll
+                        });
+                        if map {
+                            let now = Instant::now();
+                            self.click = Some((now, now + MIN_PRESS));
+                        }
+                    }
+                    match drag {
+                        Some(Drag::Scroll) => scroll = p.y - from.y,
+                        Some(Drag::Swipe) => swipe = p.x - from.x,
+                        Some(Drag::Two) => {}
+                        Some(Drag::Hold) => self.mouse_at = Some(p),
+                        None if !direct => self.mouse_at = Some(p),
+                        None => {}
+                    }
+                    *at = p;
+                }
+                Some(Finger::Pinch(at)) => *at = p,
+                _ => {}
             }
-            if matches!(self.fingers.get(&id), Some(Finger::Mouse(_))) {
-                self.mouse_at = Some(p);
-            }
+            // Natural scrolling: a finger moving down brings up what is
+            // above.
+            self.wheel += scroll / SCROLL_NOTCH;
+            self.steps += swipe / SWIPE_STEP;
             let points: Vec<Pos2> = self
                 .fingers
                 .values()
                 .filter_map(|f| match f {
-                    Finger::Mouse(at) | Finger::Pinch(at) => Some(*at),
+                    Finger::Mouse { at, .. } | Finger::Pinch(at) => Some(*at),
                     _ => None,
                 })
                 .collect();
@@ -944,6 +1095,9 @@ impl Touch {
                     None => {}
                 }
             }
+            return;
+        }
+        if self.menu_mode() {
             return;
         }
         let follow = FOLLOW_REACH * self.stick_radius();
@@ -997,8 +1151,20 @@ impl Touch {
     }
 
     pub fn finger_up(&mut self, id: u64) {
-        if matches!(self.fingers.remove(&id), Some(Finger::Pinch(_))) {
-            self.two = None;
+        match self.fingers.remove(&id) {
+            Some(Finger::Pinch(_)) => self.two = None,
+            // Direct touch: a tap clicks as it lifts (once the pointer has
+            // been there a moment); the map's drag lets go.
+            Some(Finger::Mouse { since, drag, .. }) if self.direct => match drag {
+                None => {
+                    let from = (since + CLICK_DELAY).max(Instant::now());
+                    self.click = Some((from, from + MIN_PRESS));
+                    self.tapped = Some(from);
+                }
+                Some(Drag::Hold) => self.click = None,
+                Some(Drag::Scroll | Drag::Swipe | Drag::Two) => {}
+            },
+            _ => {}
         }
     }
 
@@ -1012,13 +1178,14 @@ impl Touch {
         self.click = None;
         self.key_until = [None; 6];
         self.wheel = 0.0;
+        self.steps = 0.0;
         self.two = None;
     }
 
     /// The gamepad the fingers make now.
     pub fn gamepad(&mut self) -> Gamepad {
         let mut pad = Gamepad { connected: true, buttons: std::mem::take(&mut self.pressed), ..Default::default() };
-        if self.context.menu {
+        if self.menu_mode() {
             return Gamepad { buttons: 0, ..pad };
         }
         let radius = self.stick_radius();
@@ -1034,7 +1201,7 @@ impl Touch {
                     }
                 }
                 Finger::Look { origin, at } => pad.right = stick(origin, at),
-                Finger::Camera { .. } | Finger::Mouse(_) | Finger::Pinch(_) | Finger::MenuKey(_) => {}
+                Finger::Camera { .. } | Finger::Mouse { .. } | Finger::Pinch(_) | Finger::MenuKey(_) => {}
                 Finger::Button { bits, kind, origin, last, .. } => {
                     if kind == Kind::Wheel {
                         pad.right = stick(origin, last);
@@ -1084,8 +1251,8 @@ impl Touch {
 
     pub fn draw(&self, painter: &Painter, opacity: f32) {
         let look = Look::new(opacity, self.scale, self.context.character);
-        if self.context.menu {
-            for (key, a) in &MENU_KEYS {
+        if self.menu_mode() {
+            for (key, a) in self.menu_keys() {
                 let held = self.fingers.values().any(|f| matches!(f, Finger::MenuKey(k) if k == key));
                 let b = Button {
                     key: Key::Action(a),

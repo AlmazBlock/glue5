@@ -231,8 +231,9 @@ const HELP_TEXT_LEN: usize = 600;
 const CONTROL: u64 = 24488864;
 const CONTROL_VALUES: u64 = 33704;
 const CONTROL_VALUE_SIZE: u64 = 72;
-/// `GetInputSource`'s device: the one used last (the pad, in touch play).
-const LAST_DEVICE: u32 = -2i32 as u32;
+/// `GetInputSource`'s device: the first pad (its mapping, whichever device
+/// the engine saw last: direct touch has menus see keyboard and mouse).
+const PAD: u32 = 0;
 /// `rage::ioSource` devices: a pad's button (parameter: its bit), analog
 /// button (its bit's index), axis (0x1000 + LX, LY, RX, RY; 0x1016.. the
 /// left stick's directions, 0x101A.. the right's).
@@ -240,12 +241,12 @@ const PAD_BUTTON: u32 = 9;
 const PAD_ANALOG: u32 = 11;
 const PAD_AXIS: u32 = 12;
 
-/// Where `input` is on the pad with the mapping in use.
+/// Where `input` is on the pad with its mapping.
 unsafe fn input_pad(env: *mut Env, input: u32) -> Option<Pad> {
     let mem = unsafe { Mem::of(env) };
     let (device, parameter) = unsafe {
         with_stack(env, 16, |source| {
-            orig::control_input_source(env, source, CONTROL, input, LAST_DEVICE, 0, 0);
+            orig::control_input_source(env, source, CONTROL, input, PAD, 0, 0);
             (mem.u32(source), mem.u32(source + 4))
         })
     }?;

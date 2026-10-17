@@ -31,6 +31,8 @@ fn context(activity: Activity) -> PlayerContext {
         scripted: false,
         character: Character::Franklin,
         gun: false,
+        cursor: false,
+        map: false,
     }
 }
 
@@ -301,6 +303,122 @@ fn in_the_pause_menu_fingers_are_the_mouse() {
         std::thread::sleep(MIN_PRESS);
         assert!(!t.take_mouse().keys[i]);
     }
+}
+
+#[test]
+fn with_direct_touch_a_menu_takes_taps_and_drags() {
+    let mut t = phone();
+    t.direct = true;
+    t.set_context(PlayerContext { menu: true, cursor: true, ..context(Activity::OnFoot) });
+    // A tap clicks as it lifts, where it landed (the pointer there first).
+    let (x, y) = at(&t, pos2(400.0, 200.0));
+    t.finger_down(1, x, y);
+    let m = t.take_mouse();
+    assert!(!m.down && (m.at.unwrap().y - y).abs() < 1e-6, "no click while it may be a drag");
+    let (x1, y1) = at(&t, pos2(405.0, 203.0));
+    t.finger_motion(1, x1, y1);
+    std::thread::sleep(CLICK_DELAY);
+    assert!(!t.take_mouse().down);
+    t.finger_up(1);
+    let m = t.take_mouse();
+    assert!(m.down && (m.at.unwrap().x - x).abs() < 1e-6, "a tap's small slip keeps the pointer");
+    std::thread::sleep(MIN_PRESS);
+    assert!(!t.take_mouse().down);
+    // That click only went into the menu's column: it clicks again, once.
+    t.menu_went_deeper(Some(Instant::now()));
+    std::thread::sleep(AGAIN_DELAY);
+    assert!(t.take_mouse().down);
+    std::thread::sleep(MIN_PRESS);
+    t.menu_went_deeper(Some(Instant::now()));
+    assert!(!t.take_mouse().down);
+    // A drag down scrolls up (natural scrolling), the pointer stays, no click.
+    t.finger_down(1, x, y);
+    for step in 1..=4 {
+        let (x, y) = at(&t, pos2(400.0, 200.0 + step as f32 * SCROLL_NOTCH));
+        t.finger_motion(1, x, y);
+    }
+    t.finger_up(1);
+    std::thread::sleep(CLICK_DELAY);
+    let m = t.take_mouse();
+    assert!(!m.down && (m.at.unwrap().y - y).abs() < 1e-6);
+    assert!((3..=4).contains(&m.wheel), "{}", m.wheel);
+    // Sideways: Left or Right once a step, released between.
+    t.finger_down(1, x, y);
+    let (x3, y3) = at(&t, pos2(400.0 + 2.5 * SWIPE_STEP, 204.0));
+    t.finger_motion(1, x3, y3);
+    t.finger_up(1);
+    let mut presses = Vec::new();
+    let mut was = [false; 6];
+    let until = Instant::now() + 8 * MIN_PRESS;
+    while Instant::now() < until {
+        let m = t.take_mouse();
+        assert!(!m.down && m.wheel == 0);
+        for i in 0..6 {
+            if m.keys[i] && !was[i] {
+                presses.push(MENU_KEYS[i].0);
+            }
+        }
+        was = m.keys;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(presses, [MenuKey::Right, MenuKey::Right]);
+    // A shorter one back: the last one's half step is gone.
+    t.finger_down(1, x3, y3);
+    let (x4, y4) = at(&t, pos2(400.0 + 1.4 * SWIPE_STEP, 204.0));
+    t.finger_motion(1, x4, y4);
+    t.finger_up(1);
+    let m = t.take_mouse();
+    assert!(m.keys[1] && !m.keys[2], "{:?}", m.keys);
+    // On the map, a drag moves the map: the mouse held, the pointer along.
+    t.set_context(PlayerContext { menu: true, cursor: true, map: true, ..context(Activity::OnFoot) });
+    t.finger_down(1, x, y);
+    let (x2, y2) = at(&t, pos2(460.0, 240.0));
+    t.finger_motion(1, x2, y2);
+    std::thread::sleep(MIN_PRESS);
+    let m = t.take_mouse();
+    assert!(m.down && (m.at.unwrap().x - x2).abs() < 1e-6 && m.wheel == 0);
+    t.finger_up(1);
+    assert!(!t.take_mouse().down);
+    // Back alone stays.
+    assert_eq!(t.occupied().len(), 1);
+}
+
+#[test]
+fn with_direct_touch_a_scripts_cursor_menu_drops_the_pad() {
+    let mut t = phone();
+    t.direct = true;
+    // A shop's menu (the player's controls taken) with its cursor: no
+    // layout, Back alone; a finger is its mouse.
+    t.set_context(PlayerContext { scripted: true, cursor: true, ..context(Activity::OnFoot) });
+    assert!(t.buttons().is_empty() && t.occupied().len() == 1);
+    let (x, y) = at(&t, pos2(150.0, 120.0));
+    t.finger_down(1, x, y);
+    t.finger_up(1);
+    std::thread::sleep(CLICK_DELAY);
+    assert!(t.take_mouse().down && t.gamepad().buttons == 0);
+    // Without its cursor (a scene, not a menu for the mouse): the D-pad.
+    t.set_context(PlayerContext { scripted: true, ..context(Activity::OnFoot) });
+    assert!(t.is(SCRIPTED));
+    // The interaction menu over play: the stick and buttons stay, a finger
+    // elsewhere is the menu's mouse, not the camera.
+    t.set_context(PlayerContext { cursor: true, ..context(Activity::OnFoot) });
+    assert!(t.on_foot());
+    let (sx, sy) = at(&t, t.pos(MOVE_REST));
+    t.finger_down(2, sx, sy);
+    let (sx, sy) = at(&t, t.pos(MOVE_REST) + vec2(30.0, 0.0));
+    t.finger_motion(2, sx, sy);
+    assert!(t.gamepad().left[0] > 0.3, "the stick walks");
+    let (x, y) = at(&t, pos2(150.0, 80.0));
+    t.finger_down(1, x, y);
+    t.finger_up(1);
+    std::thread::sleep(CLICK_DELAY);
+    let m = t.take_mouse();
+    assert!(m.down && (m.at.unwrap().x - x).abs() < 1e-6);
+    assert_eq!(t.take_look(), (0, 0));
+    // Without direct touch, the same menu is the D-pad's.
+    t.direct = false;
+    t.set_context(PlayerContext { scripted: true, cursor: true, ..context(Activity::OnFoot) });
+    assert!(t.is(SCRIPTED));
 }
 
 #[test]

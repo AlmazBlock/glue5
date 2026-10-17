@@ -909,6 +909,8 @@ mod tests {
                             scripted: false,
                             character: Character::Other,
                             gun: false,
+                            cursor: false,
+                            map: false,
                         };
                         let mut touch = Touch::new();
                         touch.layout(screen, safe, scale);

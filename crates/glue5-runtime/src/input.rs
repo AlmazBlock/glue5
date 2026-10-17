@@ -219,6 +219,7 @@ pub(crate) unsafe extern "C" fn text_box_close_hook(env: *mut Env, this: u64) {
 /// pad's index, or -4 for keyboard and mouse. It picks the prompts' icons,
 /// aim assist, the menus' behaviour.
 const LAST_DEVICE: u64 = 24627136;
+const KEYBOARD_MOUSE: i32 = -4;
 /// A task's ped, a ped's position.
 const TASK_PED: u64 = 16;
 const PED_POSITION: u64 = 112;
@@ -232,6 +233,13 @@ const SCAN_EVERY: u32 = 6;
 const FRESH: Duration = Duration::from_millis(250);
 
 static TOUCH_PLAY: AtomicBool = AtomicBool::new(false);
+/// Direct touch (experimental): the game's menus see keyboard and mouse, as
+/// on a computer, so that those made for the mouse take fingers as one.
+static DIRECT: AtomicBool = AtomicBool::new(false);
+/// When a script last showed its menu's cursor.
+static CURSOR_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// The pause menu shows its map.
+static MAP: AtomicBool = AtomicBool::new(false);
 static SIGNALS: Mutex<Signals> = Mutex::new(Signals {
     on_foot: None,
     in_vehicle: None,
@@ -244,6 +252,8 @@ static VEHICLE_NEAR: AtomicBool = AtomicBool::new(false);
 static SCAN_FRAME: AtomicU32 = AtomicU32::new(0);
 static PHONE_OUT: AtomicBool = AtomicBool::new(false);
 static PAUSE_MENU: AtomicBool = AtomicBool::new(false);
+/// The pause menu's frontend is up, with a script's menu in it or not.
+static FRONTEND: AtomicBool = AtomicBool::new(false);
 static SCRIPTED: AtomicBool = AtomicBool::new(false);
 static CHARACTER: AtomicU32 = AtomicU32::new(Character::Other as u32);
 static GUN: AtomicBool = AtomicBool::new(false);
@@ -323,6 +333,12 @@ struct Signals {
 /// pause menu (where they act as a mouse).
 pub fn set_touch_play(on: bool) {
     TOUCH_PLAY.store(on, Ordering::Relaxed);
+}
+
+/// Direct touch (experimental), during touch play: menus see keyboard and
+/// mouse, and say when they take the mouse ([`PlayerContext::cursor`]).
+pub fn set_direct_touch(on: bool) {
+    DIRECT.store(on, Ordering::Relaxed);
 }
 
 /// The pause menu's Targeting Mode (`PREF_TARGET_CONFIG`, in its array of
@@ -410,6 +426,11 @@ pub struct PlayerContext {
     pub character: Character,
     /// The player holds a gun: B reloads (else it strikes).
     pub gun: bool,
+    /// Direct touch: a menu takes the mouse (the pause menu's, or a
+    /// script's that shows its cursor).
+    pub cursor: bool,
+    /// The pause menu shows its map.
+    pub map: bool,
 }
 
 /// The story's characters, or anyone else (GTA Online's).
@@ -474,7 +495,35 @@ pub fn player_context() -> PlayerContext {
             _ => Character::Other,
         },
         gun: GUN.load(Ordering::Relaxed),
+        cursor: DIRECT.load(Ordering::Relaxed)
+            && (FRONTEND.load(Ordering::Relaxed) || fresh(*CURSOR_AT.lock().unwrap())),
+        map: MAP.load(Ordering::Relaxed),
     }
+}
+
+/// When the pause menu last went a level deeper (into a column or a list).
+static DEEPER_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// When the pause menu last went a level deeper: a click there that went
+/// into a column picks nothing yet (the mouse's hover picks in the column
+/// it is in).
+pub fn menu_went_deeper() -> Option<Instant> {
+    *DEEPER_AT.lock().unwrap()
+}
+
+/// Hook for `CPauseMenu::MENU_SHIFT_DEPTH`: its direction is 1 deeper, -1
+/// back.
+pub(crate) unsafe extern "C" fn menu_shift_depth(env: *mut Env, dir: u32, a: u32, b: u32) {
+    unsafe { orig::menu_shift_depth(env, dir, a, b) };
+    if dir == 1 {
+        *DEEPER_AT.lock().unwrap() = Some(Instant::now());
+    }
+}
+
+/// Hook for `SET_MOUSE_CURSOR_THIS_FRAME`: a script's menu takes the mouse.
+pub(crate) unsafe extern "C" fn set_mouse_cursor_this_frame(env: *mut Env, info: u64) {
+    unsafe { orig::set_mouse_cursor_this_frame(env, info) };
+    *CURSOR_AT.lock().unwrap() = Some(Instant::now());
 }
 
 /// Hook for `CControl::Update`: during touch play out of the pause menu, the
@@ -491,11 +540,21 @@ pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     // character creator) or over it: it took the player's controls, or
     // shows its own buttons.
     let frontend = unsafe { orig::pause_menu_is_active(env, 0) } != 0;
-    let menu = frontend && off & OFF_BY_SCRIPT == 0 && !crate::prompts::script_bar_shown(env);
+    let bar = crate::prompts::script_bar_shown(env);
+    let menu = frontend && off & OFF_BY_SCRIPT == 0 && !bar;
     PAUSE_MENU.store(menu, Ordering::Relaxed);
+    FRONTEND.store(frontend, Ordering::Relaxed);
+    MAP.store(frontend && unsafe { orig::pause_menu_in_map(env) } != 0, Ordering::Relaxed);
+    let scripted = off & !OFF_BY_PAUSE_MENU != 0;
     let touch_play = TOUCH_PLAY.load(Ordering::Relaxed) && !menu;
     if touch_play {
-        mem.set_i32(LAST_DEVICE, 0);
+        // Direct touch: a script's menu or scene (its buttons' bar, the
+        // player's controls taken), the pause menu, a cursor shown: as with
+        // keyboard and mouse, so that the menus made for the mouse show
+        // their cursor. The touch controls' pad works there too.
+        let fresh = |t: Option<Instant>| t.is_some_and(|t| t.elapsed() < FRESH);
+        let mouse = DIRECT.load(Ordering::Relaxed) && (frontend || bar || scripted || fresh(*CURSOR_AT.lock().unwrap()));
+        mem.set_i32(LAST_DEVICE, if mouse { KEYBOARD_MOUSE } else { 0 });
     }
     update_targeting(mem, touch_play);
     update_aim_locked(env, mem);
@@ -505,7 +564,7 @@ pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     PHONE_OUT.store((byte(PHONE_CREATED) || byte(PHONE_CAMERA)) && !byte(PHONE_GOING), Ordering::Relaxed);
     let f = |at: u64| f32::from_bits(mem.u32(at));
     *PHONE_AT.lock().unwrap() = [f(PHONE_POSITION), f(PHONE_POSITION + 4), f(PHONE_POSITION + 8)];
-    SCRIPTED.store(off & !OFF_BY_PAUSE_MENU != 0, Ordering::Relaxed);
+    SCRIPTED.store(scripted, Ordering::Relaxed);
     let model = if ped != 0 { mem.u64(ped + PED_ARCHETYPE) } else { 0 };
     let character = match if model != 0 { mem.u32(model + ARCHETYPE_HASH) } else { 0 } {
         MICHAEL => Character::Michael,
@@ -744,6 +803,8 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
     hooks.text_box_open = Some(text_box_open_hook);
     hooks.text_box_close = Some(text_box_close_hook);
     hooks.control_update = Some(control_update);
+    hooks.set_mouse_cursor_this_frame = Some(set_mouse_cursor_this_frame);
+    hooks.menu_shift_depth = Some(menu_shift_depth);
     hooks.player_on_foot = Some(player_on_foot);
     hooks.drive_automobile = Some(drive_automobile);
     hooks.drive_bike = Some(drive_bike);

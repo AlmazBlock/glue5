@@ -44,4 +44,12 @@
     // Whether the pause menu (the map, the store, ...) is open: called once
     // a frame for the touch controls, which then act as a mouse.
     ("pause_menu_is_active", "CPauseMenu::IsActive(PM_ActiveFlags)"),
+    // The pause menu goes a level deeper or back (a column, a list): a
+    // direct touch tap that only went in clicks again.
+    ("menu_shift_depth", "CPauseMenu::MENU_SHIFT_DEPTH(eMenuceptionDir, bool, bool)"),
+    // Called: the pause menu shows its map (direct touch drags it).
+    ("pause_menu_in_map", "CPauseMenu::IsInMapScreen()"),
+    // A script's menu shows the mouse's cursor this frame (it does for
+    // keyboard and mouse only): direct touch clicks in it.
+    ("set_mouse_cursor_this_frame", "hud_commands::SetupScriptCommands()::scrWrapped_SET_MOUSE_CURSOR_THIS_FRAME::Call(rage::scrThread::Info&)"),
 ]
