@@ -82,9 +82,15 @@ const BOOT_SET: &str = "bootset.json";
 /// that much of the download); as soon as it stops, at once.
 const SAVE_BUSY: Duration = Duration::from_secs(10);
 const SAVE_BYTES: u64 = 256 << 20;
-/// No data for this long with requests in flight, or no room for requests
-/// for this long: the connection is dead.
-const SILENCE: Duration = Duration::from_secs(20);
+/// Requests in flight and no data for this long, counted from the last data
+/// or from when they were asked after none was in flight (the connection
+/// may have been quiet for long before): the connection is dead. So is one
+/// that takes no request for this long.
+#[cfg(not(test))]
+pub(crate) const SILENCE: Duration = Duration::from_secs(20);
+/// Tests wait for it.
+#[cfg(test)]
+pub(crate) const SILENCE: Duration = Duration::from_secs(4);
 /// A read whose blocks were asked for less than this before the engine came
 /// to wait for them was not announced in time (the engine often announces a
 /// read as it makes it): it costs a round trip as if not announced at all.
@@ -181,6 +187,8 @@ struct Inflight {
     reqs: HashMap<u32, Req>,
     /// Per file: first block -> request (requests of a file never overlap).
     by_file: HashMap<u32, BTreeMap<u64, u32>>,
+    /// Since when requests are in flight (none: none is).
+    since: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -207,7 +215,6 @@ struct Stats {
     cold: AtomicU64,
     hints: AtomicU64,
     waiting: AtomicU32,
-    last_data: Mutex<Option<Instant>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -225,6 +232,9 @@ impl Inflight {
     fn add(&mut self, req: Req) -> u32 {
         self.next = self.next.wrapping_add(1).max(1);
         let id = self.next;
+        if self.reqs.is_empty() {
+            self.since = Some(Instant::now());
+        }
         self.reqs.insert(id, req);
         self.by_file.entry(req.file).or_default().insert(req.first, id);
         id
@@ -232,6 +242,9 @@ impl Inflight {
 
     fn remove(&mut self, id: u32) -> Option<Req> {
         let req = self.reqs.remove(&id)?;
+        if self.reqs.is_empty() {
+            self.since = None;
+        }
         if let Some(m) = self.by_file.get_mut(&req.file) {
             m.remove(&req.first);
             if m.is_empty() {
@@ -669,7 +682,6 @@ impl Client {
             Some(_) => {}
         }
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        *self.stats.last_data.lock().unwrap() = Some(Instant::now());
         {
             // What was in flight on the last connection goes first, in the
             // order it was asked (the server queues it so, and reads its
@@ -824,14 +836,14 @@ impl Client {
         let mut since_check = 0u64;
         // Requests with a chunk that came damaged.
         let mut corrupt: Vec<u32> = Vec::new();
+        let mut last_data = Instant::now();
         loop {
             if self.stop.load(Ordering::Acquire) {
                 return Ok(());
             }
             let Some(h) = next_header(&mut reader).context("connection lost")? else {
-                let busy = !self.inflight.lock().unwrap().reqs.is_empty();
-                let last = *self.stats.last_data.lock().unwrap();
-                if busy && last.is_some_and(|t| t.elapsed() > SILENCE) {
+                let since = self.inflight.lock().unwrap().since;
+                if since.is_some_and(|t| t.max(last_data).elapsed() > SILENCE) {
                     bail!("the server stopped answering");
                 }
                 continue;
@@ -842,7 +854,7 @@ impl Client {
                         bail!("a chunk of {} bytes", h.len);
                     }
                     read_exact_retrying(&mut reader, &mut buf[..h.len as usize])?;
-                    *self.stats.last_data.lock().unwrap() = Some(Instant::now());
+                    last_data = Instant::now();
                     self.stats.received.fetch_add(h.len as u64, Ordering::Relaxed);
                     if crc(&buf[..h.len as usize]) != h.crc {
                         // Not kept: the request is asked again when it ends.

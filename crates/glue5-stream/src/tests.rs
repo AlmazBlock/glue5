@@ -117,13 +117,19 @@ impl Drop for Proxy {
 /// at a time).
 fn pump(mut from: TcpStream, mut to: TcpStream, pass: Arc<AtomicBool>, done: Arc<AtomicBool>, tamper: Option<Tamper>) {
     std::thread::spawn(move || {
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
+        let held = || {
             while !pass.load(Ordering::Acquire) {
                 if done.load(Ordering::Acquire) {
-                    return;
+                    return true;
                 }
                 std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        };
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            if held() {
+                return;
             }
             let n = match &tamper {
                 Some(tamper) => {
@@ -141,7 +147,8 @@ fn pump(mut from: TcpStream, mut to: TcpStream, pass: Arc<AtomicBool>, done: Arc
                     Ok(n) => n,
                 },
             };
-            if to.write_all(&buf[..n]).is_err() {
+            // Also what came while waiting to read.
+            if held() || to.write_all(&buf[..n]).is_err() {
                 break;
             }
         }
@@ -505,6 +512,41 @@ fn a_stuck_server_holds_nothing_up() {
     assert!(promptly(move || assert!(c.status().connected)), "status() waits for a stuck write");
     let c = client.clone();
     assert!(promptly(move || c.stop()), "stop() waits for a stuck write");
+    drop(proxy);
+    drop(server);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A connection quiet for long, then slow to answer, is not taken for
+/// dead: the silence counts from the request.
+#[test]
+fn a_quiet_connection_is_not_taken_for_dead() {
+    let dir = temp("quiet");
+    let data = noise(1 << 20, 19);
+    fs::create_dir_all(dir.join("data")).unwrap();
+    fs::write(dir.join("data/a.rpf"), &data).unwrap();
+    fs::create_dir_all(dir.join(format!("b/{BUILD}/shaders"))).unwrap();
+    fs::write(dir.join(format!("b/{BUILD}/shaders/index.json")), b"{}").unwrap();
+    let server = serve(&dir, &dir.join("packs"), "127.0.0.1:0".parse().unwrap());
+    let proxy = Proxy::start(server.addr(), None);
+    let root = temp("quiet-copy");
+    let client = Client::start(Options { server: proxy.addr.to_string(), root: root.clone(), build: BUILD.into(), low_memory: false });
+    wait_ready(&client);
+    let id = client.find("data/a.rpf").unwrap();
+    std::thread::sleep(crate::client::SILENCE + Duration::from_millis(500));
+    // The answer takes longer than the client's read timeout (2 s).
+    proxy.down.store(false, Ordering::Release);
+    let c = client.clone();
+    let read = std::thread::spawn(move || {
+        let mut buf = vec![0u8; 4096];
+        c.read(id, 0, &mut buf).map(|n| buf[..n].to_vec())
+    });
+    std::thread::sleep(Duration::from_millis(2500));
+    proxy.down.store(true, Ordering::Release);
+    assert_eq!(read.join().unwrap().as_deref(), Some(&data[..4096]));
+    assert_eq!(proxy.accepted.load(Ordering::Acquire), 1, "the connection was dropped");
+    client.stop();
     drop(proxy);
     drop(server);
     let _ = fs::remove_dir_all(&dir);
