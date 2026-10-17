@@ -365,6 +365,15 @@ struct Meetings {
     tags: HashMap<Tag, Key>,
 }
 
+/// A friend followed into its session: asked when, and since when the
+/// game looks for a session, which the wait for the friend counts from
+/// (the game may take minutes to get there: preparing, loading).
+struct Follow {
+    key: Key,
+    asked: Instant,
+    since: Option<Instant>,
+}
+
 /// A player met in a lobby.
 struct Recent {
     key: Key,
@@ -456,8 +465,8 @@ pub(crate) struct Service {
     swept: Option<Instant>,
     /// The game's events from friends, for the game thread.
     events: VecDeque<GameEvent>,
-    /// A friend to join in its session (game.rs), since when.
-    follow: Option<(Key, Instant)>,
+    /// A friend to join in its session (game.rs).
+    follow: Option<Follow>,
     /// Friends whose sessions the player chose to join, for the game (gamer
     /// ids).
     joins: VecDeque<u64>,
@@ -991,6 +1000,32 @@ impl Service {
         let mut keys = self.met.iter().filter(|(.., g)| *g == id && id != 0).map(|(k, ..)| *k);
         let key = keys.next()?;
         (keys.all(|k| k == key) && self.recent.iter().any(|r| r.key == key)).then_some(key)
+    }
+
+    /// The friend (gamer id) to join, while it is waited for.
+    fn following(&mut self, now: Instant) -> Option<u64> {
+        let f = self.follow.as_ref()?;
+        let over = match f.since {
+            Some(t) => now - t > FOLLOW,
+            None => now - f.asked > FOLLOW_START,
+        };
+        let id = self.friends.get(&f.key).map(|f| f.id);
+        if over || id.is_none() {
+            self.follow = None;
+            return None;
+        }
+        id.filter(|id| *id != 0)
+    }
+
+    /// The game looks for a session (it hosts one or looks for one, the
+    /// first time since the friend was followed): the friend is waited for
+    /// from now.
+    fn looking_for_session(&mut self, now: Instant) {
+        if let Some(f) = &mut self.follow
+            && f.since.is_none()
+        {
+            f.since = Some(now);
+        }
     }
 
     /// Requests to answer, and invites from friends connected.
@@ -1954,7 +1989,7 @@ pub fn take_notices() -> Vec<Notice> {
 /// it plays in, once this player's game is in GTA Online (game.rs).
 pub fn follow(key: &str) {
     let Some(key) = crypto::unhex::<32>(key) else { return };
-    with(|s, _| s.follow = Some((key, Instant::now())));
+    with(|s, _| s.follow = Some(Follow { key, asked: Instant::now(), since: None }));
 }
 
 /// Invites a friend (by its key) to this player's session in GTA Online:
@@ -1979,8 +2014,10 @@ pub fn remove(key: &str) {
 
 // ---- for the game (game.rs) -------------------------------------------------------
 
-/// How long a friend is waited for to be joined.
+/// How long a friend is waited for to be joined, from when the game looks
+/// for a session; how long the game may take to get there.
 const FOLLOW: Duration = Duration::from_secs(180);
+const FOLLOW_START: Duration = Duration::from_secs(15 * 60);
 
 /// A friend as the game lists it.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -2078,15 +2115,7 @@ pub(crate) fn ask_gamer(id: u64) -> bool {
 
 /// The friend (gamer id) to join, while it is waited for.
 pub(crate) fn following() -> Option<u64> {
-    with(|s, _| {
-        let (key, since) = s.follow?;
-        if since.elapsed() > FOLLOW || !s.friends.contains_key(&key) {
-            s.follow = None;
-            return None;
-        }
-        Some(s.friends[&key].id).filter(|id| *id != 0)
-    })
-    .flatten()
+    with(|s, _| s.following(Instant::now())).flatten()
 }
 
 /// Invites the friends among `ids` (gamer ids) to this player's session:
@@ -2136,6 +2165,7 @@ pub(crate) fn take_joins() -> Vec<u64> {
 /// How this player's session is joined (the game's choice of session).
 pub(crate) fn set_session_kind(kind: SessionKind) {
     with(|s, _| {
+        s.looking_for_session(Instant::now());
         s.joined = None;
         s.joining = None;
         s.finding = false;

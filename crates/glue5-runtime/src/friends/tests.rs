@@ -552,3 +552,21 @@ fn asking_each_other_at_once_leaves_no_request() {
     assert!(a.s.requests.is_empty() && a.s.asked.is_empty());
     assert!(b.s.requests.is_empty() && b.s.asked.is_empty());
 }
+
+#[test]
+fn a_friend_followed_is_waited_for_from_the_game_s_search() {
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    befriend(&mut a, &mut b, true, &mut now);
+    a.s.follow = Some(Follow { key: b.key(), asked: now, since: None });
+    // The game takes its time to start (preparing, loading): still followed.
+    assert_eq!(a.s.following(now + FOLLOW * 2), Some(2000));
+    // It looks for a session: the friend is waited for from then.
+    a.s.looking_for_session(now + FOLLOW * 2);
+    a.s.looking_for_session(now + FOLLOW * 3);
+    assert_eq!(a.s.following(now + FOLLOW * 2 + FOLLOW / 2), Some(2000));
+    assert_eq!(a.s.following(now + FOLLOW * 3 + Duration::from_secs(1)), None);
+    // A game that never looks for one: not followed for ever.
+    a.s.follow = Some(Follow { key: b.key(), asked: now, since: None });
+    assert_eq!(a.s.following(now + FOLLOW_START + Duration::from_secs(1)), None);
+}
