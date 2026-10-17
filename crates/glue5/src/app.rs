@@ -1046,7 +1046,8 @@ impl App {
         } else {
             self.stream_waiting.get_or_insert_with(Instant::now);
         }
-        if !stream.connected {
+        // A copy of the whole game never waits for the server.
+        if !stream.connected && !stream.complete {
             Some(ui::StreamAlert::Offline)
         } else if self.stream_waiting.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
             Some(ui::StreamAlert::Waiting)
