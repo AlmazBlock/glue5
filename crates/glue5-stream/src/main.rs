@@ -2,6 +2,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use glue5_stream::server::{self, Step};
@@ -72,11 +74,42 @@ fn run() -> Result<()> {
     for ip in glue5_stream::lan_addresses() {
         log::info!("on this network: {ip}:{port}");
     }
-    // Devices on the network find it (it announces itself).
-    let _advert = glue5_stream::discovery::advertise(port);
-    loop {
-        std::thread::park();
+    // Devices on the network find it (it announces itself), until Ctrl-C
+    // or a request to stop: then it says goodbye, and they forget it.
+    let advert = glue5_stream::discovery::advertise(port);
+    on_stop_requests();
+    while !STOP.load(Ordering::Acquire) {
+        std::thread::park_timeout(Duration::from_millis(200));
     }
+    drop(advert);
+    drop(server);
+    log::info!("stopped");
+    Ok(())
+}
+
+/// Ctrl-C, SIGTERM (or the console closing on Windows) asked to stop.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+fn on_stop_requests() {
+    extern "C" fn stop(_: libc::c_int) {
+        STOP.store(true, Ordering::Release);
+    }
+    unsafe {
+        libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);
+    }
+}
+
+#[cfg(windows)]
+fn on_stop_requests() {
+    unsafe extern "system" fn stop(_: u32) -> windows_sys::core::BOOL {
+        STOP.store(true, Ordering::Release);
+        // Handled: the main thread ends the process (closing the console
+        // leaves it a few seconds for that).
+        1
+    }
+    unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(stop), 1) };
 }
 
 /// The one build in `<game>/b/`.
