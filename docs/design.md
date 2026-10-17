@@ -273,12 +273,21 @@ on Windows (files marked sparse, which they are not by default there),
 the external files folder on Android. The copy carries a marker, so that
 it is never taken for a game folder.
 
-**Finding a server** (`discovery.rs`): Bonjour, `_glue5._tcp`. Apple
-systems announce and browse through the system's responder (no multicast
-entitlement on iOS and tvOS; the service is in `NSBonjourServices`).
-Elsewhere the app asks once, by mDNS from an ordinary port, and responders
-answer by unicast (no Android multicast lock). Servers on Linux and
-Windows are not announced: their address is typed. The Servers page
+**Finding a server** (`discovery.rs`): Bonjour, `_glue5._tcp`. A server
+announces itself on every system with a responder of its own (port 5353,
+shared with the system's: mDNSResponder, Avahi, Windows', whose APIs differ
+on each): on each network with that network's address, answering by
+multicast, or by unicast to simple resolvers and unicast-response queries,
+saying that its host has no IPv6 address (NSEC: a resolver does not wait
+for one), and saying goodbye when it stops. Its host is
+`glue5-<computer>.local`, its name the computer's (with the port, if not
+47100: two servers on one computer); no probing for unique names. A Mac's
+own browser and an iPhone find it, as Avahi does on Linux (in a
+container); not tried on Windows. Apple systems browse through the
+system's responder (no multicast entitlement on iOS and tvOS; the service
+is in `NSBonjourServices`); elsewhere the app asks once, by mDNS from an
+ordinary port, and responders answer by unicast (no Android multicast
+lock). The Servers page
 searches every five seconds while it is open and asks each server found
 for its greeting (`check`): whether it serves this game build, how long
 connecting took, and what its name stands for, so that a server typed as
