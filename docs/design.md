@@ -249,10 +249,19 @@ either way.)
 **Before the game:** the catalog (every file, size and time) and the two
 packs, ~10 MB, asked together, which bring every small file and the
 shaders whole: the pipelines compile from them as from a folder (Play's
-preparation is unchanged). Then, at the lowest priority but one, the boot set (the
-whale5 build's `bootset.json`: the ~550 MB of archive headers and start-up
-data every start reads), while the start page shows and the shaders
-compile; a later start finds it there.
+preparation is unchanged). Then, at the lowest priority but one, the boot
+set (the whale5 build's `bootset.json`: the ~550 MB of archive headers and
+start-up data every start reads), while the start page shows and the
+shaders compile; a later start finds it there. If the game starts before
+it is all here (a quick Play over the Internet: 550 MB take 44 s at 100
+Mbit/s), the engine reads it in an order of its own, not the boot set's
+(file after file, by path): when it waits for a part still in the boot
+set's queue, the 8 MB of the boot set that follow come next, as
+read-ahead. Through the simulated link, three cold starts each way: the
+engine's waits for the boot set while the world loads went from 35 to 26
+s, and the world showed after 192 s instead of 195. Little more is to be
+had in order: the link is full from the start to the world, which needs
+~2.3 GB (the benchmark reads 2.2 GB before it shows, from a folder).
 
 **The copy** (`cache.rs`) mirrors the folder's layout, sparse, with a
 bitmap of the 4 KB blocks each file holds (640 KB for the whole game). Its
