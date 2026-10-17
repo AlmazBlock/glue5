@@ -71,6 +71,9 @@ const EVENTS: &[&str] = &["ginv", "ginvc", "grep", "finv"];
 const PUBLISH: Duration = Duration::from_secs(2);
 const SETTLED: Duration = Duration::from_secs(10);
 const JOIN_AGAIN: Duration = Duration::from_secs(30);
+/// How often the friends list is made again with nothing changed (an
+/// invite runs out by itself).
+const LIST_AGAIN: Duration = Duration::from_secs(10);
 
 /// The browser build has no friends: its friends menus (the pause menu's
 /// FRIENDS tab, the corona's invite list) ask a virtual method whether
@@ -102,7 +105,14 @@ struct State {
     /// The list as last loaded, and when activation was last asked.
     list: Option<u64>,
     activated: Option<Instant>,
+    /// The list as last made (its hash), when, and the friends' generation
+    /// then (`super::generation`).
+    current: u64,
+    listed: Option<Instant>,
+    generation: u64,
     published: Option<Instant>,
+    /// When the friend followed was last looked at.
+    followed: Option<Instant>,
     /// The game session's id, since when.
     session: Option<(u64, Instant)>,
     /// When the friend followed was last joined.
@@ -113,7 +123,11 @@ static STATE: Mutex<State> = Mutex::new(State {
     menus_patched: false,
     list: None,
     activated: None,
+    current: 0,
+    listed: None,
+    generation: 0,
     published: None,
+    followed: None,
     session: None,
     joined: None,
 });
@@ -149,9 +163,16 @@ pub(crate) unsafe fn update(env: *mut Env) {
         state.menus_patched = true;
         patch_menus(m);
     }
-    // The friends list, loaded again as it changes.
+    // The friends list, loaded again as it changes (made again when the
+    // friends change, and now and then).
     if m.u8(FRIENDS_MANAGER) & 1 != 0 {
-        let list = hash(&super::game_friends());
+        let generation = super::generation();
+        if state.generation != generation || state.listed.is_none_or(|t| now - t > LIST_AGAIN) {
+            state.generation = generation;
+            state.listed = Some(now);
+            state.current = hash(&super::game_friends());
+        }
+        let list = state.current;
         let since = |t: Option<Instant>, d: u64| t.is_none_or(|t| now - t > Duration::from_secs(d));
         match m.u32(FRIENDS_STATE) {
             0 | 3 if since(state.activated, 5) => {
@@ -183,9 +204,13 @@ pub(crate) unsafe fn update(env: *mut Env) {
         }
         super::set_session(session.map(|(_, t)| t));
     }
-    // A friend being followed: into its session.
-    if let Some(id) = super::following() {
-        unsafe { follow(env, &mut state, id, now) };
+    // A friend being followed: into its session (as often as the session
+    // is told).
+    if state.followed.is_none_or(|t| now - t > PUBLISH) {
+        state.followed = Some(now);
+        if let Some(id) = super::following() {
+            unsafe { follow(env, &mut state, id, now) };
+        }
     }
     // Friends' sessions the player chose to join: the game asks whether to
     // leave this one.

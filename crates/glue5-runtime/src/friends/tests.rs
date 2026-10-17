@@ -282,6 +282,7 @@ fn invites_come_as_notices_once() {
     }
     // The second one, so soon: not again.
     assert_eq!(b.s.notices.drain(..).collect::<Vec<_>>(), [Notice::Invite("Ann".into())]);
+    assert_eq!(b.s.pending(), 1);
     let invited = b.s.friends[&a.key()].invited.as_ref().unwrap();
     assert_eq!((invited.lobby.as_deref(), invited.session.as_deref()), (Some("LOBBY"), Some("SESSION")));
     // Not a friend's id: nothing sent.
@@ -306,6 +307,7 @@ fn players_met_ask_each_other() {
     let from = a.addr;
     run(&mut [&mut a, &mut c], out, from, &mut now, 4, &keep);
     assert_eq!(c.s.notices.drain(..).collect::<Vec<_>>(), [Notice::Request("Ann".into())]);
+    assert_eq!(c.s.pending(), 1);
     let mut out = Out::default();
     (a.s.summarized, c.s.summarized) = (true, true);
     c.s.answer(&a.key(), true, now, &mut out);

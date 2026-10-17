@@ -993,6 +993,18 @@ impl Service {
         (keys.all(|k| k == key) && self.recent.iter().any(|r| r.key == key)).then_some(key)
     }
 
+    /// Requests to answer, and invites from friends connected.
+    fn pending(&self) -> usize {
+        let requests = self.requests.values().filter(|r| r.asked).count();
+        let invites = self
+            .friends
+            .values()
+            .filter(|f| f.transport.is_some() && f.presence.is_some())
+            .filter(|f| f.invited.as_ref().is_some_and(|i| i.at.elapsed() < INVITED))
+            .count();
+        requests + invites
+    }
+
     /// The tags this player looks for: friends not connected, codes asked.
     fn wanted_tags(&mut self, unix: u64) -> Vec<Tag> {
         if !self.active() {
@@ -1755,6 +1767,12 @@ pub struct Snapshot {
 /// A number that changes with what `snapshot` shows.
 pub fn generation() -> u64 {
     with(|s, _| s.generation).unwrap_or(0)
+}
+
+/// How many requests and invites wait for the player (the page's counts),
+/// without `snapshot`'s work.
+pub fn pending() -> usize {
+    with(|s, _| s.pending()).unwrap_or(0)
 }
 
 pub fn snapshot() -> Snapshot {

@@ -578,10 +578,7 @@ impl App {
                 mode: self.mode,
                 benchmark: self.benchmark.as_ref(),
                 online: self.game.is_some() && self.mode == Mode::Online,
-                friend_requests: {
-                    let friends = glue5_runtime::friends::snapshot();
-                    friends.requests.len() + friends.friends.iter().filter(|f| f.invited).count()
-                },
+                friend_requests: glue5_runtime::friends::pending(),
                 source: self.settings.source,
                 stream: stream.as_ref().map(|(server, status)| (*server, status)),
                 sharing: self.sharing.as_ref().map(crate::sharing::Sharing::state),
