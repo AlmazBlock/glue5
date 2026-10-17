@@ -1121,7 +1121,9 @@ impl App {
     }
 
     /// Looks for the game: the folder named on the command line or by
-    /// `GLUE5_GAME_DIR`, the last one used, the platform's default places.
+    /// `GLUE5_GAME_DIR`, the last one used, the platform's default places,
+    /// the whole game downloaded from a server (on desktop in the user
+    /// directory, not among the default places).
     fn find_game(&mut self, explicit: Option<&Path>) {
         self.game_dir = None;
         self.problem = None;
@@ -1134,7 +1136,9 @@ impl App {
             }
             self.problem = Some(format!("{} is not a game folder.", dir.display()));
         }
-        let candidates = self.settings.game_dir.iter().cloned().chain(paths::default_game_dirs());
+        let candidates = (self.settings.game_dir.iter().cloned())
+            .chain(paths::default_game_dirs())
+            .chain(paths::download_dir(&self.user_dir));
         if let Some(dir) = candidates.filter(|d| is_game_dir(d)).find_map(|d| paths::canonical(&d).ok()) {
             self.settings.game_dir = Some(dir.clone());
             self.game_dir = Some(dir);
