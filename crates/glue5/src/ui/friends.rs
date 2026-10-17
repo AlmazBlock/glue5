@@ -6,7 +6,7 @@ use glue5_runtime::friends::{self, AddError, FriendInfo, Notice, Playing, Sessio
 
 use super::pages::sheet;
 use super::widgets::{Control, action_button, action_buttons, focus, segmented, setting, text_field};
-use super::{Action, WARN, theme};
+use super::{Action, TextKind, WARN, theme};
 use egui::{Color32, RichText, Stroke};
 
 /// The page's tabs, Social Club's: Friends, Friend Requests, Game Invites,
@@ -335,7 +335,7 @@ fn ask(ui: &mut egui::Ui, page: &mut FriendsPage) {
         let field = ui.available_width() - button - ui.spacing().item_spacing.x;
         let typed = ui
             .allocate_ui(egui::vec2(field, 44.0 * scale), |ui| {
-                text_field(ui, "Code", &mut page.code, "A friend's code", 24)
+                text_field(ui, "Code", TextKind::Code, &mut page.code, "A friend's code", 24)
             })
             .inner;
         let enter = typed.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));

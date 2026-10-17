@@ -2,7 +2,7 @@
 use super::widgets::{
     Control, action_button, choice, close_button, focus, segmented, setting, slider, text_field, toggle,
 };
-use super::{Action, Mode, Page, SettingsTab, Status, WARN, theme};
+use super::{Action, Mode, Page, SettingsTab, Status, TextKind, WARN, theme};
 use crate::paths::{self, MOBILE, TOUCH, TV};
 use crate::settings::{
     self, Corner, OverlayDetail, PerfOverlay, RENDER_SCALES, Settings, Source, TouchAim, TouchMode, Upscaling,
@@ -361,7 +361,7 @@ fn online_card(
                         let what = "Sessions with the players online, matched automatically; invite-only, friend \
                                     and solo sessions from the game's pause menu, and your friends from ♡ Friends.";
                         ui.label(RichText::new(what).size(12.0 * scale).color(theme::MUTED));
-                        text_field(ui, "Name", &mut settings.online_name, "Player", 16);
+                        text_field(ui, "Name", TextKind::Name, &mut settings.online_name, "Player", 16);
                         ui.add_space(2.0 * scale);
                         play = play_button(ui, "PLAY").clicked();
                     });

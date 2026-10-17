@@ -165,16 +165,44 @@ pub(crate) unsafe extern "C" fn scaleform_add_param_float(env: *mut Env, value: 
 // ---- text entry ----------------------------------------------------------------
 
 static TEXT_BOX: AtomicBool = AtomicBool::new(false);
+/// The open text box's `rage::ioVirtualKeyboard::eTextType`.
+static TEXT_BOX_TYPE: AtomicU32 = AtomicU32::new(0);
 
-/// Whether the game's text box is open (it wants typed text): touch devices
-/// show the system keyboard meanwhile.
-pub fn text_box_open() -> bool {
-    TEXT_BOX.load(Ordering::Relaxed)
+/// What the game's text box takes, as it asks the platform's keyboard for it
+/// (`rage::ioVirtualKeyboard::eTextType`; the box itself keeps the
+/// characters each allows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextType {
+    Text,
+    Email,
+    Password,
+    /// Digits: the phone's keypad (cheats are numbers dialled on it).
+    Numeric,
+    Alphabet,
+    /// A player's name.
+    Gamertag,
+    /// A save's or a clip's name.
+    Filename,
 }
 
-/// Hook for `CTextInputBox::Open`.
+/// What the game's text box takes, while it is open (it wants typed text):
+/// touch devices show the system keyboard meanwhile.
+pub fn text_box() -> Option<TextType> {
+    TEXT_BOX.load(Ordering::Relaxed).then(|| match TEXT_BOX_TYPE.load(Ordering::Relaxed) {
+        1 => TextType::Email,
+        2 => TextType::Password,
+        3 => TextType::Numeric,
+        4 => TextType::Alphabet,
+        5 => TextType::Gamertag,
+        6 => TextType::Filename,
+        _ => TextType::Text,
+    })
+}
+
+/// Hook for `CTextInputBox::Open`: its parameters start with the text type.
 pub(crate) unsafe extern "C" fn text_box_open_hook(env: *mut Env, this: u64, params: u64) {
     unsafe { orig::text_box_open(env, this, params) };
+    TEXT_BOX_TYPE.store(unsafe { Mem::of(env) }.u32(params), Ordering::Relaxed);
     TEXT_BOX.store(true, Ordering::Relaxed);
 }
 
@@ -492,7 +520,7 @@ pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     let weapon = if weapons != 0 { mem.u32(weapons + WEAPON_SELECTED) } else { 0 };
     GUN.store(weapon != 0 && !no_reload.contains(&weapon), Ordering::Relaxed);
     let warning = unsafe { orig::warning_screen_active(env) } != 0;
-    let code_bar = warning || text_box_open() || frontend;
+    let code_bar = warning || text_box().is_some() || frontend;
     unsafe { crate::prompts::update(env, TOUCH_PLAY.load(Ordering::Relaxed), code_bar) };
 }
 

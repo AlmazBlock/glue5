@@ -86,6 +86,35 @@ pub enum Action {
     UseServer(String),
 }
 
+/// What a text field of the app's takes: the system keyboard follows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextKind {
+    #[default]
+    Text,
+    /// A friend code: letters and digits, in capitals.
+    Code,
+    /// A server's address or name.
+    Address,
+    /// The player's name.
+    Name,
+}
+
+/// Where the focused text field keeps its [`TextKind`] (egui's memory).
+const TEXT_KIND: &str = "text kind";
+
+/// The system clipboard's text (a paste asked for by a tap).
+fn clipboard_text() -> Option<String> {
+    unsafe {
+        let text = sdl3::sys::clipboard::SDL_GetClipboardText();
+        if text.is_null() {
+            return None;
+        }
+        let owned = std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned();
+        sdl3::sys::stdinc::SDL_free(text.cast());
+        Some(owned).filter(|t| !t.is_empty())
+    }
+}
+
 /// What the stream says over the game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamAlert {
@@ -227,6 +256,9 @@ pub struct Ui {
     controls: Vec<Rect>,
     /// The stream's sign over the game.
     chip: chip::Chip,
+    /// Where the focused text field was last drawn (the system keyboard
+    /// keeps it in view).
+    text_rect: Option<Rect>,
     /// The settings button's icon.
     gear_icon: Option<egui::TextureHandle>,
 }
@@ -279,6 +311,7 @@ impl Ui {
             toast_area: None,
             controls: Vec::new(),
             chip: Default::default(),
+            text_rect: None,
             gear_icon,
         }
     }
@@ -405,6 +438,12 @@ impl Ui {
     /// keyboard on touch screens).
     pub fn wants_text(&self) -> bool {
         self.page.is_some() && self.ctx.egui_wants_keyboard_input()
+    }
+
+    /// What the focused text field takes, and where it is (in points).
+    pub fn text_field(&self) -> Option<(TextKind, Rect)> {
+        let kind = self.ctx.data(|d| d.get_temp::<TextKind>(Id::new(TEXT_KIND))).unwrap_or_default();
+        self.text_rect.filter(|_| self.wants_text()).map(|rect| (kind, rect))
     }
 
     pub fn idle_for(&self) -> Duration {
@@ -651,6 +690,7 @@ impl Ui {
             None => {}
         }
         let mut output = ctx.end_pass();
+        self.text_rect = output.platform_output.ime.as_ref().map(|ime| ime.rect);
         for command in std::mem::take(&mut output.platform_output.commands) {
             match command {
                 egui::OutputCommand::OpenUrl(open) => {
@@ -769,6 +809,12 @@ fn points_per_window_unit(window: &Window) -> f32 {
 pub fn screen_size(window: &Window) -> Vec2 {
     let (w, h) = window.size_in_pixels();
     vec2(w as f32, h as f32) / pixels_per_point(window)
+}
+
+/// A rectangle in points, in SDL's window coordinates.
+pub fn window_rect(window: &Window, r: Rect) -> sdl3::rect::Rect {
+    let r = Rect::from_min_max(r.min / points_per_window_unit(window), r.max / points_per_window_unit(window));
+    sdl3::rect::Rect::new(r.min.x as i32, r.min.y as i32, r.width().max(1.0) as u32, r.height().max(1.0) as u32)
 }
 
 /// The part of the window clear of notches and rounded corners, in points.

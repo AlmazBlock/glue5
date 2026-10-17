@@ -157,7 +157,8 @@ pub fn run() -> Result<()> {
         sdl,
         window,
         text_input,
-        typing: false,
+        typing: None,
+        typing_rect: None,
         keyboard_away: false,
         presentation,
         #[cfg(target_os = "android")]
@@ -244,14 +245,54 @@ struct Lifecycle {
     came_back: AtomicBool,
 }
 
+/// What is being typed into: a field of the app's, or the game's text box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Typing {
+    App(ui::TextKind),
+    Game(glue5_runtime::input::TextType),
+}
+
+impl Typing {
+    /// The system keyboard for it. Codes, names and addresses are not
+    /// words: no corrections. The game's keypad is digits, but iPhones
+    /// have no Return key on theirs: there, the keyboard's numbers.
+    fn options(self) -> sdl3::keyboard::TextInputOptions {
+        use glue5_runtime::input::TextType;
+        use sdl3::keyboard::{Capitalization, TextInputOptions, TextInputType};
+        let (input_type, capitalization, autocorrect) = match self {
+            Typing::App(ui::TextKind::Text) => (TextInputType::Text, Capitalization::Sentences, true),
+            Typing::App(ui::TextKind::Code) => (TextInputType::Text, Capitalization::Letters, false),
+            Typing::App(ui::TextKind::Address) => (TextInputType::Text, Capitalization::None, false),
+            Typing::App(ui::TextKind::Name) => (TextInputType::Text, Capitalization::Words, false),
+            Typing::Game(TextType::Email) => (TextInputType::Email, Capitalization::None, false),
+            Typing::Game(TextType::Password) => (TextInputType::PasswordHidden, Capitalization::None, false),
+            Typing::Game(TextType::Numeric) if cfg!(not(target_os = "ios")) => {
+                (TextInputType::Number, Capitalization::None, false)
+            }
+            Typing::Game(TextType::Numeric | TextType::Gamertag | TextType::Filename) => {
+                (TextInputType::Text, Capitalization::None, false)
+            }
+            Typing::Game(TextType::Text | TextType::Alphabet) => (TextInputType::Text, Capitalization::Sentences, false),
+        };
+        TextInputOptions {
+            input_type: Some(input_type),
+            capitalization: Some(capitalization),
+            autocorrect: Some(autocorrect),
+            ..Default::default()
+        }
+    }
+}
+
 struct App {
     sdl: sdl3::Sdl,
     window: sdl3::video::Window,
     events: sdl3::EventPump,
     mouse: sdl3::mouse::MouseUtil,
     text_input: sdl3::keyboard::TextInputUtil,
-    /// Typed text is on: while the game's text box is open.
-    typing: bool,
+    /// Typed text is on: while the game's text box or a field of ours is
+    /// open; and where it is.
+    typing: Option<Typing>,
+    typing_rect: Option<egui::Rect>,
     /// The on-screen keyboard, which hides the touch controls, was put away
     /// with a tap above it: the game's text box takes A or B from them.
     keyboard_away: bool,
@@ -430,7 +471,7 @@ impl App {
             self.touch_input = true;
             // A tap above the on-screen keyboard puts it away (it covers the
             // touch controls, and a phone's has no key to hide it).
-            if MOBILE && self.typing && !self.ui.is_open() {
+            if MOBILE && self.typing.is_some() && !self.ui.is_open() {
                 self.keyboard_away = true;
                 return false;
             }
@@ -688,16 +729,43 @@ impl App {
         // the system's input methods, whose accent menu (a held key, macOS),
         // dead keys and IME windows would otherwise get in the way of play.
         // Keys reach the game and the UI by scancode either way.
-        let text_box = glue5_runtime::input::text_box_open();
-        self.keyboard_away &= text_box;
-        let want_typing = (text_box && !self.keyboard_away) || self.ui.wants_text();
-        if want_typing != self.typing {
-            self.typing = want_typing;
-            if want_typing {
-                self.text_input.start(&self.window);
-            } else {
+        // The system keyboard is the one the text asks for, and the field
+        // stays above it (SDL moves the window's view up on iOS, pans on
+        // Android).
+        let text_box = glue5_runtime::input::text_box();
+        self.keyboard_away &= text_box.is_some();
+        let field = self.ui.text_field();
+        let typing = match (field, text_box) {
+            (Some((kind, _)), _) => Some(Typing::App(kind)),
+            (None, Some(kind)) if !self.keyboard_away => Some(Typing::Game(kind)),
+            _ => None,
+        };
+        if typing != self.typing {
+            if self.typing.is_some() {
                 self.text_input.stop(&self.window);
             }
+            if let Some(typing) = typing
+                && let Err(e) = self.text_input.start_with_options(&self.window, typing.options())
+            {
+                log::warn!("text input: {e}");
+                self.text_input.start(&self.window);
+            }
+            self.typing = typing;
+        }
+        if let Some(typing) = self.typing {
+            // The game draws its box in the middle of the screen.
+            let size = ui::screen_size(&self.window);
+            let middle = egui::Rect::from_center_size(egui::pos2(size.x * 0.5, size.y * 0.5), size * egui::vec2(0.5, 0.3));
+            let rect = match (typing, field) {
+                (Typing::App(_), Some((_, rect))) => rect,
+                _ => middle,
+            };
+            if self.typing_rect != Some(rect) {
+                self.typing_rect = Some(rect);
+                self.text_input.set_rect(&self.window, ui::window_rect(&self.window, rect), 0);
+            }
+        } else {
+            self.typing_rect = None;
         }
         self.pointer();
         Ok(false)

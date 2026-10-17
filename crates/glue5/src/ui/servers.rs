@@ -9,7 +9,7 @@ use glue5_stream::Check;
 
 use super::pages::{bytes, card_title, is_server, server_name, sheet, small, stream_progress, stream_state};
 use super::widgets::{Control, action_button, focus, setting, text_field, toggle};
-use super::{Action, Status, WARN, theme};
+use super::{Action, Status, TextKind, WARN, theme};
 use crate::paths;
 use crate::settings::{Settings, Source};
 
@@ -154,7 +154,7 @@ fn by_address(ui: &mut egui::Ui, page: &mut ServersPage, actions: &mut Vec<Actio
         let field = ui.available_width() - button - ui.spacing().item_spacing.x;
         let typed = ui
             .allocate_ui(vec2(field, 44.0 * scale), |ui| {
-                text_field(ui, "", &mut page.address, "192.168.1.20 or name.local", 120)
+                text_field(ui, "", TextKind::Address, &mut page.address, "192.168.1.20 or name.local", 120)
             })
             .inner;
         let enter = typed.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
