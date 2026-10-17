@@ -28,9 +28,18 @@
 //! ends: the casino's waits for its door (a model this data lacks) to be
 //! created, and the interior behind it does not exist either. That script
 //! never loads here, so the entrances do nothing.
+//!
+//! And screens: the phone's movie (`cellphone_ifruit`) has no app for GTA
+//! Online's boss agency (`CELL_BOSSAGE`), which the scripts put on the
+//! phone. Opening it, the movie's `LOAD_APP` and `CELLPHONE_APP` call each
+//! other without end; each ActionScript call pushes a diagnostic context,
+//! and at the 33rd the engine stops ("MessageCommon - too many contexts
+//! pushed"). ActionScript calls nest at most `AS_DEPTH` deep here: deeper
+//! ones return at once, and the app shows nothing instead.
 
 use std::cell::Cell;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use glue5_game::{Env, exports, orig};
 
@@ -172,8 +181,57 @@ pub(crate) unsafe extern "C" fn additional_text_loaded(env: *mut Env, name: u64,
     failed(requesting, asked.as_deref(), &unsafe { Mem::of(env) }.str(name)) as u32
 }
 
+/// How deep ActionScript calls nest on a thread: the engine keeps 32
+/// diagnostic contexts per thread, one per call and a few of its own; no
+/// movie of the game's goes near.
+const AS_DEPTH: u32 = 24;
+
+thread_local! {
+    /// ActionScript calls under way on this thread.
+    static AS_NESTED: Cell<u32> = const { Cell::new(0) };
+}
+
+/// An ActionScript call, unless `AS_DEPTH` are already under way (see
+/// above): then it returns at once, its result undefined. True if it ran.
+fn nested(call: impl FnOnce()) -> bool {
+    let depth = AS_NESTED.get();
+    if depth >= AS_DEPTH {
+        return false;
+    }
+    AS_NESTED.set(depth + 1);
+    call();
+    AS_NESTED.set(depth);
+    true
+}
+
+static AS_STOPPED: AtomicBool = AtomicBool::new(false);
+
+fn stopped(env: *mut Env, name: u64) {
+    if !AS_STOPPED.swap(true, Ordering::Relaxed) {
+        let name = if name == 0 { String::new() } else { unsafe { Mem::of(env) }.str(name) };
+        log::warn!("scaleform: ActionScript calls nested {AS_DEPTH} deep, stopped at {name} (a movie older than the scripts)");
+    }
+}
+
+/// Hook for `GASAsFunctionObject::Invoke(GASFnCall const&, GASLocalFrame*,
+/// char const*)`: a function of a movie's ActionScript.
+pub(crate) unsafe extern "C" fn as_function_invoke(env: *mut Env, this: u64, call: u64, frame: u64, name: u64) {
+    if !nested(|| unsafe { orig::as_function_invoke(env, this, call, frame, name) }) {
+        stopped(env, name);
+    }
+}
+
+/// Hook for `GASUserDefinedFunctionObject::Invoke(...)`: likewise.
+pub(crate) unsafe extern "C" fn user_function_invoke(env: *mut Env, this: u64, call: u64, frame: u64, name: u64) {
+    if !nested(|| unsafe { orig::user_function_invoke(env, this, call, frame, name) }) {
+        stopped(env, name);
+    }
+}
+
 /// This module's hooks.
 pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
+    hooks.as_function_invoke = Some(as_function_invoke);
+    hooks.user_function_invoke = Some(user_function_invoke);
     hooks.script_model_loaded = Some(model_loaded);
     hooks.additional_text_loaded = Some(additional_text_loaded);
     hooks.text_request = Some(text_request);
@@ -187,7 +245,26 @@ pub(crate) fn hooks(hooks: &mut glue5_game::Hooks) {
 
 #[cfg(test)]
 mod tests {
-    use super::failed;
+    use super::{AS_DEPTH, AS_NESTED, failed, nested};
+
+    /// ActionScript that calls itself without end (the phone's LOAD_APP and
+    /// CELLPHONE_APP for an app its movie lacks) stops at AS_DEPTH instead of
+    /// running the engine out of diagnostic contexts.
+    #[test]
+    fn actionscript_calling_itself_stops() {
+        fn call(calls: &mut u32) {
+            *calls += 1;
+            nested(|| call(calls));
+        }
+        let mut calls = 0;
+        assert!(nested(|| call(&mut calls)));
+        assert_eq!(calls, AS_DEPTH, "each nested call ran once, up to the limit");
+        assert_eq!(AS_NESTED.get(), 0, "unwound");
+        // Calls in turn (not nested) are not limited.
+        for _ in 0..100 {
+            assert!(nested(|| ()));
+        }
+    }
 
     #[test]
     fn only_a_block_asked_for_counts_as_loaded_when_its_load_failed() {

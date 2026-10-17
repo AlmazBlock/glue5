@@ -23,4 +23,8 @@
     ("additional_text_requesting", "CTextFile::IsRequestingThisAdditionalText(char const*, int)"),
     ("text_request", "CTextFile::RequestAdditionalText(char const*, int, CTextFile::eLocationOfTextBlock)"),
     ("text_free", "CTextFile::FreeTextSlot(int, bool)"),
+    // A function of a movie's ActionScript: calls nest at most so deep (the
+    // phone's movie calls itself without end for an app it lacks).
+    ("as_function_invoke", "GASAsFunctionObject::Invoke(GASFnCall const&, GASLocalFrame*, char const*)"),
+    ("user_function_invoke", "GASUserDefinedFunctionObject::Invoke(GASFnCall const&, GASLocalFrame*, char const*)"),
 ]
