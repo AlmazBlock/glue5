@@ -60,7 +60,7 @@ const ACTIVITIES: [Activity; 8] = [
 /// wide over high (as `glue5_runtime::input::phone_rect` has it).
 fn phone_at(aspect: f32) -> [f32; 4] {
     let depth = 113.0 * 35f32.to_radians().tan();
-    let u = 0.5 + 0.5 * 93.05 / (depth * aspect.min(16.0 / 9.0));
+    let u = 0.5 + 0.5 * 93.05 / (depth * 16.0 / 9.0);
     let v = 0.5 + 0.5 * 51.7 / depth;
     let (w, h) = (0.12 / aspect, 0.2417);
     [u - w, v - h, u + w, v + h]
@@ -462,6 +462,7 @@ fn the_phone_keys_keep_off_the_phone() {
             t.set_context(PlayerContext { phone: true, ..context(activity) });
             t.set_game(Vec::new(), Some(phone_at(screen.x / screen.y)));
             let phone = t.phone.unwrap();
+            assert!(phone.right() <= screen.x, "{screen:?}: the phone is on the screen");
             for key in t.buttons().iter().filter(|b| matches!(b.key, Key::Phone(_))) {
                 let what = format!("{screen:?} {activity:?} {:?}", key.key);
                 assert!(!key.rect().intersects(phone), "{what} on the phone {phone:?}");

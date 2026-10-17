@@ -295,14 +295,15 @@ static PHONE_AT: Mutex<[f32; 3]> = Mutex::new([0.0; 3]);
 /// Where the phone shows on the screen while it is up, as fractions of the
 /// screen (left, top, right, bottom; its bottom may be below it), for a
 /// screen this wide over high: its position seen through the phone's 70°
-/// lens, at the HUD's aspect (16:9 at most), and its size there (measured).
+/// lens, across as at 16:9 whatever the screen's shape (measured on a
+/// phone's 19.5:9 and an iPad's 1.43), and its size there (measured).
 pub fn phone_rect(aspect: f32) -> Option<[f32; 4]> {
     let [x, y, z] = *PHONE_AT.lock().unwrap();
     if !PHONE_OUT.load(Ordering::Relaxed) || z >= -1.0 {
         return None;
     }
     let depth = -z * 35f32.to_radians().tan();
-    let (u, v) = (0.5 + 0.5 * x / (depth * aspect.min(16.0 / 9.0)), 0.5 - 0.5 * y / depth);
+    let (u, v) = (0.5 + 0.5 * x / (depth * 16.0 / 9.0), 0.5 - 0.5 * y / depth);
     // At z -113: 0.24 of the screen's height wide, 0.48 high.
     let near = 113.0 / -z;
     let (w, h) = (0.12 * near / aspect, 0.2417 * near);
