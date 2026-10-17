@@ -23,7 +23,8 @@
 //! the most urgent request's next chunk first: a read the engine is blocked
 //! on overtakes megabytes of prefetch after at most one chunk. [`PRIORITY`]
 //! moves a pending request to another priority (the engine now waits for
-//! what was prefetched), [`CANCEL`] drops one.
+//! what was prefetched). Requests are never taken back: each gets its
+//! [`END`].
 
 use std::io::{self, Read, Write};
 
@@ -34,7 +35,6 @@ pub const PORT: u16 = 47100;
 pub const HELLO: u8 = 1;
 pub const READ: u8 = 10;
 pub const PRIORITY: u8 = 11;
-pub const CANCEL: u8 = 12;
 pub const BLOB: u8 = 13;
 pub const DATA: u8 = 20;
 pub const END: u8 = 21;

@@ -374,10 +374,6 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
                         q.levels[prio as usize].push_back(h.req);
                     }
                 }
-                CANCEL => {
-                    let mut q = conn.queue.lock().unwrap();
-                    q.jobs.remove(&h.req);
-                }
                 _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("message kind {}", h.kind))),
             }
         }
