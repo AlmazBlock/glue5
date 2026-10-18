@@ -1137,7 +1137,6 @@ impl App {
                     let info = ui::StudioInfo {
                         url: studio.url(&host),
                         code: studio.pairing_code(),
-                        mcp: format!("http://{host}:{}/mcp", studio.port()),
                         lan,
                     };
                     self.studio = Some((studio, info));

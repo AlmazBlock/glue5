@@ -39,12 +39,9 @@ pub struct StudioInfo {
     pub url: String,
     /// The pairing code as people type it.
     pub code: String,
-    /// The MCP endpoint, for coding agents.
-    pub mcp: String,
     pub lan: bool,
 }
 
-const OK: Color32 = Color32::from_rgb(120, 205, 145);
 const ERR: Color32 = Color32::from_rgb(240, 149, 149);
 
 /// The mods in a line, for Settings: off, on, what runs.
@@ -225,7 +222,6 @@ fn mods_tab(ui: &mut egui::Ui, page: &mut ModsPage, status: &Status) {
                 }
             });
         }
-        muted(ui, "Mods run with the game: those switched on start with it, the others from here or the Studio during it.");
         return;
     }
     for m in &mods {
@@ -268,64 +264,61 @@ fn mods_tab(ui: &mut egui::Ui, page: &mut ModsPage, status: &Status) {
 }
 
 fn studio_tab(ui: &mut egui::Ui, settings: &mut Settings, status: &Status) {
-    let scale = theme::density(ui);
-    setting(ui, "GLUE 5 Studio", Control::Toggle, Some("Edit, run and debug mods from a browser"), |ui| {
+    setting(ui, "GLUE 5 Studio", Control::Toggle, Some("Write and run mods from a browser"), |ui| {
         toggle(ui, &mut settings.studio);
     });
-    if let Some(info) = &status.studio {
-        panel(ui, |ui| {
-            card_title(ui, "OPEN ON A COMPUTER OR TABLET", Some(("On", OK)));
-            ui.horizontal_top(|ui| {
-                qr(ui, &info.url, 148.0 * scale);
-                ui.add_space(12.0 * scale);
+    let others = if settings.studio_lan { "Browsers on this network connect with the code" } else { "Only a browser on this device" };
+    setting(ui, "Other devices", Control::Toggle, Some(others), |ui| {
+        toggle(ui, &mut settings.studio_lan);
+    });
+    match &status.studio {
+        Some(info) => {
+            // The address as typed; copied with the code in it.
+            let address = info.url.split('?').next().unwrap_or(&info.url).trim_end_matches('/');
+            let open = if info.lan { "Open it in a browser on this network" } else { "Open it in a browser on this device" };
+            setting(ui, address, Control::Action, Some(open), |ui| {
+                if action_button(ui, "Copy").clicked() {
+                    ui.ctx().copy_text(info.url.clone());
+                }
+            });
+            setting(ui, &info.code, Control::Action, Some("Pairing code: the page asks for it once"), |ui| {
+                if action_button(ui, "Copy").clicked() {
+                    ui.ctx().copy_text(info.code.clone());
+                }
+            });
+            if info.lan {
+                qr_row(ui, &info.url);
+            }
+        }
+        None if settings.studio => small(ui, "Starting…", theme::MUTED),
+        None => {}
+    }
+    muted(ui, "Whoever has the code can run code in the game; it changes each time the Studio starts.");
+}
+
+/// The address as a QR code, in a row like the settings': a tablet's or a
+/// phone's camera opens the Studio, paired.
+fn qr_row(ui: &mut egui::Ui, url: &str) {
+    let scale = theme::density(ui);
+    egui::Frame::new()
+        .fill(Color32::from_gray(28))
+        .corner_radius((14.0 * scale) as u8)
+        .inner_margin((12.0 * scale) as i8)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                qr(ui, url, 112.0 * scale);
+                ui.add_space(8.0 * scale);
                 ui.vertical(|ui| {
-                    small(
-                        ui,
-                        if info.lan {
-                            "Scan the code, or open the address in a browser on the same network."
-                        } else {
-                            "Open the address in a browser on this device."
-                        },
-                        theme::MUTED,
+                    ui.label(RichText::new("Scan to open").size(14.0 * scale).color(Color32::WHITE));
+                    ui.label(
+                        RichText::new("With a tablet's or a phone's camera: the Studio opens already paired.")
+                            .size(11.0 * scale)
+                            .color(theme::MUTED),
                     );
-                    ui.add_space(6.0 * scale);
-                    ui.label(RichText::new(&info.url).size(13.0 * scale).color(Color32::WHITE));
-                    ui.add_space(6.0 * scale);
-                    ui.label(RichText::new(format!("Pairing code  {}", info.code)).size(14.0 * scale).color(Color32::WHITE));
-                    ui.add_space(8.0 * scale);
-                    if inline_button(ui, "Copy address").clicked() {
-                        ui.ctx().copy_text(info.url.clone());
-                    }
                 });
             });
         });
-        let command = format!(
-            "claude mcp add --transport http glue5 {} --header \"Authorization: Bearer {}\"",
-            info.mcp,
-            info.code.replace('-', "")
-        );
-        setting(ui, "Claude Code", Control::Action, Some("Lets it write, run and test mods (MCP)"), |ui| {
-            if action_button(ui, "Copy command").clicked() {
-                ui.ctx().copy_text(command.clone());
-            }
-        });
-    } else if settings.studio {
-        small(ui, "Starting…", theme::MUTED);
-    }
-    setting(
-        ui,
-        "Other devices",
-        Control::Toggle,
-        Some(if settings.studio_lan { "Browsers on this network can connect, with the code" } else { "Only a browser on this device" }),
-        |ui| {
-            toggle(ui, &mut settings.studio_lan);
-        },
-    );
-    muted(
-        ui,
-        "Whoever has the code can run code in the game: it changes each time the Studio starts. Mods can do \
-         anything a game script can.",
-    );
 }
 
 fn log_tab(ui: &mut egui::Ui) {
