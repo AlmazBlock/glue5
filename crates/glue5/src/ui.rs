@@ -913,6 +913,8 @@ mod tests {
                             cursor: false,
                             map: false,
                             pointer: false,
+                            alert: false,
+                            hidden: false,
                         };
                         let mut touch = Touch::new();
                         touch.layout(screen, safe, scale);

@@ -333,6 +333,17 @@ static PARACHUTE: &[Action] = &[
 static CUTSCENE: &[Action] =
     &[primary(Action { input: Some(SKIP_CUTSCENE), ..action("Skip", "skip", 0, MAIN, 30.0) }), PAUSE];
 
+/// A screen of the engine's own (a warning: join another session? quit?;
+/// a loading screen; the screen faded out): no button of play's, the ones
+/// it asks for alone ([`Touch::prompt_buttons`]).
+static ASKED: &[Action] = &[];
+
+/// A warning of the engine's whose buttons are not known.
+static ALERT: &[Action] = &[
+    primary(action("Select", "check", button::SOUTH, At::RightBottom(70.0, 130.0), 32.0)),
+    action("Back", "back", button::EAST, At::RightBottom(150.0, 50.0), 24.0),
+];
+
 /// A script's scene that asks for nothing (a death, a character's switch, a
 /// scene the player watches): pause alone; what it asks for when it does
 /// has buttons of its own (a skip), and the sticks where it asks for them.
@@ -597,6 +608,8 @@ impl Touch {
                 cursor: false,
                 map: false,
                 pointer: false,
+                alert: false,
+                hidden: false,
             },
             prompts: Vec::new(),
             pad_map: Vec::new(),
@@ -626,11 +639,12 @@ impl Touch {
 
     /// What the player is doing now. Fingers down keep what they hold.
     pub fn set_context(&mut self, context: PlayerContext) {
-        let (menu, over) = (self.menu_mode(), self.cursor_over_play());
+        let (menu, over, engine) = (self.menu_mode(), self.cursor_over_play(), self.engine_screen());
         self.context = context;
         // In and out of a menu, fingers start over (a finger on a button is
-        // not the mouse, nor the other way round).
-        if self.menu_mode() != menu {
+        // not the mouse, nor the other way round); in and out of an engine's
+        // screen too (what was held, a pedal, lets go: its button is gone).
+        if self.menu_mode() != menu || self.engine_screen() != engine {
             self.clear();
         } else if self.cursor_over_play() != over {
             self.fingers.retain(|_, f| !matches!(f, Finger::Mouse { .. } | Finger::Pinch(_)));
@@ -643,7 +657,14 @@ impl Touch {
     /// while the player's controls are off (a shop, the character creator),
     /// or a screen with its own pointer (the browser, a hacking screen).
     fn menu_mode(&self) -> bool {
-        self.context.menu || (self.context.cursor && (self.context.scripted || self.context.pointer))
+        !self.engine_screen()
+            && (self.context.menu || (self.context.cursor && (self.context.scripted || self.context.pointer)))
+    }
+
+    /// A screen of the engine's own is over everything (a warning, a
+    /// loading screen, the screen faded out): only what it asks for.
+    fn engine_screen(&self) -> bool {
+        self.context.alert || self.context.hidden
     }
 
     /// A script's menu shows its cursor over play (the interaction menu):
@@ -686,6 +707,12 @@ impl Touch {
     /// The touch layout for what the player is doing (kept from the last
     /// activity seen through the moments between), or none: the pause menu.
     fn touch_layout(&self) -> Option<&'static [Action]> {
+        if self.engine_screen() {
+            // A warning whose buttons are not known: Select and Back, as it
+            // has (Continue, Yes, No...): never one with nothing to press.
+            let known = self.prompts.iter().any(|p| p.pads.iter().any(|d| matches!(d, Pad::Buttons(_))));
+            return Some(if self.context.alert && !known { ALERT } else { ASKED });
+        }
         if self.menu_mode() {
             return None;
         }
@@ -716,7 +743,7 @@ impl Touch {
     /// The layout has a stick at rest (a script's scene has its sticks
     /// where the thumbs land, a cutscene none).
     fn has_stick(&self) -> bool {
-        self.touch_layout().is_some() && !self.is(CUTSCENE) && !self.is(SCRIPTED) && !self.is(SCENE)
+        self.touch_layout().is_some() && !self.is(CUTSCENE) && !self.is(SCRIPTED) && !self.is(SCENE) && !self.is(ASKED) && !self.is(ALERT)
     }
 
     /// The game asks for a stick (the right one, or the left).
