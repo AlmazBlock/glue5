@@ -78,6 +78,10 @@ NDK: versions in `platform/android/gradle.properties`) with sdkmanager.
 mise run play          # the first build compiles ~1 GB of generated C
 ```
 
+Without a computer set up for it, GitHub Actions can build the app in
+your fork from your own `game.wasm`, which stays private:
+[docs/github-build.md](docs/github-build.md).
+
 Every task first runs `mise run setup`, which prepares wgpu-core, wgpu-hal
 and wasm2c with our patches (only when they change). Run cargo by hand
 through mise too: in a shell with `mise activate`, or `mise exec -- cargo ...`.
@@ -146,6 +150,7 @@ The game is looked for in `game/` beside the AppImage, as beside the Mac app.
 | Record pipelines on automated runs (benchmark, map tours, graphics settings) into the seed | `mise run shaders:collect [default low min mid high max]` |
 | iOS: build, sign, install, launch on the connected device | `mise run ios [device]` |
 | iOS: only check that the app builds | `mise run ios:build` |
+| iOS: an unsigned IPA, for a sideloading tool to sign | `mise run ios:ipa` |
 | iOS: launch the installed app again, with its console | `mise run ios:run [device]` |
 | iOS: copy the game into the app's Documents/game | `mise run ios:game [device]` |
 | Apple TV: build, sign, install, launch on the paired Apple TV | `mise run tvos [device]` |

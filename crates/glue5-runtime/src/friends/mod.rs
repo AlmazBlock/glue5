@@ -68,6 +68,9 @@ const RESEND: Duration = Duration::from_secs(1);
 const TRIES: u32 = 10;
 /// How often a friend request goes again while unanswered.
 const ASK_AGAIN: Duration = Duration::from_secs(3);
+/// How long a player the DHT gave under this player's code is probed (its
+/// NAT may let nothing in before this player sends to it).
+const CALLING: Duration = Duration::from_secs(30);
 /// How often the local network is asked for friends not connected.
 const PROBE_EVERY: Duration = Duration::from_secs(5);
 const SWEEP_EVERY: Duration = Duration::from_secs(15);
@@ -77,6 +80,9 @@ const RATE_PER_ADDRESS: u32 = 10;
 const RATE_ALL: u32 = 60;
 /// DHT lookups: friends not connected are asked for often.
 const LOOKUP_ALONE: Duration = Duration::from_secs(30);
+/// A friend code is looked up often while asked with: the one asking and
+/// its owner find each other there.
+const LOOKUP_CODE: Duration = Duration::from_secs(10);
 const LOOKUP_CONNECTED: Duration = Duration::from_secs(300);
 /// An invite from a friend is shown this long, and one more from it is not
 /// heard before then.
@@ -461,6 +467,9 @@ pub(crate) struct Service {
     /// A random id in this player's probes: its own come back.
     probe_id: [u8; 8],
     own: HashSet<SocketAddrV4>,
+    /// Players asking with this player's code (they announce themselves
+    /// under it), since when, and when last probed.
+    callers: HashMap<SocketAddrV4, (Instant, Instant)>,
     probed: Option<Instant>,
     swept: Option<Instant>,
     /// The game's events from friends, for the game thread.
@@ -586,6 +595,7 @@ impl Service {
             answered_all: (Instant::now(), 0),
             probe_id: crypto::random(),
             own: HashSet::new(),
+            callers: HashMap::new(),
             probed: None,
             swept: None,
             events: VecDeque::new(),
@@ -812,11 +822,14 @@ impl Service {
             let refresh = if self.friends[k].connected() { LOOKUP_CONNECTED } else { LOOKUP_ALONE };
             keys.push((*key, dht::Options { announce: true, refresh }));
         }
+        // The ones asking with a code announce themselves under it too: a
+        // NAT giving each address another port lets nothing in from them
+        // before its player sends to them (`callers`).
         if let Some(code) = &self.code {
-            keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_CONNECTED }));
+            keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_CODE }));
         }
         for code in self.asked.iter().filter(|a| a.transport.is_none() && !a.declined).filter_map(Ask::code) {
-            keys.push((crypto::code_key(code), dht::Options { announce: false, refresh: LOOKUP_ALONE }));
+            keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_CODE }));
         }
         keys
     }
@@ -846,6 +859,17 @@ impl Service {
             let requests = self.requests.values().filter(|r| r.asked).count();
             if online + requests > 0 {
                 self.notices.push_back(Notice::Summary { online, requests });
+            }
+        }
+        // Players asking with this player's code, probed for a while.
+        self.callers.retain(|_, (since, _)| now - *since < CALLING);
+        if let Some(code) = self.code.as_deref() {
+            let d = self.probe(&[crypto::code_tag(code)]);
+            for (addr, (_, probed)) in &mut self.callers {
+                if now - *probed >= ASK_AGAIN {
+                    *probed = now;
+                    out.send.push((*addr, d.clone()));
+                }
             }
         }
         // Handshakes not answered, and the count of the ones answered.
@@ -1098,6 +1122,15 @@ impl Service {
         self.update_meetings(unix());
         if let Some(&k) = self.meetings.keys.get(&key) {
             self.contact(k, addr, false, now, out);
+            return;
+        }
+        // Someone asking with this player's code: probed with its tag, it
+        // asks where the probes come from.
+        if let Some(code) = self.code.as_deref().filter(|c| crypto::code_key(c) == key) {
+            if !self.callers.contains_key(&addr) {
+                out.send.push((addr, self.probe(&[crypto::code_tag(code)])));
+                self.callers.insert(addr, (now, now));
+            }
             return;
         }
         if let Some(i) = self.asked.iter().position(|a| a.code().is_some_and(|c| crypto::code_key(c) == key)) {

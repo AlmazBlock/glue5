@@ -13,6 +13,12 @@
 //! read-only flag) and keeps no routing table, only the nodes of each
 //! lookup (the nodes closest to its key, which hold its announces); a new
 //! lookup starts from the nodes the others know.
+//!
+//! Nodes that watch the DHT take ids right next to every key looked up:
+//! announces sent to them are kept and never handed out, so two players
+//! announcing there do not find each other. An honest node's id goes with
+//! its address (BEP 42), which such ids cannot: lookups take only nodes
+//! whose ids do, and one node per address.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
@@ -43,6 +49,7 @@ const ANNOUNCE: Duration = Duration::from_secs(120);
 /// when no node answered.
 const RESTART: Duration = Duration::from_secs(600);
 const RETRY: Duration = Duration::from_secs(15);
+const EMPTY_RETRY: Duration = Duration::from_secs(1);
 
 pub type Id = [u8; 20];
 
@@ -51,6 +58,39 @@ struct Node {
     queried: bool,
     responded: bool,
     token: Option<Vec<u8>>,
+    /// Its id goes with its address (BEP 42), or is not known yet.
+    honest: bool,
+}
+
+impl Node {
+    fn new(addr: SocketAddrV4, honest: bool) -> Node {
+        Node { addr, queried: false, responded: false, token: None, honest }
+    }
+}
+
+/// Whether a node's id goes with its address (BEP 42): its first 21 bits
+/// are the CRC-32C of the address's masked bits and of the id's last byte.
+/// Nodes on private networks may take any.
+fn honest_id(id: &Id, ip: &Ipv4Addr) -> bool {
+    if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+        return true;
+    }
+    let r = id[19];
+    let mut masked: [u8; 4] = std::array::from_fn(|i| ip.octets()[i] & [0x03, 0x0f, 0x3f, 0xff][i]);
+    masked[0] |= (r & 7) << 5;
+    let crc = crc32c(&masked).to_be_bytes();
+    id[0] == crc[0] && id[1] == crc[1] && id[2] & 0xf8 == crc[2] & 0xf8
+}
+
+fn crc32c(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0x82f6_3b78 & (crc & 1).wrapping_neg());
+        }
+    }
+    !crc
 }
 
 /// What a lookup is for.
@@ -72,9 +112,10 @@ struct Lookup {
 }
 
 impl Lookup {
-    /// The closest nodes that answered.
+    /// The closest honest nodes that answered, one per address.
     fn closest(&self) -> impl Iterator<Item = (&Id, &Node)> {
-        self.nodes.iter().filter(|(_, n)| n.responded).take(CLOSEST)
+        let mut ips = std::collections::HashSet::new();
+        self.nodes.iter().filter(move |(_, n)| n.responded && n.honest && ips.insert(*n.addr.ip())).take(CLOSEST)
     }
 }
 
@@ -117,6 +158,12 @@ impl Dht {
         self.external
     }
 
+    /// This player's address on the Internet without the port, which the
+    /// nodes agree on even when its NAT gives each of them another port.
+    pub fn public_ip(&self) -> Option<Ipv4Addr> {
+        self.external.or(self.told.map(|(a, _)| a)).map(|a| *a.ip())
+    }
+
     /// Whether a datagram is the DHT's (a bencoded dictionary).
     pub fn is_dht(data: &[u8]) -> bool {
         data.first() == Some(&b'd')
@@ -150,9 +197,13 @@ impl Dht {
 
     fn tick_lookup(&mut self, key: Id, now: Instant, out: &mut Output) {
         let Some(lookup) = self.lookups.get(&key) else { return };
+        // Started with no node to ask (the bootstrap nodes' addresses not
+        // looked up yet): again in a moment.
         let restart = lookup.started.is_none_or(|s| {
             let age = now - s;
-            age > RESTART || (age > RETRY && !lookup.nodes.values().any(|n| n.responded))
+            age > RESTART
+                || (age > RETRY && !lookup.nodes.values().any(|n| n.responded))
+                || (age > EMPTY_RETRY && lookup.nodes.is_empty())
         });
         if restart {
             self.start(key, now);
@@ -170,7 +221,7 @@ impl Dht {
         // ask them again now and then, and announce.
         let lookup = &self.lookups[&key];
         let asking = self.pending.values().any(|(k, ..)| *k == key);
-        let settled = !asking && lookup.nodes.values().take(CLOSEST).all(|n| n.queried);
+        let settled = !asking && !lookup.nodes.is_empty() && lookup.nodes.values().filter(|n| n.honest).take(CLOSEST).all(|n| n.queried);
         if !settled {
             return;
         }
@@ -227,7 +278,7 @@ impl Dht {
             .lookups
             .iter()
             .filter(|(k, _)| **k != key)
-            .flat_map(|(_, l)| l.nodes.values().filter(|n| n.responded).map(|n| n.addr))
+            .flat_map(|(_, l)| l.nodes.values().filter(|n| n.responded && n.honest).map(|n| n.addr))
             .take(SEEDS)
             .collect();
         self.pending.retain(|_, (k, ..)| *k != key);
@@ -241,7 +292,7 @@ impl Dht {
             d[18] = (i >> 8) as u8;
             d[19] = i as u8;
             if lookup.nodes.values().all(|n| n.addr != addr) {
-                lookup.nodes.insert(d, Node { addr, queried: false, responded: false, token: None });
+                lookup.nodes.insert(d, Node::new(addr, true));
             }
         }
     }
@@ -295,11 +346,18 @@ impl Dht {
             node.token = Some(token.clone());
         }
         let at = match r.get(&b"id"[..]) {
-            Some(Value::Bytes(id)) if id.len() == 20 => distance(&key, id.as_slice().try_into().unwrap()),
+            Some(Value::Bytes(id)) if id.len() == 20 => {
+                let id = id.as_slice().try_into().unwrap();
+                node.honest = honest_id(&id, from.ip());
+                distance(&key, &id)
+            }
             _ => d,
         };
+        let honest = node.honest;
         lookup.nodes.insert(at, node);
-        if let Some(Value::List(values)) = r.get(&b"values"[..]) {
+        // The players a node watching the DHT hands out are made up (the
+        // nodes it names are checked one by one).
+        if honest && let Some(Value::List(values)) = r.get(&b"values"[..]) {
             for v in values {
                 if let Value::Bytes(v) = v
                     && let Some(addr) = compact_addr(v)
@@ -312,8 +370,8 @@ impl Dht {
             for n in nodes.as_chunks::<26>().0 {
                 let (Ok(id), Some(addr)) = (<Id>::try_from(&n[..20]), compact_addr(&n[20..])) else { continue };
                 let d = distance(&key, &id);
-                if !lookup.nodes.contains_key(&d) && lookup.nodes.values().all(|n| n.addr != addr) {
-                    lookup.nodes.insert(d, Node { addr, queried: false, responded: false, token: None });
+                if honest_id(&id, addr.ip()) && !lookup.nodes.contains_key(&d) && lookup.nodes.values().all(|n| n.addr != addr) {
+                    lookup.nodes.insert(d, Node::new(addr, true));
                 }
             }
             // Only the closest candidates matter.
@@ -464,6 +522,62 @@ mod tests {
     }
 
     #[test]
+    fn honest_ids_go_with_their_addresses() {
+        // BEP 42's examples.
+        for (ip, r, prefix) in [
+            ([124, 31, 75, 21], 1, [0x5f, 0xbf, 0xbf]),
+            ([21, 75, 31, 124], 86, [0x5a, 0x3c, 0xe9]),
+            ([65, 23, 51, 170], 22, [0xa5, 0xd4, 0x32]),
+            ([84, 124, 73, 14], 65, [0x1b, 0x03, 0x21]),
+            ([43, 213, 53, 83], 90, [0xe5, 0x6f, 0x6c]),
+        ] {
+            let mut id = [0; 20];
+            id[..3].copy_from_slice(&prefix);
+            id[19] = r;
+            assert!(honest_id(&id, &Ipv4Addr::from(ip)), "{ip:?}");
+            id[0] ^= 1;
+            assert!(!honest_id(&id, &Ipv4Addr::from(ip)), "{ip:?}");
+        }
+        assert!(honest_id(&[0; 20], &Ipv4Addr::new(10, 0, 0, 7)));
+    }
+
+    #[test]
+    fn players_come_from_honest_nodes() {
+        let key = [7; 20];
+        let mut dht = Dht::new([1; 20], 47000);
+        dht.add(key, Options { announce: false, refresh: Duration::from_secs(60) });
+        let now = Instant::now();
+        let player = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 31329);
+        let honest = {
+            let mut id = [0; 20];
+            id[..3].copy_from_slice(&[0x5f, 0xbf, 0xbf]);
+            id[19] = 1;
+            id
+        };
+        // A node watching the DHT (an id right next to the key), then an
+        // honest one far from it: only the honest one's players count, and
+        // only it is among the closest.
+        for (i, (ip, id)) in [([198, 51, 100, 9], key), ([124, 31, 75, 21], honest)].into_iter().enumerate() {
+            let addr = SocketAddrV4::new(Ipv4Addr::from(ip), 6881);
+            let mut d = [0xee; 20];
+            d[19] = i as u8;
+            dht.lookups.get_mut(&key).unwrap().nodes.insert(d, Node::new(addr, true));
+            let mut out = Output::default();
+            dht.get_peers(key, d, now, &mut out);
+            let value = [player.ip().octets().as_slice(), &player.port().to_be_bytes()].concat();
+            let response = dict([
+                ("t", B(dht.next_tid.to_be_bytes().to_vec())),
+                ("y", B(b"r".to_vec())),
+                ("r", dict([("id", B(id.to_vec())), ("values", Value::List(vec![B(value)]))])),
+            ]);
+            dht.receive(addr, &response.encode(), &mut out);
+            assert_eq!(out.peers, if i == 1 { vec![(key, player)] } else { vec![] }, "{i}");
+        }
+        let closest: Vec<_> = dht.lookups[&key].closest().map(|(_, n)| n.addr).collect();
+        assert_eq!(closest, [SocketAddrV4::new(Ipv4Addr::new(124, 31, 75, 21), 6881)]);
+    }
+
+    #[test]
     fn the_address_nodes_see_counts_once_two_agree() {
         let key = [7; 20];
         let mut dht = Dht::new([1; 20], 47000);
@@ -476,7 +590,7 @@ mod tests {
             let addr = SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, node), 6881);
             let mut d = [0xee; 20];
             d[19] = i as u8;
-            dht.lookups.get_mut(&key).unwrap().nodes.insert(d, Node { addr, queried: false, responded: false, token: None });
+            dht.lookups.get_mut(&key).unwrap().nodes.insert(d, Node::new(addr, true));
             let mut out = Output::default();
             dht.get_peers(key, d, now, &mut out);
             let response = dict([

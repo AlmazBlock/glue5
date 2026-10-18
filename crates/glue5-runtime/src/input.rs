@@ -238,6 +238,10 @@ static CURSOR_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static POINTER: AtomicBool = AtomicBool::new(false);
 /// The pause menu shows its map.
 static MAP: AtomicBool = AtomicBool::new(false);
+/// A warning of the engine's asks something; the screen is black or
+/// loading.
+static ALERT: AtomicBool = AtomicBool::new(false);
+static HIDDEN: AtomicBool = AtomicBool::new(false);
 static SIGNALS: Mutex<Signals> = Mutex::new(Signals {
     on_foot: None,
     in_vehicle: None,
@@ -433,6 +437,11 @@ pub struct PlayerContext {
     /// A screen of the game's own takes the pointer (the browser, a
     /// hacking screen): it is all the screen.
     pub pointer: bool,
+    /// A warning of the engine's is up, over whatever plays (join another
+    /// session? quit?): it asks for its own buttons.
+    pub alert: bool,
+    /// The screen is black or a loading screen shows: nothing to play.
+    pub hidden: bool,
 }
 
 /// The story's characters, or anyone else (GTA Online's).
@@ -504,6 +513,8 @@ pub fn player_context() -> PlayerContext {
                     && (fresh(*CURSOR_AT.lock().unwrap()) || POINTER.load(Ordering::Relaxed)))),
         pointer: TOUCH_PLAY.load(Ordering::Relaxed) && !MINIGAME.load(Ordering::Relaxed) && POINTER.load(Ordering::Relaxed),
         map: MAP.load(Ordering::Relaxed),
+        alert: ALERT.load(Ordering::Relaxed),
+        hidden: HIDDEN.load(Ordering::Relaxed),
     }
 }
 
@@ -593,6 +604,9 @@ pub(crate) unsafe extern "C" fn control_update(env: *mut Env, this: u64) {
     let weapon = if weapons != 0 { mem.u32(weapons + WEAPON_SELECTED) } else { 0 };
     GUN.store(weapon != 0 && !no_reload.contains(&weapon), Ordering::Relaxed);
     let warning = unsafe { orig::warning_screen_active(env) } != 0;
+    ALERT.store(warning, Ordering::Relaxed);
+    let hidden = unsafe { orig::screen_faded_out(env) != 0 || orig::loading_screens_active(env) != 0 };
+    HIDDEN.store(hidden, Ordering::Relaxed);
     let code_bar = warning || text_box().is_some() || frontend;
     unsafe { crate::prompts::update(env, TOUCH_PLAY.load(Ordering::Relaxed), code_bar) };
 }

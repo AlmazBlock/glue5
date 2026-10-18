@@ -35,6 +35,8 @@ fn context(activity: Activity) -> PlayerContext {
         cursor: false,
         map: false,
         pointer: false,
+        alert: false,
+        hidden: false,
     }
 }
 
@@ -700,4 +702,47 @@ fn in_first_person_the_buttons_press_where_the_game_maps_them() {
     t.set_pad_map(Vec::new());
     t.finger_down(3, x, y);
     assert_eq!(t.gamepad().buttons, button::L3);
+}
+
+#[test]
+fn an_engine_warning_shows_its_buttons_alone() {
+    let mut t = phone();
+    // Driving, a pedal held, the game asks "Are you sure you want to join a
+    // different online session?" with Yes (A) and No (B): the pedal lets go.
+    t.set_context(context(Activity::Driving(Driving::Car)));
+    let pedal = t.buttons().into_iter().find(|b| b.icon == "gas").expect("gas");
+    let (x, y) = at(&t, pedal.at);
+    t.finger_down(9, x, y);
+    assert!(t.gamepad().r2 > 0.0);
+    t.set_context(PlayerContext { alert: true, ..context(Activity::Driving(Driving::Car)) });
+    assert_eq!((t.gamepad().r2, t.gamepad().buttons), (0.0, 0));
+    let prompts = vec![
+        Prompt { pads: vec![Pad::Buttons(button::SOUTH)], input: Some(201), label: "Yes".into() },
+        Prompt { pads: vec![Pad::Buttons(button::EAST)], input: Some(202), label: "No".into() },
+    ];
+    t.set_game(prompts.clone(), None);
+    let buttons = t.buttons();
+    assert!(!t.has_stick());
+    assert!(buttons.iter().all(|b| matches!(b.key, Key::Prompt { .. })), "no button of the car's");
+    let bits: Vec<u16> = buttons.iter().map(|b| b.bits).collect();
+    assert_eq!(bits, [button::SOUTH, button::EAST]);
+    let (x, y) = at(&t, buttons[0].at);
+    t.finger_down(1, x, y);
+    assert_eq!(t.gamepad().buttons, button::SOUTH);
+    t.finger_up(1);
+    // Over the pause menu too: its buttons, not the menu's mouse.
+    t.set_context(PlayerContext { alert: true, menu: true, cursor: true, ..context(Activity::OnFoot) });
+    t.set_game(prompts, None);
+    assert!(!t.menu_mode());
+    assert_eq!(t.buttons().len(), 2);
+    // "You were kicked from the session", its buttons not read: Select
+    // and Back all the same.
+    t.set_context(PlayerContext { alert: true, ..context(Activity::OnFoot) });
+    t.set_game(Vec::new(), None);
+    let bits: Vec<u16> = t.buttons().iter().map(|b| b.bits).collect();
+    assert_eq!(bits, [button::SOUTH, button::EAST]);
+    // Black, or loading: nothing of play's.
+    t.set_context(PlayerContext { hidden: true, ..context(Activity::OnFoot) });
+    t.set_game(Vec::new(), None);
+    assert!(t.buttons().is_empty());
 }

@@ -45,6 +45,10 @@
     ("menu_shift_depth", "CPauseMenu::MENU_SHIFT_DEPTH(eMenuceptionDir, bool, bool)"),
     // Called: the pause menu shows its map (direct touch drags it).
     ("pause_menu_in_map", "CPauseMenu::IsInMapScreen()"),
+    // Called: the screen is black, or a loading screen shows (nothing to
+    // play: the touch controls leave).
+    ("screen_faded_out", "camInterface::IsFadedOut()"),
+    ("loading_screens_active", "CLoadingScreens::AreActive()"),
     // A script's menu shows the mouse's cursor this frame (it does for
     // keyboard and mouse only): direct touch clicks in it.
     ("set_mouse_cursor_this_frame", "hud_commands::SetupScriptCommands()::scrWrapped_SET_MOUSE_CURSOR_THIS_FRAME::Call(rage::scrThread::Info&)"),
