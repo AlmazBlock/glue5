@@ -112,6 +112,9 @@ fn handle(method: &str, p: &Value) -> Result<Value, String> {
             Value::Null
         }
         "mods.start" => {
+            if let Some(why) = crate::cannot_start() {
+                return Err(why.into());
+            }
             crate::start(s("name")?);
             Value::Null
         }
@@ -120,6 +123,9 @@ fn handle(method: &str, p: &Value) -> Result<Value, String> {
             Value::Null
         }
         "mods.restart" => {
+            if let Some(why) = crate::cannot_start() {
+                return Err(why.into());
+            }
             crate::restart(s("name")?);
             Value::Null
         }

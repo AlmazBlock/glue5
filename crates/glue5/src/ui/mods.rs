@@ -1,12 +1,13 @@
-//! Mods: the mods in the user directory's `mods` folder, started and
-//! stopped here; GLUE 5 Studio (the web IDE the game serves) with its
-//! address, QR code and pairing code; the mods' log.
+//! Mods: switched on or off here; the mods in the user directory's `mods`
+//! folder, started with the game or during it; their menus while it runs;
+//! GLUE 5 Studio (the web IDE the app serves) with its address, QR code
+//! and pairing code; the mods' log.
 
 use egui::{Color32, CornerRadius, RichText, Sense, vec2};
 use glue5_mods::ModState;
 
 use super::pages::{card_title, sheet, small};
-use super::widgets::{Control, action_button, choice, segmented, setting, slider, toggle};
+use super::widgets::{Control, action_button, choice, inline_button, segmented, setting, slider, toggle};
 use super::{Status, WARN, theme};
 use crate::settings::Settings;
 
@@ -46,31 +47,77 @@ pub struct StudioInfo {
 const OK: Color32 = Color32::from_rgb(120, 205, 145);
 const ERR: Color32 = Color32::from_rgb(240, 149, 149);
 
+/// The mods in a line, for Settings: off, on, what runs.
+pub(super) fn summary(settings: &Settings, status: &Status) -> String {
+    match status.started.as_ref() {
+        Some(s) if s.mods != settings.mods => {
+            return if settings.mods { "On from the next start".into() } else { "Off from the next start".into() };
+        }
+        _ => {}
+    }
+    if !settings.mods {
+        return "Off · scripts that change the game".into();
+    }
+    let mods = glue5_mods::mods();
+    let mut parts = vec!["On".to_owned()];
+    match mods.len() {
+        0 => {}
+        1 => parts.push("1 mod".into()),
+        n => parts.push(format!("{n} mods")),
+    }
+    let running = mods.iter().filter(|m| m.state == ModState::Running).count();
+    if running > 0 {
+        parts.push(format!("{running} running"));
+    }
+    if status.studio.is_some() {
+        parts.push("Studio on".into());
+    }
+    parts.join(" · ")
+}
+
 /// True when closed.
 pub(super) fn mods_page(ctx: &egui::Context, page: &mut ModsPage, settings: &mut Settings, status: &Status) -> bool {
     // Mods change by themselves (they end, fail, the Studio starts them).
     ctx.request_repaint_after(std::time::Duration::from_millis(500));
     sheet(ctx, "mods-window", "MODS", |ui| {
         let scale = theme::density(ui);
-        segmented(
-            ui,
-            &mut page.tab,
-            &[(Tab::Menus, "MENUS"), (Tab::Mods, "MODS"), (Tab::Studio, "STUDIO"), (Tab::Log, "LOG")],
-            40.0 * scale,
-        );
-        ui.add_space(10.0 * scale);
-        if !status.mods {
-            let text = if settings.mods {
-                "Mods run from the next start of the game."
-            } else {
-                "Mods are off. Turn them on in Settings › Game › Mods; they run from the next start."
-            };
-            muted(ui, text);
+        let running_with = status.started.as_ref().map(|s| s.mods);
+        let note = match running_with {
+            Some(with) if with != settings.mods => {
+                Some(if settings.mods { "On from the next start of the game" } else { "Off from the next start; running mods keep going until then" })
+            }
+            _ => None,
+        };
+        setting(ui, "Mods", Control::Toggle, Some(note.unwrap_or("Luau scripts that change the game, run with it")), |ui| {
+            toggle(ui, &mut settings.mods);
+        });
+        if !settings.mods && !status.mods {
+            ui.add_space(4.0 * scale);
+            panel(ui, |ui| {
+                card_title(ui, "WHAT MODS ARE", None);
+                small(
+                    ui,
+                    "A mod is a folder of Luau scripts that call the game's own functions: spawn a car, change \
+                     the weather, add a menu of its own. Turn mods on, then write them in GLUE 5 Studio from a \
+                     browser on your computer or tablet, or let Claude Code write them.",
+                    theme::MUTED,
+                );
+            });
             return;
         }
+        ui.add_space(6.0 * scale);
+        // The menus are there while the game runs with mods.
+        let mut tabs = vec![(Tab::Mods, "MODS"), (Tab::Studio, "STUDIO"), (Tab::Log, "LOG")];
+        if status.mods {
+            tabs.insert(0, (Tab::Menus, "MENUS"));
+        } else if page.tab == Tab::Menus {
+            page.tab = Tab::Mods;
+        }
+        segmented(ui, &mut page.tab, &tabs, 40.0 * scale);
+        ui.add_space(10.0 * scale);
         match page.tab {
             Tab::Menus => menus_tab(ui),
-            Tab::Mods => mods_tab(ui),
+            Tab::Mods => mods_tab(ui, page, status),
             Tab::Studio => studio_tab(ui, settings, status),
             Tab::Log => log_tab(ui),
         }
@@ -141,7 +188,7 @@ fn menu_item(ui: &mut egui::Ui, module: &str, item: &glue5_mods::MenuItem) {
     }
 }
 
-fn mods_tab(ui: &mut egui::Ui) {
+fn mods_tab(ui: &mut egui::Ui, page: &mut ModsPage, status: &Status) {
     let held = glue5_mods::held_back();
     if !held.is_empty() {
         small(
@@ -152,10 +199,34 @@ fn mods_tab(ui: &mut egui::Ui) {
     }
     let mods = glue5_mods::mods();
     if mods.is_empty() {
-        muted(
-            ui,
-            "No mods yet. Make one in GLUE 5 Studio (the STUDIO tab), or put a folder with a main.luau in the mods folder.",
-        );
+        panel(ui, |ui| {
+            card_title(ui, "NO MODS YET", None);
+            small(ui, "Write one in GLUE 5 Studio, from a browser on this network.", theme::MUTED);
+            if let Some(dir) = glue5_mods::dir().filter(|_| !crate::paths::MOBILE) {
+                small(ui, &format!("Or put a folder with a main.luau in {}", dir.display()), theme::MUTED);
+            }
+            ui.add_space(4.0 * theme::density(ui));
+            if inline_button(ui, "Open Studio").clicked() {
+                page.tab = Tab::Studio;
+            }
+        });
+        return;
+    }
+    // Before the game: which start with it.
+    if !status.mods {
+        for m in &mods {
+            let mut on = m.autostart;
+            let note = if on { "Starts with the game" } else { "Not started with the game" };
+            setting(ui, &m.name, Control::Toggle, Some(note), |ui| {
+                if toggle(ui, &mut on).changed()
+                    && let Err(e) = glue5_mods::set_autostart(&m.name, on)
+                {
+                    log::warn!("mods: {e}");
+                }
+            });
+        }
+        muted(ui, "Mods run with the game: those switched on start with it, the others from here or the Studio during it.");
+        return;
     }
     for m in &mods {
         let subtitle = match m.state {
@@ -222,9 +293,7 @@ fn studio_tab(ui: &mut egui::Ui, settings: &mut Settings, status: &Status) {
                     ui.add_space(6.0 * scale);
                     ui.label(RichText::new(format!("Pairing code  {}", info.code)).size(14.0 * scale).color(Color32::WHITE));
                     ui.add_space(8.0 * scale);
-                    // A button's width, not the row's (it lays out right to left).
-                    let copy = ui.allocate_ui(vec2(150.0 * scale, 44.0 * scale), |ui| action_button(ui, "Copy address")).inner;
-                    if copy.clicked() {
+                    if inline_button(ui, "Copy address").clicked() {
                         ui.ctx().copy_text(info.url.clone());
                     }
                 });

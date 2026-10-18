@@ -715,9 +715,15 @@ prompts, aim assist and menu behaviour:
 ## Mods
 
 Mods are Luau scripts (`crates/glue5-mods`) that call the game's script
-commands (natives). They run only when Settings › Game › Mods is on: each
-mod is a folder in the user directory's `mods` with a `main.luau` and an
-optional `mod.json` (`{"autostart": true}`).
+commands (natives). Each mod is a folder in the user directory's `mods`
+with a `main.luau` and an optional `mod.json` (`{"autostart": true}`).
+
+The Mods page holds them: the start page's Mods button, Settings › Game ›
+Mods, F7 in the game, and on touch screens a button beside the settings
+button while a mod has a menu. Its switch turns mods on; the folder opens
+at once (the page lists the mods, the Studio edits them before the game),
+and they run with the game started next, which installs their hooks
+(`open` and `install` in glue5-mods).
 
 **Luau** is a typed Lua (gradual and `--!strict`), embedded with `mlua`. It
 was chosen because:
@@ -799,7 +805,7 @@ playing.
 
 - **Menus**: `ui.menu(title)` with toggles, sliders, choices, buttons and
   labels. The application draws them with its own widgets (touch and
-  controllers too): Settings › Mods and Studio › Menus, or F7.
+  controllers too): the Mods page's MENUS (see above for how it opens).
   - What the player does reaches the mod at its next turn: the item's
     `value` changes and its callback runs as a task.
   - `ui.notify` shows a notification over the game.
@@ -838,8 +844,8 @@ playing.
 
 ### GLUE 5 Studio
 
-The game serves an IDE for mods while mods are on and Settings › Game ›
-Mods and Studio says so. By default only a browser on the same device can
+The app serves an IDE for mods while mods are on and the Mods page's
+STUDIO switch says so, before the game too. By default only a browser on the same device can
 use it; "Other devices" opens it to the network (the default on phones,
 whose own browser is no place to write mods).
 

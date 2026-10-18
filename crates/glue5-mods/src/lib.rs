@@ -167,20 +167,30 @@ pub fn held_back() -> Vec<String> {
     HELD_BACK.lock().unwrap().clone()
 }
 
-/// Sets mods up for the game about to start: `dir` is the mods folder
-/// (made if missing). The mods marked autostart start once the game runs
-/// scripts. Call before `glue5_runtime::start`.
-pub fn install(dir: &Path) {
+/// The mods folder `dir` (made if missing): its mods listed, their files
+/// open to the Studio. Before the game too; they run once [`install`]ed.
+pub fn open(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
     if SHARED.dir.set(dir.to_path_buf()).is_err() {
         return;
     }
+    world::load_saved(dir);
+    refresh();
+}
+
+/// Mods run with the game about to start (the folder [`open`]ed if it was
+/// not): the mods marked autostart start once the game runs scripts. Call
+/// before `glue5_runtime::start`.
+pub fn install(dir: &Path) {
+    open(dir);
+    if INSTALLED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let dir = self::dir().unwrap_or(dir);
     glue5_runtime::add_hooks(engine::hooks);
     // The mods' script threads get stacks of their own.
     glue5_runtime::overlay::more_script_stacks(32);
-    world::load_saved(dir);
     log::info!("mods: {} ({})", dir.display(), natives::SUMMARY);
-    refresh();
     // The game stopped while these ran: not by themselves this time.
     let failed = dir.join(".glue5/failed.json");
     if let Ok(text) = std::fs::read_to_string(&failed) {
@@ -205,9 +215,26 @@ pub fn install(dir: &Path) {
     }
 }
 
-/// The mods folder, once installed.
+/// The mods folder, once open.
 pub fn dir() -> Option<&'static Path> {
     SHARED.dir.get().map(PathBuf::as_path)
+}
+
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Whether mods run with the game (it started with them).
+pub fn installed() -> bool {
+    INSTALLED.load(Ordering::Acquire)
+}
+
+/// Why a mod cannot be started now, if it cannot.
+pub fn cannot_start() -> Option<&'static str> {
+    (!installed()).then_some("mods run with the game, and it is not running with them: start it (mods on), or mark the mod to start with the game")
+}
+
+/// Whether mod `name` starts with the game.
+pub fn set_autostart(name: &str, on: bool) -> Result<(), String> {
+    files::set_autostart(name, on)
 }
 
 /// Reads the mods folder again (new or removed mods).
@@ -284,15 +311,15 @@ pub fn restart(name: &str) {
 /// Runs Luau `code` in the game (in a script thread of its own, as a mod),
 /// as an expression if it is one. `reply` gets the values as text.
 pub fn eval(code: &str, reply: Sender<EvalResult>) {
-    if dir().is_none() {
-        let _ = reply.send(Err("mods are off".into()));
+    if !installed() {
+        let _ = reply.send(Err("the game is not running with mods: they run from the next start".into()));
         return;
     }
     command(Command::Eval(code.to_string(), reply));
 }
 
 fn command(c: Command) {
-    if dir().is_none() {
+    if !installed() {
         return;
     }
     SHARED.state.lock().unwrap().commands.push(c);
@@ -362,6 +389,11 @@ pub enum MenuInput {
 /// The mods' menus.
 pub fn menus() -> Vec<Menu> {
     SHARED.state.lock().unwrap().menus.clone()
+}
+
+/// Whether a mod has a menu.
+pub fn has_menus() -> bool {
+    !SHARED.state.lock().unwrap().menus.is_empty()
 }
 
 /// The player changed or pressed an item: the menu shows it at once, the

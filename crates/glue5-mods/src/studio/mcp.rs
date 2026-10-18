@@ -132,6 +132,9 @@ fn call(name: &str, a: &Value) -> Value {
                 if !crate::mods().iter().any(|m| m.name == mod_name) {
                     return Err(format!("no mod {mod_name}"));
                 }
+                if let Some(why) = crate::cannot_start() {
+                    return Err(why.into());
+                }
                 let (_, cursor) = crate::logs(u64::MAX);
                 if name == "start_mod" {
                     crate::start(mod_name);

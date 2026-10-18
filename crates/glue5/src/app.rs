@@ -461,6 +461,11 @@ impl App {
                 self.ui.toggle_settings();
                 return false;
             }
+            // Its neighbour while mods have menus: those menus.
+            if !self.ui.is_open() && self.ui.menus_hit(x, y, &self.window) {
+                self.ui.toggle_mod_menus();
+                return false;
+            }
             // A notification tapped: the friends, at its tab.
             if self.ui.toast_hit(x, y, &self.window) {
                 self.ui.open_toast();
@@ -483,9 +488,9 @@ impl App {
             self.ui.toggle_settings();
             return false;
         }
-        // F7: the mods' menus (with mods on).
+        // F7: the mods' menus (with mods running).
         if let Event::KeyDown { scancode: Some(Scancode::F7), repeat: false, .. } = event
-            && glue5_mods::dir().is_some()
+            && glue5_mods::installed()
             && !self.ui.wants_text()
         {
             self.ui.toggle_mod_menus();
@@ -652,7 +657,8 @@ impl App {
                 source: self.settings.source,
                 stream: stream.as_ref().map(|(server, status)| (*server, status)),
                 sharing: self.sharing.as_ref().map(crate::sharing::Sharing::state),
-                mods: glue5_mods::dir().is_some(),
+                mods: glue5_mods::installed(),
+                mod_menus: glue5_mods::has_menus(),
                 studio: self.studio.as_ref().map(|(_, info)| info),
                 servers: &servers.1,
                 searching: servers.0,
@@ -1105,8 +1111,14 @@ impl App {
 
     /// GLUE 5 Studio follows its settings: served while the game runs
     /// with mods and the setting is on, for this device or the network.
+    /// The mods folder opens when mods are on (before the game too: the
+    /// Mods page lists them, the Studio edits them); the Studio serves
+    /// while it is on.
     fn update_studio(&mut self) {
-        let wanted = (glue5_mods::dir().is_some() && self.settings.studio).then_some(self.settings.studio_lan);
+        if self.settings.mods && glue5_mods::dir().is_none() {
+            glue5_mods::open(&self.user_dir.join("mods"));
+        }
+        let wanted = (self.settings.mods && glue5_mods::dir().is_some() && self.settings.studio).then_some(self.settings.studio_lan);
         if self.studio.as_ref().map(|(s, _)| s.lan()) == wanted {
             return;
         }
