@@ -67,8 +67,9 @@ files with `--!strict` to have every type checked.
 
 ## Menus
 - `local m = ui.menu("Trainer")` makes a menu the app shows with its own
-  widgets (touch and controllers too): Settings › Mods and Studio ›
-  Menus, or F7 in the game.
+  widgets (touch and controllers too): the Mods page's MENUS, opened
+  with F7 or, on touch screens, the button beside the settings button;
+  the Studio's MENUS panel shows them too.
 - Items: `m:toggle(label, on, [note], [onChange])`, `m:slider(label,
   value, min, max, [step], [onChange])`, `m:choice(label, {options},
   [index], [onChange])`, `m:button(label, [note], [onPress])`,

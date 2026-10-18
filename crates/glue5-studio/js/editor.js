@@ -21,6 +21,10 @@ import { tags as t } from "@lezer/highlight";
 
 // ---- Luau ---------------------------------------------------------------
 
+// What opens a block and what closes one (elseif closes the branch its
+// `then` opens again; else leaves the depth as it was).
+const OPENS = new Set(["function", "do", "then", "repeat"]);
+const CLOSES = new Set(["end", "until", "elseif"]);
 const KEYWORDS = new Set(("and break do else elseif end false for function if in local nil not or repeat " +
   "return then true until while continue").split(" "));
 const CONTEXTUAL = new Set(["type", "export", "typeof"]);
@@ -60,58 +64,103 @@ function readQuoted(quote) {
 
 const luau = StreamLanguage.define({
   name: "luau",
-  startState: () => ({ tokenize: null, typeContext: false, afterDot: false }),
+  startState: () => ({ tokenize: null, typeContext: false, afterDot: false, depth: 0, ifExpr: false, levels: [] }),
   token(stream, state) {
-    if (state.tokenize) return state.tokenize(stream, state);
-    if (stream.eatSpace()) return null;
-    if (stream.match("--")) {
-      const level = longBracket(stream);
-      if (level >= 0) { state.tokenize = readLong(level, "comment"); return state.tokenize(stream, state); }
-      stream.skipToEnd();
-      return "comment";
-    }
-    const level = longBracket(stream);
-    if (level >= 0) { state.tokenize = readLong(level, "string"); return state.tokenize(stream, state); }
-    const ch = stream.peek();
-    if (ch === '"' || ch === "'" || ch === "`") {
-      stream.next();
-      state.tokenize = readQuoted(ch);
-      return state.tokenize(stream, state);
-    }
-    if (stream.match(/^0x[\da-f_]+/i) || stream.match(/^0b[01_]+/i) || stream.match(/^\d[\d_]*(\.[\d_]*)?(e[+-]?\d+)?/i)) {
-      state.afterDot = false;
-      return "number";
-    }
-    if (stream.match(/^[A-Za-z_][A-Za-z0-9_]*/)) {
-      const word = stream.current();
-      const afterDot = state.afterDot;
-      state.afterDot = false;
-      if (KEYWORDS.has(word)) { state.typeContext = false; return word === "true" || word === "false" || word === "nil" ? "atom" : "keyword"; }
-      if (CONTEXTUAL.has(word) && !afterDot && /^\s+[A-Za-z_]/.test(stream.string.slice(stream.pos))) return "keyword";
-      if (state.typeContext || BUILTIN_TYPES.has(word) && /[:>|?]\s*$/.test(stream.string.slice(0, stream.start))) {
-        return "typeName";
-      }
-      if (afterDot) return /^\s*\(/.test(stream.string.slice(stream.pos)) ? "function" : "property";
-      if (stream.peek() === ".") return "namespace";
-      if (/^\s*\(/.test(stream.string.slice(stream.pos))) return GLOBALS.has(word) ? "builtin" : "function";
-      return GLOBALS.has(word) ? "builtin" : "variable";
-    }
-    if (stream.match("->")) { state.typeContext = true; return "operator"; }
-    const op = stream.next();
-    if (op === ".") { state.afterDot = true; return "punctuation"; }
-    if (op === ":") {
-      // `local x: Type`, `(a: T)`: a type follows (method calls `a:b()` do not).
-      state.typeContext = /^\s*[A-Za-z_][A-Za-z0-9_]*\s*[,)=?|]/.test(stream.string.slice(stream.pos)) ||
-        /^\s*[A-Za-z_][A-Za-z0-9_]*\s*$/.test(stream.string.slice(stream.pos));
-      if (!state.typeContext) state.afterDot = true;
-      return "punctuation";
-    }
-    if (/[,=)(\]{}]/.test(op)) state.typeContext = false;
-    return /[()[\]{},;]/.test(op) ? "punctuation" : "operator";
+    const style = luauToken(stream, state);
+    if (stream.eol()) endLine(state);
+    return style;
   },
-  languageData: { commentTokens: { line: "--", block: { open: "--[[", close: "]]" } }, closeBrackets: { brackets: ["(", "[", "{", '"', "'", "`"] } },
+  // A line is indented by the levels open before it: a line that leaves
+  // blocks or brackets open adds one, however many (`f(x, function()`),
+  // and they close together (`end)`). One that starts by closing (end,
+  // until, a bracket) or with else / elseif sits a level out.
+  indent(state, textAfter, cx) {
+    let depth = state.depth, rest = textAfter, out = 0, m;
+    while ((m = /^\s*(\bend\b|\buntil\b|\belseif\b|\belse\b|[)}\]])/.exec(rest))) {
+      if (m[1] === "else") { out = 1; break; }
+      depth--;
+      rest = rest.slice(m[0].length);
+    }
+    return Math.max(0, state.levels.filter(level => level <= depth).length - out) * cx.unit;
+  },
+  languageData: {
+    commentTokens: { line: "--", block: { open: "--[[", close: "]]" } },
+    closeBrackets: { brackets: ["(", "[", "{", '"', "'", "`"] },
+    indentOnInput: /^\s*(end|else|elseif|until|[)}\]])$/,
+  },
   tokenTable: { namespace: t.namespace, typeName: t.typeName, builtin: t.standard(t.variableName), function: t.function(t.variableName), property: t.propertyName },
 });
+
+// The levels at a line's end: those closed go, and one more when the line
+// left more open than before.
+function endLine(state) {
+  while (state.levels.length && state.levels[state.levels.length - 1] > state.depth) state.levels.pop();
+  if (state.depth > (state.levels.length ? state.levels[state.levels.length - 1] : 0)) state.levels.push(state.depth);
+}
+
+function luauToken(stream, state) {
+  // An if-expression (`x = if a then b else c`) stays on its line.
+  if (stream.sol()) state.ifExpr = false;
+  if (state.tokenize) return state.tokenize(stream, state);
+  if (stream.eatSpace()) return null;
+  if (stream.match("--")) {
+    const level = longBracket(stream);
+    if (level >= 0) { state.tokenize = readLong(level, "comment"); return state.tokenize(stream, state); }
+    stream.skipToEnd();
+    return "comment";
+  }
+  const level = longBracket(stream);
+  if (level >= 0) { state.tokenize = readLong(level, "string"); return state.tokenize(stream, state); }
+  const ch = stream.peek();
+  if (ch === '"' || ch === "'" || ch === "`") {
+    stream.next();
+    state.tokenize = readQuoted(ch);
+    return state.tokenize(stream, state);
+  }
+  if (stream.match(/^0x[\da-f_]+/i) || stream.match(/^0b[01_]+/i) || stream.match(/^\d[\d_]*(\.[\d_]*)?(e[+-]?\d+)?/i)) {
+    state.afterDot = false;
+    return "number";
+  }
+  if (stream.match(/^[A-Za-z_][A-Za-z0-9_]*/)) {
+    const word = stream.current();
+    const afterDot = state.afterDot;
+    state.afterDot = false;
+    if (KEYWORDS.has(word)) {
+      state.typeContext = false;
+      if (word === "if" && !afterDot) {
+        // In an expression (after `=`, `(`, `,`, `return`, an operator...),
+        // it is an if-expression: its `then` and `else` open nothing.
+        state.ifExpr = /([=(,{[+\-*/%^<>~]|\.\.|\breturn|\band|\bor|\bnot)\s*$/.test(stream.string.slice(0, stream.start));
+      } else if (!afterDot && !(state.ifExpr && (word === "then" || word === "elseif"))) {
+        if (OPENS.has(word)) state.depth++;
+        else if (CLOSES.has(word)) state.depth = Math.max(0, state.depth - 1);
+      }
+      return word === "true" || word === "false" || word === "nil" ? "atom" : "keyword";
+    }
+    if (CONTEXTUAL.has(word) && !afterDot && /^\s+[A-Za-z_]/.test(stream.string.slice(stream.pos))) return "keyword";
+    if (state.typeContext || BUILTIN_TYPES.has(word) && /[:>|?]\s*$/.test(stream.string.slice(0, stream.start))) {
+      return "typeName";
+    }
+    if (afterDot) return /^\s*\(/.test(stream.string.slice(stream.pos)) ? "function" : "property";
+    if (stream.peek() === ".") return "namespace";
+    if (/^\s*\(/.test(stream.string.slice(stream.pos))) return GLOBALS.has(word) ? "builtin" : "function";
+    return GLOBALS.has(word) ? "builtin" : "variable";
+  }
+  if (stream.match("->")) { state.typeContext = true; return "operator"; }
+  const op = stream.next();
+  if (op === ".") { state.afterDot = true; return "punctuation"; }
+  if (op === ":") {
+    // `local x: Type`, `(a: T)`: a type follows (method calls `a:b()` do not).
+    state.typeContext = /^\s*[A-Za-z_][A-Za-z0-9_]*\s*[,)=?|]/.test(stream.string.slice(stream.pos)) ||
+      /^\s*[A-Za-z_][A-Za-z0-9_]*\s*$/.test(stream.string.slice(stream.pos));
+    if (!state.typeContext) state.afterDot = true;
+    return "punctuation";
+  }
+  if (/[,=)(\]{}]/.test(op)) state.typeContext = false;
+  if (/[({[]/.test(op)) state.depth++;
+  else if (/[)}\]]/.test(op)) state.depth = Math.max(0, state.depth - 1);
+  return /[()[\]{},;]/.test(op) ? "punctuation" : "operator";
+}
 
 // ---- JSON (a mod's mod.json) --------------------------------------------
 
@@ -166,6 +215,10 @@ const theme = EditorView.theme({
   ".cm-completionMatchedText": { textDecoration: "none", color: "#fff", fontWeight: "700" },
   ".cm-lsp-documentation, .cm-tooltip-hover": { padding: "10px 12px", fontFamily: "var(--ui)", color: "#d5d7db", maxWidth: "520px" },
   ".cm-lsp-documentation pre, .cm-tooltip-hover pre": { fontFamily: "var(--mono)", whiteSpace: "pre-wrap", margin: "0 0 8px" },
+  ".cm-tooltip a": { color: "#fff", textDecorationColor: "rgba(255,255,255,.35)", textUnderlineOffset: "3px", overflowWrap: "anywhere" },
+  ".cm-tooltip code": { fontFamily: "var(--mono)", fontSize: "12px", color: "#d5d7db" },
+  ".cm-signature-tooltip, .cm-lsp-signature-tooltip": { padding: "8px 12px", fontFamily: "var(--mono)", fontSize: "12.5px", maxWidth: "620px" },
+  ".cm-lsp-active-parameter": { color: "#fff", fontWeight: "700", textDecoration: "underline", textUnderlineOffset: "3px" },
   ".cm-diagnostic": { fontFamily: "var(--ui)", padding: "8px 12px" },
   ".cm-diagnostic-error": { borderLeft: "3px solid #f09595" },
   ".cm-diagnostic-warning": { borderLeft: "3px solid #f0b464" },
@@ -226,7 +279,11 @@ function webSocketTransport(url, onState) {
   return new Promise(resolve => {
     let resolved = false;
     const open = () => {
-      socket = new WebSocket(url);
+      // No address while the page waits for a new code: an old one would
+      // count as a wrong guess, and the server stops taking any after ten.
+      const address = url();
+      if (!address) { setTimeout(open, 1000); return; }
+      socket = new WebSocket(address);
       socket.onmessage = e => { for (const h of handlers) h(String(e.data)); };
       socket.onopen = () => {
         onState(true);
@@ -252,8 +309,28 @@ export class StudioEditor {
     this.cursorHandler = () => {};
     this.client = new LSPClient({ extensions: languageServerExtensions(), timeout: 5000 });
     this.readOnly = new Compartment();
-    webSocketTransport(lspUrl, up => { this.lspUp = up; }).then(transport => this.client.connect(transport));
+    this.lspUrl = lspUrl;
+    // A new server (the game started again) knows nothing: connecting again
+    // initialises it and opens the files anew.
+    webSocketTransport(() => this.lspUrl, up => {
+      this.lspUp = up;
+      if (!this.transport) return;
+      if (up) this.client.connect(this.transport); else this.client.disconnect();
+    }).then(transport => { this.transport = transport; this.client.connect(transport); });
     this.view = new EditorView({ parent, state: EditorState.create({ doc: "" }) });
+  }
+
+  // The code is no longer good (the game started again): no more tries
+  // until `attach` brings the new one.
+  pause() {
+    this.lspUrl = null;
+  }
+
+  // Into a new page (paired again): the same editor, its files and history.
+  attach(parent, lspUrl) {
+    this.lspUrl = lspUrl;
+    parent.appendChild(this.view.dom);
+    this.view.requestMeasure();
   }
 
   extensions(path, readOnly) {
@@ -406,14 +483,23 @@ export class StudioEditor {
     this.changeHandler(path, this.isDirty(path));
   }
 
-  // Replaces the text (the file changed on disk).
+  // Replaces the text (the file changed on disk): only the part that
+  // differs, so the cursor and the rest stay where they were; nothing when
+  // it is the text shown (a save of this page coming back).
   replace(path, text) {
     const file = this.files.get(path);
     if (!file) return;
     const state = this.stateOf(path);
-    const tr = state.update({ changes: { from: 0, to: state.doc.length, insert: text } });
-    if (path === this.current) this.view.dispatch(tr); else file.state = tr.state;
+    const old = state.doc.toString();
     file.saved = text;
+    if (old !== text) {
+      let from = 0;
+      while (from < old.length && from < text.length && old[from] === text[from]) from++;
+      let end = 0;
+      while (end < old.length - from && end < text.length - from && old[old.length - 1 - end] === text[text.length - 1 - end]) end++;
+      const tr = state.update({ changes: { from, to: old.length - end, insert: text.slice(from, text.length - end) } });
+      if (path === this.current) this.view.dispatch(tr); else file.state = tr.state;
+    }
     this.changeHandler(path, false);
   }
 

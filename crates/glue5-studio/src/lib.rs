@@ -115,7 +115,7 @@ fn Pair(s: S) -> impl IntoView {
         <div class="pair">
             <div class="pair-card">
                 <div class="brand big"><img src="/logo.png" alt=""/><b>"GLUE 5"</b><span>"STUDIO"</span></div>
-                <p>"Enter the code shown in the game, under Settings › Mods › Studio."</p>
+                <p>"Enter the code shown in the game, under Mods › Studio."</p>
                 <input class="code-input" placeholder="ABCD-1234" autocomplete="off" autocapitalize="characters" spellcheck="false"
                     prop:value=move || code.get()
                     on:input=move |ev| code.set(event_target_value(&ev))
@@ -129,14 +129,18 @@ fn Pair(s: S) -> impl IntoView {
 #[component]
 fn Shell(s: S) -> impl IntoView {
     let host_ref = NodeRef::<leptos::html::Div>::new();
-    // The editor, made once its element is in the page.
+    // The editor, made once its element is in the page; after pairing again
+    // (the game started anew, with a new code) the page is made again and
+    // the same editor moves into it.
     Effect::new(move |_| {
         let Some(el) = host_ref.get() else { return };
+        let token = TOKEN.with(|t| t.borrow().clone());
+        let lsp = format!("ws://{}/lsp?token={token}", host());
         if EDITOR.with(|e| e.borrow().is_some()) {
+            with_editor(|e| e.attach(&el, &lsp));
             return;
         }
-        let token = TOKEN.with(|t| t.borrow().clone());
-        let editor = StudioEditor::new(&el, &format!("ws://{}/lsp?token={token}", host()));
+        let editor = StudioEditor::new(&el, &lsp);
         let on_change = Closure::<dyn FnMut(String, bool)>::new(move |path: String, dirty: bool| {
             s.tabs.update(|t| {
                 if let Some(t) = t.iter_mut().find(|t| t.path == path) {

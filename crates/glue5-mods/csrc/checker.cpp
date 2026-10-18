@@ -237,4 +237,69 @@ char* glue5_checker_hover(Glue5Checker* c, const char* name, unsigned line, unsi
   }
 }
 
+// The call around a position, for signature help: {"name", "params":
+// [{"name", "type"}], "ret", "active", "doc"} or null. Types in full (the
+// host shortens them).
+char* glue5_checker_signature(Glue5Checker* c, const char* name, unsigned line, unsigned column) {
+  try {
+    c->frontend.check(name);
+    const Luau::SourceModule* source = c->frontend.getSourceModule(name);
+    Luau::ModulePtr module = c->frontend.moduleResolver.getModule(name);
+    if (!source || !module) return owned("null");
+    Luau::Position at{line, column};
+    // The innermost call whose argument list holds the position.
+    Luau::AstExprCall* call = nullptr;
+    for (Luau::AstNode* node : Luau::findAstAncestryOfPosition(*source, at)) {
+      if (auto* candidate = node->as<Luau::AstExprCall>(); candidate && candidate->func->location.end < at) {
+        call = candidate;
+      }
+    }
+    if (!call) return owned("null");
+    const Luau::TypeId* found = module->astTypes.find(call->func);
+    if (!found) return owned("null");
+    Luau::TypeId type = Luau::follow(*found);
+    // Overloads: the first.
+    if (auto* both = Luau::get<Luau::IntersectionType>(type); both && !both->parts.empty()) type = Luau::follow(both->parts[0]);
+    auto* f = Luau::get<Luau::FunctionType>(type);
+    if (!f) return owned("null");
+    std::string label;
+    if (auto* index = call->func->as<Luau::AstExprIndexName>()) label = index->index.value;
+    if (auto* global = call->func->as<Luau::AstExprGlobal>()) label = global->name.value;
+    if (auto* local = call->func->as<Luau::AstExprLocal>()) label = local->local->name.value;
+    Luau::ToStringOptions opts;
+    opts.maxTypeLength = 0;
+    auto [args, tail] = Luau::flatten(f->argTypes);
+    // `a:b(...)` passes `a` itself first.
+    size_t first = call->self ? 1 : 0;
+    std::string params = "[";
+    for (size_t i = first; i < args.size(); i++) {
+      std::string argName = i < f->argNames.size() && f->argNames[i] ? f->argNames[i]->name : "arg" + std::to_string(i + 1);
+      if (params.size() > 1) params += ",";
+      params += "{\"name\":" + quote(argName) + ",\"type\":" + quote(Luau::toString(args[i], opts)) + "}";
+    }
+    if (tail) {
+      if (params.size() > 1) params += ",";
+      params += "{\"name\":\"...\",\"type\":" + quote(Luau::toString(*tail, opts)) + "}";
+    }
+    params += "]";
+    // The argument the position is in.
+    size_t active = 0;
+    for (size_t i = 0; i < call->args.size; i++) {
+      if (call->args.data[i]->location.end < at) active = i + 1;
+    }
+    if (active > 0 && active == call->args.size) {
+      // After the last argument: in it, unless a comma followed it.
+      const Luau::Location& last = call->args.data[active - 1]->location;
+      if (!(last.end < at)) active--;
+    }
+    Luau::Position inName = call->func->location.end;
+    if (inName.column > 0) inName.column--;
+    auto doc = Luau::getDocumentationSymbolAtPosition(*source, *module, inName);
+    return owned("{\"name\":" + quote(label) + ",\"params\":" + params + ",\"ret\":" + quote(Luau::toString(f->retTypes, opts)) +
+                 ",\"active\":" + std::to_string(active) + ",\"doc\":" + quote(doc.value_or("")) + "}");
+  } catch (const std::exception& e) {
+    return owned(std::string("{\"error\":") + quote(e.what()) + "}");
+  }
+}
+
 }  // extern "C"

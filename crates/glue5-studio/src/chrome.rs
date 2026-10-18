@@ -9,8 +9,12 @@ use crate::state::*;
 
 #[component]
 pub(crate) fn TitleBar(s: S) -> impl IntoView {
+    let input = NodeRef::<leptos::html::Input>::new();
+    // The highlighted result (keys move it, Enter inserts it).
+    let selected = RwSignal::new(0usize);
     let search = move |q: String| {
         s.query.set(q.clone());
+        selected.set(0);
         if q.trim().len() < 2 {
             s.found.set(Vec::new());
             return;
@@ -21,6 +25,31 @@ pub(crate) fn TitleBar(s: S) -> impl IntoView {
             }
         });
     };
+    let close = move || {
+        s.query.set(String::new());
+        s.found.set(Vec::new());
+        if let Some(el) = input.get_untracked() {
+            let _ = el.blur();
+        }
+    };
+    // Into the open file at the cursor, as `namespace.name(`.
+    let insert = move |n: &Value| {
+        let call = format!("{}(", n["name"].as_str().unwrap_or(""));
+        close();
+        with_editor(|e| e.insert(&call));
+        s.screen.set(Screen::Editor);
+    };
+    // Ctrl/Cmd+K from anywhere.
+    let shortcut = window_event_listener(leptos::ev::keydown, move |ev| {
+        if (ev.meta_key() || ev.ctrl_key()) && ev.key().eq_ignore_ascii_case("k") {
+            ev.prevent_default();
+            if let Some(el) = input.get_untracked() {
+                let _ = el.focus();
+                el.select();
+            }
+        }
+    });
+    on_cleanup(move || shortcut.remove());
     view! {
         <header class="titlebar">
             <div class="brand">
@@ -29,21 +58,36 @@ pub(crate) fn TitleBar(s: S) -> impl IntoView {
             <div class="palette-wrap">
                 <label class="palette">
                     <span class="ico" inner_html=icons::SEARCH></span>
-                    <input placeholder="Search natives" spellcheck="false"
+                    <input node_ref=input placeholder="Search natives" spellcheck="false" autocomplete="off"
                         prop:value=move || s.query.get()
                         on:focus=move |_| s.palette.set(true)
                         on:blur=move |_| set_timeout(move || s.palette.set(false), std::time::Duration::from_millis(200))
                         on:input=move |ev| search(event_target_value(&ev))
-                        on:keydown=move |ev| if ev.key() == "Escape" { s.query.set(String::new()); s.found.set(Vec::new()); } />
-                    <kbd>"natives"</kbd>
+                        on:keydown=move |ev| {
+                            let count = s.found.with_untracked(Vec::len);
+                            match ev.key().as_str() {
+                                "ArrowDown" if count > 0 => { ev.prevent_default(); selected.update(|i| *i = (*i + 1) % count); }
+                                "ArrowUp" if count > 0 => { ev.prevent_default(); selected.update(|i| *i = (*i + count - 1) % count); }
+                                "Enter" => {
+                                    if let Some(n) = s.found.with_untracked(|f| f.get(selected.get_untracked()).cloned()) {
+                                        ev.prevent_default();
+                                        insert(&n);
+                                    }
+                                }
+                                "Escape" => close(),
+                                _ => {}
+                            }
+                        } />
+                    <kbd>"⌘K"</kbd>
                 </label>
                 <Show when=move || s.palette.get() && s.found.with(|f| !f.is_empty())>
                     <div class="palette-results">
-                        {move || s.found.get().into_iter().map(|n| {
-                            let name = n["name"].as_str().unwrap_or("").to_string();
-                            let insert = format!("{name}(");
+                        {move || s.found.get().into_iter().enumerate().map(|(i, n)| {
+                            let n2 = n.clone();
                             view! {
-                                <button class="result" on:mousedown=move |_| { with_editor(|e| e.insert(&insert)); }>
+                                <button class=move || if selected.get() == i { "presult on" } else { "presult" }
+                                    on:mouseenter=move |_| selected.set(i)
+                                    on:mousedown=move |ev| { ev.prevent_default(); insert(&n2); }>
                                     <span class="sig">{n["signature"].as_str().unwrap_or("").to_string()}</span>
                                     <small>{n["native"].as_str().unwrap_or("").to_string()}</small>
                                 </button>

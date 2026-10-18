@@ -8,6 +8,13 @@ extern "C" {
 
     #[wasm_bindgen(constructor)]
     pub fn new(parent: &web_sys::HtmlElement, lsp_url: &str) -> StudioEditor;
+    /// Moves the editor into `parent` (a page made again), with the language
+    /// server's new address.
+    #[wasm_bindgen(method)]
+    pub fn attach(this: &StudioEditor, parent: &web_sys::HtmlElement, lsp_url: &str);
+    /// Stops connecting to the language server (the code went stale).
+    #[wasm_bindgen(method)]
+    pub fn pause(this: &StudioEditor);
     #[wasm_bindgen(method)]
     pub fn open(this: &StudioEditor, path: &str, text: &str, read_only: bool);
     #[wasm_bindgen(method)]

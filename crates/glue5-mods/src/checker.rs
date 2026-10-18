@@ -23,6 +23,7 @@ unsafe extern "C" {
     fn glue5_checker_check(c: *mut Raw, name: *const c_char) -> *mut c_char;
     fn glue5_checker_complete(c: *mut Raw, name: *const c_char, line: u32, column: u32) -> *mut c_char;
     fn glue5_checker_hover(c: *mut Raw, name: *const c_char, line: u32, column: u32) -> *mut c_char;
+    fn glue5_checker_signature(c: *mut Raw, name: *const c_char, line: u32, column: u32) -> *mut c_char;
 }
 
 pub struct Checker {
@@ -102,6 +103,12 @@ impl Checker {
     pub fn hover(&mut self, name: &str, line: u32, column: u32) -> Value {
         let name = cstring(name);
         json(unsafe { glue5_checker_hover(self.raw, name.as_ptr(), line, column) })
+    }
+
+    /// The call around a position: `{name, params: [{name, type}], ret, active, doc}` or null.
+    pub fn signature(&mut self, name: &str, line: u32, column: u32) -> Value {
+        let name = cstring(name);
+        json(unsafe { glue5_checker_signature(self.raw, name.as_ptr(), line, column) })
     }
 }
 

@@ -869,7 +869,9 @@ whose own browser is no place to write mods).
   a small C API (`csrc/checker.cpp`). It loads the natives' definitions in
   about 80 ms; checking a file takes under a millisecond. It exists only
   while an editor is connected (some 30 MB, which the log reports) and
-  speaks LSP over a WebSocket (`/lsp`). Completions are filtered by what
+  speaks LSP over a WebSocket (`/lsp`): diagnostics, completions, hovers
+  and signature help (the call's parameters, the current one marked).
+  Completions are filtered by what
   is typed before they are sent, so lists stay short on phones. Types are
   printed in full and the host writes the catalog's unions as their
   names (`VehicleModel`...), so a signature stays one line. On an iPhone
@@ -898,8 +900,16 @@ whose own browser is no place to write mods).
   takes snippets from a queue. The console's input is a one-line
   CodeMirror with the same language server (a document of its own,
   `~console/input.luau`): highlighting and completions as in a file.
-- Files written by any client reach open editors (a WebSocket message).
-  Saving can restart the mod.
+- Files written by any client reach open editors (a WebSocket message),
+  changing only what differs (the cursor stays); a tab with unsaved
+  changes keeps them and says so. Saving can restart the mod.
+- When the game starts again its code changes: the page asks for the new
+  one and keeps its editor, tabs and history; nothing retries the old
+  code meanwhile (the server takes no code for a minute after ten wrong
+  ones).
+- Luau's indentation in the editor: a line leaving blocks or brackets
+  open adds a level, however many (`f(x, function()` ... `end)`), and
+  if-expressions open none.
 - The mods' menus show in the Studio too (the MENUS panel, a screen of
   their own on phones): the same items the game draws, sent again when
   they change; what is done there reaches the mod as from the game.

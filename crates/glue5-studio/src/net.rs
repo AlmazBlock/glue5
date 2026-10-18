@@ -105,6 +105,8 @@ pub(crate) fn connect(s: S) {
             // The game went away (or the network did): try again.
             set_timeout(move || connect(s), std::time::Duration::from_secs(2));
         } else {
+            // A new code is needed: the editor stops trying the old one too.
+            with_editor(|e| e.pause());
             s.pairing.set(Pairing::Needed);
         }
     });
@@ -117,7 +119,12 @@ pub(crate) fn connect(s: S) {
 pub(crate) fn reload(s: S, path: &str) {
     let tab = s.tabs.with_untracked(|t| t.iter().find(|t| t.path == path).cloned());
     let Some(tab) = tab else { return };
-    if tab.dirty || tab.read_only {
+    if tab.read_only {
+        return;
+    }
+    if tab.dirty {
+        // Saving would overwrite what changed: say so.
+        s.notice.set(Some(format!("{path} changed in the game's folder; saving keeps your version")));
         return;
     }
     let p = path.to_string();

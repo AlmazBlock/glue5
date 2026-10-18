@@ -33,6 +33,7 @@ pub fn run(mut ws: Socket) -> std::io::Result<()> {
                     "textDocumentSync": { "openClose": true, "change": 1 },
                     "completionProvider": { "triggerCharacters": [".", ":"] },
                     "hoverProvider": true,
+                    "signatureHelpProvider": { "triggerCharacters": ["(", ","], "retriggerCharacters": [","] },
                 },
                 "serverInfo": { "name": "glue5-luau", "version": env!("CARGO_PKG_VERSION") },
             })),
@@ -58,6 +59,7 @@ pub fn run(mut ws: Socket) -> std::io::Result<()> {
             }
             "textDocument/completion" => Some(completion(&uri, p, &docs)),
             "textDocument/hover" => Some(hover(&uri, p, &docs)),
+            "textDocument/signatureHelp" => Some(signature(&uri, p)),
             "shutdown" => Some(Value::Null),
             "exit" => break,
             _ => {
@@ -207,4 +209,36 @@ fn hover(uri: &str, p: &Value, _docs: &HashMap<String, String>) -> Value {
         value.push_str(&doc);
     }
     json!({ "contents": { "kind": "markdown", "value": value }, "range": lsp_range(&h["range"]) })
+}
+
+/// The parameters of the call being typed, the current one marked.
+fn signature(uri: &str, p: &Value) -> Value {
+    let module = module(uri);
+    if !module.ends_with(".luau") {
+        return Value::Null;
+    }
+    let (line, character) = position(p);
+    let sig = Checker::with(|c| c.signature(&module, line, character)).unwrap_or(Value::Null);
+    let Some(params) = sig["params"].as_array() else { return Value::Null };
+    // The label with the catalog's names short; each parameter by its offsets
+    // in it (UTF-16, as LSP counts).
+    let mut label = format!("{}(", sig["name"].as_str().unwrap_or(""));
+    let mut spans = Vec::new();
+    for (i, param) in params.iter().enumerate() {
+        if i > 0 {
+            label.push_str(", ");
+        }
+        let start = label.encode_utf16().count();
+        let name = param["name"].as_str().unwrap_or("");
+        let ty = crate::world::shorten(param["type"].as_str().unwrap_or("any"));
+        label.push_str(&if name == "..." { format!("...{ty}") } else { format!("{name}: {ty}") });
+        spans.push(json!({ "label": [start, label.encode_utf16().count()] }));
+    }
+    label.push_str(&format!("): {}", crate::world::shorten(sig["ret"].as_str().unwrap_or("()"))));
+    let mut signature = json!({ "label": label, "parameters": spans });
+    if let Some(doc) = sig["doc"].as_str().filter(|d| !d.is_empty()).and_then(api::documentation) {
+        signature["documentation"] = json!({ "kind": "markdown", "value": doc });
+    }
+    let active = sig["active"].as_u64().unwrap_or(0).min(params.len().saturating_sub(1) as u64);
+    json!({ "signatures": [signature], "activeSignature": 0, "activeParameter": active })
 }
