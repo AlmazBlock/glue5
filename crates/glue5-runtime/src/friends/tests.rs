@@ -593,3 +593,28 @@ fn the_session_joined_is_the_friend_s_whose_session_it_is() {
     a.s.session_changed(None, now);
     assert_eq!(a.s.joined, None);
 }
+
+#[test]
+fn a_code_owner_out_of_reach_finds_the_asker_and_probes_it() {
+    // The DHT hands out the owner at the port its NAT gave a node, where
+    // nothing of the asker's gets in; the asker announces itself under the
+    // code too, the owner finds it there, probes it, and is asked.
+    let mut now = Instant::now();
+    let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
+    b.s.asked.push(Ask::new(a.code(), None));
+    let code_key = crypto::code_key(&a.code());
+    assert!(b.s.lookups(unix()).contains(&(code_key, dht::Options { announce: true, refresh: LOOKUP_ALONE })));
+    let mut out = Out::default();
+    b.s.found(code_key, nowhere(), now, &mut out);
+    let from = b.addr;
+    run(&mut [&mut a, &mut b], out, from, &mut now, 4, &keep);
+    assert!(a.s.requests.is_empty());
+    let mut out = Out::default();
+    a.s.found(code_key, b.addr, now, &mut out);
+    let from = a.addr;
+    run(&mut [&mut a, &mut b], out, from, &mut now, 4, &keep);
+    assert_eq!(a.s.requests.get(&b.key()).map(|r| r.asked), Some(true));
+    // Probed again for a while, then no more.
+    run(&mut [&mut a, &mut b], Out::default(), from, &mut now, (CALLING.as_millis() / 250) as u32 + 4, &keep);
+    assert!(a.s.callers.is_empty());
+}
