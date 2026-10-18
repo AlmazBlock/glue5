@@ -795,6 +795,47 @@ playing.
 - A mod runs at most 2 ms before the interrupt suspends it until the next
   frame. One that runs 2 s without calling `wait` is stopped.
 
+### Menus, tasks, the world
+
+- **Menus**: `ui.menu(title)` with toggles, sliders, choices, buttons and
+  labels. The application draws them with its own widgets (touch and
+  controllers too): Settings › Mods and Studio › Menus, or F7.
+  - What the player does reaches the mod at its next turn: the item's
+    `value` changes and its callback runs as a task.
+  - `ui.notify` shows a notification over the game.
+  - A mod with a menu stays running after its main code returns.
+- **Tasks**: a mod's coroutines are scheduled by game time
+  (`GET_GAME_TIMER`, so they stop while the game is paused):
+  - the main chunk;
+  - `task.spawn` and `task.delay`;
+  - menu callbacks.
+
+  The mod's script thread waits as long as the earliest of them, or one
+  frame while it has menus. The `task` table is the TASK_ natives' one too.
+- **World**: `world.vehicles()`, `peds()`, `objects()` walk the engine's
+  pools and give script handles (`fwScriptGuid::CreateGuid`), while the
+  handles' pool keeps room.
+- **Names from the installed game**: the engine keeps the strings it
+  hashed (`atHashStringNamespaceSupport`). Once the game has loaded, the
+  catalog is read:
+  - vehicle and ped models from the archetype store;
+  - weapons from `CWeaponInfoManager`.
+
+  It becomes `world.d.luau`, string unions (`VehicleModel`, `PedModel`,
+  `WeaponName`), saved for the next start. Natives take them where a
+  parameter is a vehicle's or ped's model or a weapon, so a misspelt name
+  is a type error ("did you mean ...?"). The names come from the assets
+  the game loaded, whatever their version; none is in the build.
+- **Stability**:
+  - an entity of the wrong kind (`CEntity` +40: 3 vehicle, 4 ped, 5
+    object) is an error before the native runs;
+  - natives that create entities are refused when the pool is nearly
+    full;
+  - mods' script threads get stacks of their own (gameconfig.xml's MICRO
+    stacks, 20 → 52);
+  - when the game stops working, the failure names the mod and the native
+    that ran, and that mod does not start by itself next time.
+
 ### GLUE 5 Studio
 
 The game serves an IDE for mods while mods are on and Settings › Game ›

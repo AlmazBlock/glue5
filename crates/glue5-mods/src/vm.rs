@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Thread, Value, VmState};
 
-use crate::{EvalResult, natives};
+use crate::world::Pool;
+use crate::{EvalResult, menus, natives};
 
 /// How long a mod may run before it yields to the game for this frame.
 const SLICE: Duration = Duration::from_millis(2);
@@ -26,17 +27,45 @@ pub type Jobs = Rc<RefCell<VecDeque<(String, Sender<EvalResult>)>>>;
 
 pub struct Vm {
     lua: Lua,
-    main: Thread,
+    module: String,
+    /// The main chunk, until it ends, and when it is due (game time, ms).
+    main: Option<Thread>,
+    main_wake: u64,
+    main_busy: Duration,
+    /// Tasks: `task.spawn`/`task.delay`, menus' callbacks.
+    sched: Sched,
     deadline: Rc<Cell<Instant>>,
-    /// Time run since the mod last called `wait`.
+}
+
+/// What `task.*` and the menus share with the VM.
+#[derive(Clone, Default)]
+struct Sched {
+    tasks: Rc<RefCell<Vec<Task>>>,
+    /// The game time of the current turn, ms.
+    now: Rc<Cell<u64>>,
+    handlers: menus::Handlers,
+}
+
+struct Task {
+    thread: Thread,
+    wake: u64,
+    /// What it starts with (a callback's arguments), the first time.
+    args: Option<MultiValue>,
     busy: Duration,
 }
 
-/// What a slice of a mod's run came to.
+/// What a turn of a mod came to.
 pub enum Step {
-    /// It waits this many milliseconds (0: the next frame).
+    /// The next thing it does is this many milliseconds away (0: the next
+    /// frame).
     Wait(u32),
-    /// It ran out of time in this frame and goes on in the next.
+    Finished,
+    Failed(String),
+}
+
+/// What a coroutine's run came to.
+enum Outcome {
+    Wait(u32),
     Preempted,
     Finished,
     Failed(String),
@@ -45,7 +74,8 @@ pub enum Step {
 impl Vm {
     /// Loads mod `name`'s `main.luau` from `dir`; `log` gets what it prints.
     pub fn new(name: &str, dir: &Path, log: Rc<dyn Fn(&str)>) -> mlua::Result<Vm> {
-        let (lua, deadline) = base(name, log)?;
+        let sched = Sched::default();
+        let (lua, deadline) = base(name, log, &sched)?;
         lua.globals().set("require", require(&lua, name, dir)?)?;
         // The mod's code starts once the player is in the game (not on
         // the loading screens, where the player's ped is a stand-in).
@@ -66,12 +96,13 @@ impl Vm {
             .map_err(|e| mlua::Error::runtime(format!("reading {}: {e}", path.display())))?;
         let chunk = lua.load(source).set_name(format!("@{name}/main.luau")).into_function()?;
         let main = lua.create_thread(ready.call::<Function>(chunk)?)?;
-        Ok(Vm { lua, main, deadline, busy: Duration::ZERO })
+        Ok(Vm { lua, module: name.to_string(), main: Some(main), main_wake: 0, main_busy: Duration::ZERO, sched, deadline })
     }
 
     /// The REPL: runs `jobs`' snippets, as expressions when they are.
     pub fn repl(jobs: Jobs, log: Rc<dyn Fn(&str)>) -> mlua::Result<Vm> {
-        let (lua, deadline) = base("eval", log)?;
+        let sched = Sched::default();
+        let (lua, deadline) = base("eval", log, &sched)?;
         let waiting: Rc<RefCell<HashMap<i64, Sender<EvalResult>>>> = Rc::default();
         let next = Cell::new(0i64);
         let pending = waiting.clone();
@@ -90,7 +121,7 @@ impl Vm {
                     MultiValue::from_vec(vec![Value::Integer(id), Value::Function(f)])
                 }
                 Err(e) => {
-                    let _ = reply.send(Err(e.to_string()));
+                    let _ = reply.send(Err(error_text(&e)));
                     MultiValue::new()
                 }
             })
@@ -125,40 +156,107 @@ impl Vm {
             .call((take, reply))?;
         lua.sandbox(true)?;
         let main = lua.create_thread(main)?;
-        Ok(Vm { lua, main, deadline, busy: Duration::ZERO })
+        Ok(Vm { lua, module: "~eval".into(), main: Some(main), main_wake: 0, main_busy: Duration::ZERO, sched, deadline })
     }
 
-    /// Runs the mod until it waits, ends, fails or runs out of time.
-    pub fn resume(&mut self) -> Step {
-        if !self.main.is_resumable() {
+    /// A turn at game time `now` (ms): what the player did with the menus
+    /// becomes tasks; the tasks and the main chunk that are due run, until
+    /// they wait, end, fail or run out of time.
+    pub fn step(&mut self, now: u64) -> Step {
+        self.sched.now.set(now);
+        for (item, input) in menus::take_inputs(&self.module) {
+            match menus::apply(&self.lua, &self.sched.handlers, item, input) {
+                Ok(Some((f, args))) => match self.lua.create_thread(f) {
+                    Ok(thread) => self.sched.tasks.borrow_mut().push(Task { thread, wake: now, args: Some(args), busy: Duration::ZERO }),
+                    Err(e) => crate::log_line(&self.module, crate::LogLevel::Error, &error_text(&e)),
+                },
+                Ok(None) => {}
+                Err(e) => crate::log_line(&self.module, crate::LogLevel::Error, &error_text(&e)),
+            }
+        }
+        // The tasks that are due; others may be added while they run.
+        let due: Vec<Task> = {
+            let mut tasks = self.sched.tasks.borrow_mut();
+            let (due, later): (Vec<Task>, Vec<Task>) = tasks.drain(..).partition(|t| t.wake <= now);
+            *tasks = later;
+            due
+        };
+        for mut task in due {
+            let args = task.args.take().unwrap_or_default();
+            let (outcome, spent) = self.run(&task.thread, args);
+            task.busy += spent;
+            match outcome {
+                Outcome::Wait(ms) => {
+                    task.wake = now + u64::from(ms);
+                    task.busy = Duration::ZERO;
+                }
+                Outcome::Preempted if task.busy >= RUNAWAY => {
+                    crate::log_line(&self.module, crate::LogLevel::Error, &runaway());
+                    continue;
+                }
+                Outcome::Preempted => task.wake = now,
+                Outcome::Finished => continue,
+                Outcome::Failed(e) => {
+                    // A task's error is logged; the mod goes on.
+                    crate::log_line(&self.module, crate::LogLevel::Error, &e);
+                    continue;
+                }
+            }
+            self.sched.tasks.borrow_mut().push(task);
+        }
+        if let Some(main) = self.main.clone()
+            && self.main_wake <= now
+        {
+            let (outcome, spent) = self.run(&main, MultiValue::new());
+            self.main_busy += spent;
+            match outcome {
+                Outcome::Wait(ms) => {
+                    self.main_wake = now + u64::from(ms);
+                    self.main_busy = Duration::ZERO;
+                }
+                Outcome::Preempted if self.main_busy >= RUNAWAY => return Step::Failed(runaway()),
+                Outcome::Preempted => self.main_wake = now,
+                Outcome::Finished => self.main = None,
+                Outcome::Failed(e) => return Step::Failed(e),
+            }
+        }
+        let menus = menus::has_menus(&self.module);
+        let tasks = self.sched.tasks.borrow();
+        if self.main.is_none() && tasks.is_empty() && !menus {
             return Step::Finished;
+        }
+        // A menu may be used any time: every frame then.
+        if menus {
+            return Step::Wait(0);
+        }
+        let next = tasks.iter().map(|t| t.wake).chain(self.main.as_ref().map(|_| self.main_wake)).min().unwrap_or(now);
+        Step::Wait(next.saturating_sub(now).min(u64::from(u32::MAX)) as u32)
+    }
+
+    /// Runs a coroutine until it yields, ends or fails; and how long it ran.
+    fn run(&self, thread: &Thread, args: MultiValue) -> (Outcome, Duration) {
+        if !thread.is_resumable() {
+            return (Outcome::Finished, Duration::ZERO);
         }
         let start = Instant::now();
         self.deadline.set(start + SLICE);
-        let result = self.main.resume::<MultiValue>(());
-        self.busy += start.elapsed();
-        match result {
-            Err(e) => Step::Failed(error_text(&e)),
-            Ok(_) if !self.main.is_resumable() => Step::Finished,
+        let result = thread.resume::<MultiValue>(args);
+        let spent = start.elapsed();
+        let outcome = match result {
+            Err(e) => Outcome::Failed(error_text(&e)),
+            Ok(_) if !thread.is_resumable() => Outcome::Finished,
+            // `wait(ms)`.
             Ok(values) => match values.into_iter().next() {
-                // `wait(ms)`.
-                Some(v) => {
-                    self.busy = Duration::ZERO;
-                    let ms = match v {
-                        Value::Integer(i) => i.clamp(0, i32::MAX.into()) as u32,
-                        Value::Number(n) if n.is_finite() => n.clamp(0.0, i32::MAX as f64) as u32,
-                        _ => 0,
-                    };
-                    Step::Wait(ms)
-                }
+                Some(v) => Outcome::Wait(match v {
+                    Value::Integer(i) => i.clamp(0, i32::MAX.into()) as u32,
+                    Value::Number(n) if n.is_finite() => n.clamp(0.0, i32::MAX as f64) as u32,
+                    _ => 0,
+                }),
                 // The interrupt: out of time.
-                None if self.busy >= RUNAWAY => Step::Failed(format!(
-                    "ran for {} s without calling wait(): a loop needs wait() to let the game go on",
-                    RUNAWAY.as_secs()
-                )),
-                None => Step::Preempted,
+                None => Outcome::Preempted,
             },
-        }
+        };
+        (outcome, spent)
     }
 
     /// Memory the VM uses, in bytes.
@@ -167,9 +265,14 @@ impl Vm {
     }
 }
 
-/// A VM with the libraries, the natives and the mods' globals, and the
-/// interrupt that keeps a slice short; not sandboxed yet.
-fn base(name: &str, log: Rc<dyn Fn(&str)>) -> mlua::Result<(Lua, Rc<Cell<Instant>>)> {
+fn runaway() -> String {
+    format!("ran for {} s without calling wait(): a loop needs wait() to let the game go on", RUNAWAY.as_secs())
+}
+
+/// A VM with the libraries, the natives and the mods' globals (`print`,
+/// `wait`, `task`, `ui`, `joaat`, `mod`), and the interrupt that keeps a
+/// slice short; not sandboxed yet.
+fn base(name: &str, log: Rc<dyn Fn(&str)>, sched: &Sched) -> mlua::Result<(Lua, Rc<Cell<Instant>>)> {
     let lua = Lua::new_with(
         StdLib::COROUTINE
             | StdLib::TABLE
@@ -191,12 +294,50 @@ fn base(name: &str, log: Rc<dyn Fn(&str)>) -> mlua::Result<(Lua, Rc<Cell<Instant
         })?,
     )?;
     // `wait(ms)`: back to the game until then; plain Lua, so it yields from
-    // the mod's coroutine.
+    // the running coroutine.
     let wait: Function = lua
         .load("local yield = coroutine.yield\nreturn function(ms) yield(ms or 0) end")
         .set_name("=wait")
         .eval()?;
-    g.set("wait", wait)?;
+    g.set("wait", wait.clone())?;
+    // `task.spawn(f, ...)`, `task.delay(ms, f, ...)`, `task.wait(ms)`.
+    let task = lua.create_table()?;
+    task.set("wait", wait)?;
+    let s = sched.clone();
+    task.set(
+        "spawn",
+        lua.create_function(move |lua, (f, args): (Function, MultiValue)| {
+            let thread = lua.create_thread(f)?;
+            s.tasks.borrow_mut().push(Task { thread, wake: s.now.get(), args: Some(args), busy: Duration::ZERO });
+            Ok(())
+        })?,
+    )?;
+    let s = sched.clone();
+    task.set(
+        "delay",
+        lua.create_function(move |lua, (ms, f, args): (f64, Function, MultiValue)| {
+            let thread = lua.create_thread(f)?;
+            let wake = s.now.get() + ms.clamp(0.0, 1e9) as u64;
+            s.tasks.borrow_mut().push(Task { thread, wake, args: Some(args), busy: Duration::ZERO });
+            Ok(())
+        })?,
+    )?;
+    menus::install(&lua, name, sched.handlers.clone())?;
+    // `world.vehicles()`..., the catalog's lists.
+    let world = lua.create_table()?;
+    for (key, pool) in [("vehicles", Pool::Vehicles), ("peds", Pool::Peds), ("objects", Pool::Objects)] {
+        world.set(
+            key,
+            lua.create_function(move |_, max: Option<usize>| {
+                let env = natives::env().ok_or_else(|| mlua::Error::runtime(format!("world.{key}: only in a mod's script")))?;
+                Ok(unsafe { crate::world::handles(env, pool, max.unwrap_or(1024).min(4096)) })
+            })?,
+        )?;
+    }
+    world.set("vehicleModels", lua.create_function(|_, ()| Ok(crate::world::catalog().map(|c| c.vehicles).unwrap_or_default()))?)?;
+    world.set("pedModels", lua.create_function(|_, ()| Ok(crate::world::catalog().map(|c| c.peds).unwrap_or_default()))?)?;
+    world.set("weapons", lua.create_function(|_, ()| Ok(crate::world::catalog().map(|c| c.weapons).unwrap_or_default()))?)?;
+    g.set("world", world)?;
     g.set("joaat", lua.create_function(|_, s: mlua::LuaString| Ok(natives::joaat(&s.to_str()?)))?)?;
     let m = lua.create_table()?;
     m.set("name", name)?;
@@ -221,6 +362,13 @@ fn base(name: &str, log: Rc<dyn Fn(&str)>) -> mlua::Result<(Lua, Rc<Cell<Instant
             })?,
         )?;
         table.set_metatable(Some(meta))?;
+        if *space == "task" {
+            // The scheduler shares the table with the TASK_ natives.
+            for pair in task.pairs::<Value, Value>() {
+                let (k, v) = pair?;
+                table.raw_set(k, v)?;
+            }
+        }
         g.set(*space, table)?;
     }
 
@@ -259,7 +407,8 @@ fn require(lua: &Lua, name: &str, dir: &Path) -> mlua::Result<Function> {
 pub fn error_text(e: &mlua::Error) -> String {
     let (message, traceback) = match e {
         mlua::Error::CallbackError { traceback, cause } => (error_text(cause), Some(traceback.as_str())),
-        mlua::Error::RuntimeError(m) => (m.clone(), None),
+        // Without the traceback the message carries (its `file:line` is enough).
+        mlua::Error::RuntimeError(m) => (m.split("\nstack traceback:").next().unwrap_or(m).to_string(), None),
         mlua::Error::SyntaxError { message, .. } => (message.clone(), None),
         mlua::Error::MemoryError(_) => ("out of memory (a mod may use 64 MB)".into(), None),
         other => (other.to_string(), None),

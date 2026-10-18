@@ -187,8 +187,8 @@ impl Server {
                 ("GET" | "DELETE", "/mcp") => respond(&mut out, 405, "text/plain", b"POST only", &[("Allow", "POST")])?,
                 ("GET", "/natives.d.luau") => {
                     if self.authorized(&request) {
-                        let defs = crate::natives::DEFINITIONS.as_bytes();
-                        respond(&mut out, 200, "text/plain; charset=utf-8", defs, &[])?;
+                        let defs = format!("{}{}", crate::world::definitions(), crate::natives::DEFINITIONS);
+                        respond(&mut out, 200, "text/plain; charset=utf-8", defs.as_bytes(), &[])?;
                     } else {
                         respond(&mut out, 401, "text/plain", b"pair with the game first", &[])?;
                     }

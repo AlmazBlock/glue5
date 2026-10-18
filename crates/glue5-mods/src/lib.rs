@@ -10,9 +10,11 @@
 mod checker;
 mod engine;
 pub mod files;
+mod menus;
 pub mod natives;
 pub mod studio;
 mod vm;
+pub mod world;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -88,6 +90,12 @@ struct State {
     /// Files written, deleted or renamed, with a sequence number.
     changes: VecDeque<(u64, String)>,
     next_change: u64,
+    /// The mods' menus, what was done with them (for the mods), what they
+    /// notify (for the application).
+    menus: Vec<Menu>,
+    inputs: Vec<(String, u32, MenuInput)>,
+    notices: VecDeque<(String, String)>,
+    next_menu_id: u32,
 }
 
 struct Shared {
@@ -108,12 +116,56 @@ static SHARED: Shared = Shared {
         next_seq: 1,
         changes: VecDeque::new(),
         next_change: 1,
+        menus: Vec::new(),
+        inputs: Vec::new(),
+        notices: VecDeque::new(),
+        next_menu_id: 1,
     }),
     pending: AtomicBool::new(false),
     generation: AtomicU64::new(0),
 };
 
 const LOG_LINES: usize = 2000;
+
+/// The mod whose turn it is (empty between turns), for the failure note.
+static RUNNING_MOD: Mutex<String> = Mutex::new(String::new());
+
+/// Mods kept from starting with the game: they ran when it last stopped.
+static HELD_BACK: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The game has stopped working: which mods ran, and what a mod was doing
+/// then (none: no mod was running). Saved, so that the next start does not
+/// start them by itself.
+pub fn note_failure() -> Option<String> {
+    let dir = dir()?;
+    let running: Vec<String> =
+        mods().into_iter().filter(|m| m.state == ModState::Running).map(|m| m.name).collect();
+    let during = RUNNING_MOD.try_lock().map(|m| m.clone()).unwrap_or_default();
+    let native = match natives::RUNNING.load(Ordering::Relaxed) {
+        0 => None,
+        i => natives::NATIVES.get(i - 1).map(natives::qualified),
+    };
+    if running.is_empty() && during.is_empty() {
+        return None;
+    }
+    let mut names = running.clone();
+    if !during.is_empty() && !names.contains(&during) {
+        names.push(during.clone());
+    }
+    let note = serde_json::json!({ "mods": names, "during": during, "native": native });
+    let _ = std::fs::create_dir_all(dir.join(".glue5"));
+    let _ = std::fs::write(dir.join(".glue5/failed.json"), note.to_string());
+    Some(match (during.is_empty(), native) {
+        (false, Some(n)) => format!("Mod {during} was calling {n}."),
+        (false, None) => format!("Mod {during} was running."),
+        _ => format!("Mods running: {}.", running.join(", ")),
+    })
+}
+
+/// The mods kept from starting with the game this time, and why.
+pub fn held_back() -> Vec<String> {
+    HELD_BACK.lock().unwrap().clone()
+}
 
 /// Sets mods up for the game about to start: `dir` is the mods folder
 /// (made if missing). The mods marked autostart start once the game runs
@@ -124,9 +176,30 @@ pub fn install(dir: &Path) {
         return;
     }
     glue5_runtime::add_hooks(engine::hooks);
+    // The mods' script threads get stacks of their own.
+    glue5_runtime::overlay::more_script_stacks(32);
+    world::load_saved(dir);
     log::info!("mods: {} ({})", dir.display(), natives::SUMMARY);
     refresh();
-    let autostart: Vec<String> = mods().into_iter().filter(|m| m.autostart).map(|m| m.name).collect();
+    // The game stopped while these ran: not by themselves this time.
+    let failed = dir.join(".glue5/failed.json");
+    if let Ok(text) = std::fs::read_to_string(&failed) {
+        let _ = std::fs::remove_file(&failed);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        let names: Vec<String> =
+            v["mods"].as_array().into_iter().flatten().filter_map(|m| m.as_str().map(str::to_string)).collect();
+        for n in &names {
+            log_line(n, LogLevel::Error, "the game stopped while this mod ran: it does not start by itself this time");
+        }
+        if !names.is_empty() {
+            let text = format!("{} did not start: the game stopped while it ran last time.", names.join(", "));
+            SHARED.state.lock().unwrap().notices.push_back(("mods".into(), text));
+        }
+        *HELD_BACK.lock().unwrap() = names;
+    }
+    let held = held_back();
+    let autostart: Vec<String> =
+        mods().into_iter().filter(|m| m.autostart && !held.contains(&m.name)).map(|m| m.name).collect();
     for name in autostart {
         start(&name);
     }
@@ -248,6 +321,72 @@ pub(crate) fn changed(path: &str) {
     let n = s.next_change;
     s.next_change += 1;
     s.changes.push_back((n, path.to_string()));
+}
+
+/// A mod's menu: what the application shows for it (`ui.menu` in Luau).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Menu {
+    pub module: String,
+    pub id: u32,
+    pub title: String,
+    pub items: Vec<MenuItem>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuItem {
+    pub id: u32,
+    pub label: String,
+    /// A line under the label.
+    pub note: Option<String>,
+    pub kind: MenuKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuKind {
+    Toggle(bool),
+    Slider { value: f64, min: f64, max: f64, step: f64 },
+    Choice { options: Vec<String>, index: usize },
+    Button,
+    Label,
+}
+
+/// What a player did with a menu's item.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MenuInput {
+    Toggle(bool),
+    Value(f64),
+    Choose(usize),
+    Press,
+}
+
+/// The mods' menus.
+pub fn menus() -> Vec<Menu> {
+    SHARED.state.lock().unwrap().menus.clone()
+}
+
+/// The player changed or pressed an item: the menu shows it at once, the
+/// mod hears of it at its next turn.
+pub fn menu_input(module: &str, item: u32, input: MenuInput) {
+    let mut s = SHARED.state.lock().unwrap();
+    for m in s.menus.iter_mut().filter(|m| m.module == module) {
+        for i in m.items.iter_mut().filter(|i| i.id == item) {
+            match (&mut i.kind, input) {
+                (MenuKind::Toggle(on), MenuInput::Toggle(v)) => *on = v,
+                (MenuKind::Slider { value, min, max, .. }, MenuInput::Value(v)) => *value = v.clamp(*min, *max),
+                (MenuKind::Choice { options, index }, MenuInput::Choose(v)) if v < options.len() => *index = v,
+                _ => {}
+            }
+        }
+    }
+    s.inputs.push((module.to_string(), item, input));
+    drop(s);
+    SHARED.pending.store(true, Ordering::Release);
+    SHARED.generation.fetch_add(1, Ordering::Relaxed);
+}
+
+/// What the mods notified since the last call: (mod, text).
+pub fn take_notices() -> Vec<(String, String)> {
+    SHARED.state.lock().unwrap().notices.drain(..).collect()
 }
 
 /// Whether a native trapped: the game may now misbehave.

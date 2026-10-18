@@ -67,6 +67,10 @@ struct Engine {
     running: Vec<Running>,
     /// The REPL's snippets.
     jobs: Jobs,
+    /// The catalog of names was read (once the game has loaded), and when
+    /// that was last checked.
+    catalog: bool,
+    catalog_checked: Option<Instant>,
 }
 
 thread_local! {
@@ -95,12 +99,25 @@ impl Engine {
                 unsafe { self.command(env, command) };
             }
         }
+        if !self.catalog && self.catalog_checked.is_none_or(|t| t.elapsed().as_secs() >= 1) {
+            self.catalog_checked = Some(Instant::now());
+            let ready = unsafe {
+                natives::call_int(env, "GET_IS_LOADING_SCREEN_ACTIVE") == Some(0)
+                    && natives::call_int(env, "IS_SCREEN_FADED_IN") == Some(1)
+                    && natives::call_int(env, "PLAYER_PED_ID").is_some_and(|p| p != 0)
+            };
+            if ready {
+                self.catalog = true;
+                crate::world::set_catalog(unsafe { crate::world::read_catalog(env) });
+            }
+        }
         // Ended mods' threads, from outside them.
         let mut i = 0;
         while i < self.running.len() {
             let r = &self.running[i];
             if r.ending && r.thread != active {
                 unsafe { orig::script_kill_thread(env, r.thread_id) };
+                crate::menus::remove_mod(&r.name);
                 self.running.remove(i);
             } else {
                 i += 1;
@@ -113,7 +130,10 @@ impl Engine {
             return false;
         }
         let start = Instant::now();
-        let step = natives::with_env(env, || r.vm.resume());
+        let now = unsafe { natives::call_int(env, "GET_GAME_TIMER") }.unwrap_or(0) as u32 as u64;
+        *crate::RUNNING_MOD.lock().unwrap() = r.name.clone();
+        let step = natives::with_env(env, || r.vm.step(now));
+        crate::RUNNING_MOD.lock().unwrap().clear();
         r.cpu = r.cpu * 0.9 + start.elapsed().as_secs_f32() * 1000.0 * 0.1;
         let ms = match step {
             Step::Wait(ms) => {
@@ -123,7 +143,6 @@ impl Engine {
                 }
                 ms
             }
-            Step::Preempted => 0,
             Step::Finished => {
                 log_line(&r.name, LogLevel::Info, "finished");
                 set_state(&r.name, ModState::Stopped, None);

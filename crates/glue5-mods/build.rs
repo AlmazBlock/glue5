@@ -507,24 +507,41 @@ fn binary_params(command: &[String], native: &str) -> Option<Vec<Param>> {
         .collect()
 }
 
-/// The database's parameters checked against the binary's: the same slots,
-/// with the binary's vectors where the database has three floats.
+/// The database's parameters checked against the binary's, slot by slot:
+/// the binary's count and kinds of values, the database's names and
+/// finer types where they agree (a newer database may have parameters
+/// this build lacks); the binary's vectors where the database has three
+/// floats.
 fn merge(db: Vec<Param>, bin: &[Param]) -> Vec<Param> {
-    let slots = |v: &[Param]| v.iter().map(Param::slots).sum::<usize>();
-    if slots(&db) != slots(bin) {
-        return bin.to_vec();
+    // The database's parameters by the slot they start at.
+    let mut at = HashMap::new();
+    let mut slot = 0;
+    for p in &db {
+        at.insert(slot, p);
+        slot += p.slots();
     }
+    let compatible = |b: &Param, d: &Param| {
+        (b.dir == Dir::In) == (d.dir == Dir::In)
+            && match (b.kind, d.kind) {
+                (Kind::Int, Kind::Int | Kind::Any | Kind::Hash | Kind::Handle(_)) => true,
+                (Kind::Bool, Kind::Bool | Kind::Any) => true,
+                (a, b) => a == b,
+            }
+    };
     let mut out = Vec::new();
-    let mut i = 0;
+    let mut slot = 0;
     for b in bin {
-        if b.kind == Kind::Vec3 && b.dir == Dir::In && db.get(i).is_some_and(|p| p.kind == Kind::Float) {
-            let name = vector_name(&db[i].name);
-            out.push(Param { name, kind: Kind::Vec3, dir: Dir::In });
-            i += 3;
-        } else if let Some(p) = db.get(i) {
-            out.push(p.clone());
-            i += 1;
-        }
+        let p = match at.get(&slot) {
+            Some(d) if b.kind == Kind::Vec3 && b.dir == Dir::In && d.kind == Kind::Float => {
+                let floats = (0..3).all(|i| at.get(&(slot + i)).is_some_and(|x| x.kind == Kind::Float));
+                Param { name: if floats { vector_name(&d.name) } else { format!("p{}", out.len()) }, ..b.clone() }
+            }
+            Some(d) if compatible(b, d) => (*d).clone(),
+            Some(d) => Param { name: d.name.clone(), ..b.clone() },
+            None => b.clone(),
+        };
+        slot += b.slots();
+        out.push(p);
     }
     out
 }
@@ -655,6 +672,30 @@ fn luau_type(k: Kind, input: bool) -> String {
     }
 }
 
+/// What a `Hash` parameter takes: the names of the catalog (world.rs) when
+/// the parameter is a weapon or a vehicle's or ped's model, any name for
+/// other models (objects' names are not known), else any string.
+fn hash_type(native: &str, ns: &str, param: &str) -> &'static str {
+    let p = param.to_ascii_lowercase();
+    if p.contains("weapon") {
+        return "WeaponName | Hash";
+    }
+    let model = p == "model" || p.ends_with("model") || p.contains("modelhash");
+    if !model {
+        return "Hash | string";
+    }
+    if native.starts_with("IS_") {
+        return "Model | Hash | string";
+    }
+    if ns == "ped" || native.starts_with("CREATE_PED") || native.contains("PED_MODEL") || native.contains("PLAYER_MODEL") {
+        return "PedModel | Hash";
+    }
+    if ns == "vehicle" || native.contains("VEHICLE") {
+        return "VehicleModel | Hash";
+    }
+    "Model | Hash | string"
+}
+
 /// Handles the natives return: 0 (none) becomes nil, so they are optional
 /// (but for players: 0 is the local one).
 fn luau_result(k: Kind) -> String {
@@ -665,6 +706,16 @@ fn luau_result(k: Kind) -> String {
     }
 }
 
+/// `task.spawn`, `task.delay`, `task.wait` (vm.rs), beside the TASK_ natives.
+const TASK_FIELDS: &str = "\
+\t--- Runs `f` now, beside the mod's main code (it may wait).
+\tspawn: <A...>(f: (A...) -> ...any, A...) -> (),
+\t--- Runs `f` in `ms` milliseconds of game time.
+\tdelay: <A...>(ms: number, f: (A...) -> ...any, A...) -> (),
+\t--- Back to the game for `ms` milliseconds, as `wait`.
+\twait: (ms: number?) -> (),
+";
+
 /// What the mods' VM adds besides the natives (vm.rs).
 const GLOBALS: &str = "\
 type Hash = number
@@ -674,6 +725,40 @@ declare function wait(ms: number?): ()
 -- The hash the game uses for a name (GET_HASH_KEY).
 declare function joaat(name: string): Hash
 declare mod: { name: string }
+
+export type Toggle = { id: number, value: boolean, set: (self: Toggle, value: boolean | string) -> () }
+export type Slider = { id: number, value: number, set: (self: Slider, value: number | string) -> () }
+export type Choice = { id: number, value: number, set: (self: Choice, value: number | string) -> () }
+export type Button = { id: number, set: (self: Button, label: string) -> () }
+export type Menu = {
+	id: number,
+	-- A switch; `value` follows the player, `onChange` runs as a task.
+	toggle: (self: Menu, label: string, on: boolean?, note: (string | (on: boolean) -> ())?, onChange: ((on: boolean) -> ())?) -> Toggle,
+	slider: (self: Menu, label: string, value: number, min: number, max: number, step: number?, onChange: ((value: number) -> ())?) -> Slider,
+	-- `value` is the option's index, from 1.
+	choice: (self: Menu, label: string, options: { string }, index: number?, onChange: ((index: number, option: string) -> ())?) -> Choice,
+	button: (self: Menu, label: string, note: (string | () -> ())?, onPress: (() -> ())?) -> Button,
+	label: (self: Menu, text: string) -> Button,
+	remove: (self: Menu) -> (),
+}
+
+declare world: {
+\t-- The entities around, as handles (at most `max`, 1024 by default).
+\tvehicles: (max: number?) -> { Vehicle },
+\tpeds: (max: number?) -> { Ped },
+\tobjects: (max: number?) -> { Object },
+\t-- The installed game's names (empty until the game has loaded once).
+\tvehicleModels: () -> { VehicleModel },
+\tpedModels: () -> { PedModel },
+\tweapons: () -> { WeaponName },
+}
+
+declare ui: {
+	-- A menu the app shows (Settings › Mods and Studio › Menus, or F7); a mod with one stays running.
+	menu: (title: string) -> Menu,
+	-- A notification over the game.
+	notify: (text: string) -> (),
+}
 
 ";
 
@@ -689,13 +774,20 @@ fn definitions(natives: &[Native]) -> String {
     while i < natives.len() {
         let ns = &natives[i].namespace;
         let _ = writeln!(s, "declare {ns}: {{");
+        if ns == "task" {
+            // The mods' scheduler shares the table with the TASK_ natives.
+            s.push_str(TASK_FIELDS);
+        }
         while i < natives.len() && &natives[i].namespace == ns {
             let n = &natives[i];
             let inputs: Vec<String> = n
                 .params
                 .iter()
                 .filter(|p| p.dir != Dir::Out)
-                .map(|p| format!("{}: {}", p.name, luau_type(p.kind, true)))
+                .map(|p| match p.kind {
+                    Kind::Hash => format!("{}: {}", p.name, hash_type(&n.name, &n.namespace, &p.name)),
+                    k => format!("{}: {}", p.name, luau_type(k, true)),
+                })
                 .collect();
             let mut outputs: Vec<String> = n
                 .ret

@@ -47,11 +47,15 @@ pub fn handle(request: &Request) -> (u16, String, Vec<(&'static str, String)>) {
         "resources/list" => Ok(json!({ "resources": [
             { "uri": "glue5://guide", "name": "guide", "title": "How mods work", "mimeType": "text/markdown" },
             { "uri": "glue5://natives.d.luau", "name": "natives", "title": "Every native's type (Luau definitions)", "mimeType": "text/plain" },
+            { "uri": "glue5://world.d.luau", "name": "world", "title": "The installed game's vehicle, ped and weapon names (Luau types)", "mimeType": "text/plain" },
         ]})),
         "resources/read" => match p["uri"].as_str() {
             Some(uri @ "glue5://guide") => Ok(json!({ "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": api::GUIDE }] })),
             Some(uri @ "glue5://natives.d.luau") => {
                 Ok(json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": crate::natives::DEFINITIONS }] }))
+            }
+            Some(uri @ "glue5://world.d.luau") => {
+                Ok(json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": crate::world::definitions() }] }))
             }
             _ => Err((-32002, "resource not found".to_string())),
         },

@@ -53,6 +53,38 @@ other `.luau` files load with `require("./name")`, and `mod.json` holds
   `while not streaming.hasModelLoaded(m) do wait() end`.
 - Controls: `pad.isControlJustPressed(0, control)`, with the game's control
   numbers (51 = E / context, 22 = jump, 21 = sprint).
+- Names are typed from the installed game (glue5://world.d.luau):
+  `VehicleModel` ("adder", ...), `PedModel`, `WeaponName` ("WEAPON_PISTOL",
+  ...). A vehicle's model parameter takes a `VehicleModel` or a hash, so a
+  misspelt name is a type error; a name held in a plain `string` needs a
+  cast (`name :: VehicleModel`).
+
+## Tasks
+- `task.spawn(f, ...)` runs `f` beside the main code; `task.delay(ms, f,
+  ...)` later (game time); both may `wait()`. An error in a task is logged
+  and the mod goes on.
+
+## Menus
+- `local m = ui.menu("Trainer")` makes a menu the app shows with its own
+  widgets (touch and controllers too): Settings › Mods and Studio ›
+  Menus, or F7 in the game.
+- Items: `m:toggle(label, on, [note], [onChange])`, `m:slider(label,
+  value, min, max, [step], [onChange])`, `m:choice(label, {options},
+  [index], [onChange])`, `m:button(label, [note], [onPress])`,
+  `m:label(text)`. Each returns an object whose `value` follows the player
+  (`:set(v)` changes it). Callbacks run as tasks: they may call natives
+  and wait.
+- `ui.notify(text)` shows a notification over the game.
+- A mod with a menu keeps running after its main code returns, until it is
+  stopped.
+
+## World
+- `world.vehicles()`, `world.peds()`, `world.objects()`: handles of the
+  entities around. `world.vehicleModels()`, `world.pedModels()`,
+  `world.weapons()`: the installed game's names.
+- Natives that create entities are refused when the game's pool is nearly
+  full; an entity of the wrong kind (a Ped where a Vehicle is wanted) is
+  an error before the native runs.
 "#;
 
 /// The mods with their state and files.
@@ -90,7 +122,54 @@ pub fn diagnostics(path: &str, text: Option<&str>) -> Value {
         sync_mod(c, module);
         c.check(module)
     });
-    result.unwrap_or_else(|e| json!([{ "range": [0, 0, 0, 0], "severity": "error", "code": "checker", "message": e }]))
+    let mut found =
+        result.unwrap_or_else(|e| json!([{ "range": [0, 0, 0, 0], "severity": "error", "code": "checker", "message": e }]));
+    if let Some(list) = found.as_array_mut() {
+        for d in list {
+            if let Some(m) = d["message"].as_str().and_then(name_message) {
+                d["message"] = m.into();
+            }
+        }
+    }
+    found
+}
+
+/// A misspelt name against the catalog's union (hundreds of names in the
+/// checker's message): which kind of name, and the closest one.
+fn name_message(message: &str) -> Option<String> {
+    let expected = message.strip_prefix("Expected this to be")?.trim_start().trim_start_matches('\'');
+    if !expected.starts_with('"') {
+        return None;
+    }
+    let got = message.rsplit("but got '\"").next()?.split('"').next()?;
+    let c = crate::world::catalog()?;
+    let (kind, names) = if expected.starts_with("\"WEAPON_") {
+        ("a weapon", &c.weapons)
+    } else if c.vehicles.first().is_some_and(|v| expected.starts_with(&format!("\"{v}\""))) {
+        ("a vehicle model", &c.vehicles)
+    } else if c.peds.first().is_some_and(|p| expected.starts_with(&format!("\"{p}\""))) {
+        ("a ped model", &c.peds)
+    } else {
+        return None;
+    };
+    let closest = names.iter().min_by_key(|n| distance(&n.to_ascii_lowercase(), &got.to_ascii_lowercase()))?;
+    Some(format!("\"{got}\" is not {kind} of the installed game; did you mean \"{closest}\"?"))
+}
+
+/// Levenshtein distance.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
 }
 
 /// Puts the files of `module`'s mod the checker has not got, from disk.

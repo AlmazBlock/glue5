@@ -129,26 +129,78 @@ pub fn joaat(s: &str) -> u32 {
 /// The script handles' pool (`rage::fwScriptGuid`), u64 at this address.
 const GUID_POOL: u64 = 12318120;
 
-/// Whether `handle` names a live entity: what `fwScriptGuid::GetBaseFromGuid`
-/// checks, without its `unreachable` for an index past the pool.
-fn entity_exists(mem: Mem, handle: i32) -> bool {
+/// The type of the live entity `handle` names (3 vehicle, 4 ped, 5
+/// object, `CEntity` +40), none if it names none: what
+/// `fwScriptGuid::GetBaseFromGuid` checks, without its `unreachable` for an
+/// index past the pool.
+fn entity_type(mem: Mem, handle: i32) -> Option<u8> {
     if handle == -1 || handle == 0 {
-        return false;
+        return None;
     }
     let pool = mem.u64(GUID_POOL);
     if pool == 0 {
-        return false;
+        return None;
     }
     let index = (handle >> 8) as u32;
     if index >= mem.u32(pool + 32) || mem.u8(mem.u64(pool + 24) + u64::from(index)) != handle as u8 {
-        return false;
+        return None;
     }
     let guid = mem.u64(pool + 16) + u64::from(mem.u32(pool + 36)) * u64::from(index);
-    guid != 0 && mem.u64(guid + 8) != 0
+    if guid == 0 {
+        return None;
+    }
+    match mem.u64(guid + 8) {
+        0 => None,
+        entity => Some(mem.u8(entity + 40)),
+    }
 }
+
+fn type_name(t: u8) -> &'static str {
+    match t {
+        3 => "Vehicle",
+        4 => "Ped",
+        5 => "Object",
+        _ => "Entity",
+    }
+}
+
+/// The current environment, for what mods call from Rust (world.rs).
+pub fn env() -> Option<*mut Env> {
+    let e = ENV.get();
+    (!e.is_null()).then_some(e)
+}
+
+/// The native running now (index + 1, 0: none), for the failure note.
+pub static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// A trap happened in a native: the engine may be in a bad state.
 pub static TAINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Calls a native that takes nothing and gives an int (`GET_GAME_TIMER`),
+/// from Rust, in the current script context; the reserved ones too.
+///
+/// # Safety
+/// `env` is the engine thread's, inside a script's update.
+pub unsafe fn call_int(env: *mut Env, name: &str) -> Option<i32> {
+    let handler = NATIVES
+        .iter()
+        .find(|n| n.name == name && n.params.is_empty())
+        .map(|n| n.handler)
+        .or_else(|| reserved_handler(name))?;
+    let mem = unsafe { Mem::of(env) };
+    let top = unsafe { exports::emscripten_stack_get_current(env) }.ok()?;
+    let r = (|| {
+        let info = unsafe { exports::_emscripten_stack_alloc(env, 160) }.ok()?;
+        mem.bytes_mut(info, 160).fill(0);
+        let result = info + 128;
+        mem.set_u64(info, result);
+        mem.set_u64(info + 16, info + 136);
+        unsafe { glue5_game::call_native(env, handler, info) }.ok()?;
+        Some(mem.i32(result))
+    })();
+    let _ = unsafe { exports::_emscripten_stack_restore(env, top) };
+    r
+}
 
 /// The full name of native `n`, for messages (`vehicle.createVehicle`).
 pub fn qualified(n: &Native) -> String {
@@ -240,20 +292,54 @@ pub fn call(lua: &Lua, index: usize, args: MultiValue) -> mlua::Result<MultiValu
                     };
                     // DOES_ENTITY_EXIST and the like are how a mod checks one.
                     let checks = n.name.starts_with("DOES_") && n.name.ends_with("_EXIST");
-                    if h.is_entity() && p.dir == D::In && !checks && !entity_exists(mem, id) {
-                        let got = if value.is_nil() { "nil".to_string() } else { id.to_string() };
-                        return Err(bad(&format!("an existing {h:?} (got {got})")));
+                    if h.is_entity() && p.dir == D::In && !checks {
+                        let want = match h {
+                            H::Vehicle => Some(3),
+                            H::Ped => Some(4),
+                            H::Object => Some(5),
+                            _ => None,
+                        };
+                        match entity_type(mem, id) {
+                            None => {
+                                let got = if value.is_nil() { "nil".to_string() } else { id.to_string() };
+                                return Err(bad(&format!("an existing {h:?} (got {got})")));
+                            }
+                            Some(t) if want.is_some_and(|w| w != t) => {
+                                return Err(bad(&format!("a {h:?} (got a {})", type_name(t))));
+                            }
+                            _ => {}
+                        }
                     }
                     mem.set_i32(target, id);
                 }
             }
             slot += if p.kind == K::Vec3 && p.dir == D::In { 24 } else { 8 };
         }
+        // The engine fails when a pool is full: refused before that.
+        if n.name.starts_with("CREATE_") {
+            let pool = match n.ret {
+                Some(K::Handle(H::Vehicle)) => Some(crate::world::Pool::Vehicles),
+                Some(K::Handle(H::Ped)) => Some(crate::world::Pool::Peds),
+                Some(K::Handle(H::Object)) => Some(crate::world::Pool::Objects),
+                _ => None,
+            };
+            if let Some(pool) = pool
+                && crate::world::free(mem, pool) < 8
+            {
+                return Err(mlua::Error::runtime(format!(
+                    "{}: the game has no room for more ({pool:?} are full); delete some first",
+                    qualified(n)
+                )));
+            }
+        }
         mem.set_u64(info, result);
         mem.set_u32(info + 8, slots as u32);
         mem.set_u64(info + 16, params);
         mem.set_i32(info + 24, 0);
-        if let Err(e) = unsafe { glue5_game::call_native(env, n.handler, info) } {
+        RUNNING.store(index + 1, std::sync::atomic::Ordering::Relaxed);
+        let called = unsafe { glue5_game::call_native(env, n.handler, info) };
+        RUNNING.store(0, std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = called {
             TAINTED.store(true, std::sync::atomic::Ordering::Relaxed);
             return Err(mlua::Error::runtime(format!("{} stopped with a {e}", qualified(n))));
         }
