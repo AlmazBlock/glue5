@@ -26,7 +26,7 @@ mod jobs;
 pub mod input;
 pub mod memory;
 mod online;
-mod overlay;
+pub mod overlay;
 mod p2p;
 pub mod prompts;
 pub mod qos;
