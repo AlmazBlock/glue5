@@ -49,6 +49,7 @@ const ANNOUNCE: Duration = Duration::from_secs(120);
 /// when no node answered.
 const RESTART: Duration = Duration::from_secs(600);
 const RETRY: Duration = Duration::from_secs(15);
+const EMPTY_RETRY: Duration = Duration::from_secs(1);
 
 pub type Id = [u8; 20];
 
@@ -196,9 +197,13 @@ impl Dht {
 
     fn tick_lookup(&mut self, key: Id, now: Instant, out: &mut Output) {
         let Some(lookup) = self.lookups.get(&key) else { return };
+        // Started with no node to ask (the bootstrap nodes' addresses not
+        // looked up yet): again in a moment.
         let restart = lookup.started.is_none_or(|s| {
             let age = now - s;
-            age > RESTART || (age > RETRY && !lookup.nodes.values().any(|n| n.responded))
+            age > RESTART
+                || (age > RETRY && !lookup.nodes.values().any(|n| n.responded))
+                || (age > EMPTY_RETRY && lookup.nodes.is_empty())
         });
         if restart {
             self.start(key, now);
@@ -216,7 +221,7 @@ impl Dht {
         // ask them again now and then, and announce.
         let lookup = &self.lookups[&key];
         let asking = self.pending.values().any(|(k, ..)| *k == key);
-        let settled = !asking && lookup.nodes.values().filter(|n| n.honest).take(CLOSEST).all(|n| n.queried);
+        let settled = !asking && !lookup.nodes.is_empty() && lookup.nodes.values().filter(|n| n.honest).take(CLOSEST).all(|n| n.queried);
         if !settled {
             return;
         }
