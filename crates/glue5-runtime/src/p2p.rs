@@ -88,8 +88,9 @@ const HOSTING: Duration = Duration::from_secs(6);
 const PATIENCE: Duration = Duration::from_secs(30);
 /// Lobbies at most at a time: the game's and friends' visited.
 const LOBBIES: usize = 4;
-/// How often a lobby's players are asked for on the DHT.
-const LOBBY_REFRESH: Duration = Duration::from_secs(20);
+/// How often a lobby's players are asked for on the DHT (a player who
+/// cannot greet this one is reached only once this one hears of it).
+const LOBBY_REFRESH: Duration = Duration::from_secs(10);
 /// Errors in a row from the socket after which it is made again.
 const REBIND_AFTER: u32 = 20;
 /// Toward a far player not heard from (`Far`): how long plain greetings
@@ -494,9 +495,10 @@ impl P2p {
     }
 
     /// Whether the engine may look for a session now (it asks until it
-    /// may): once the DHT had the time to find the lobby's players, and
-    /// none of those waiting with it goes first (the lowest id) or has just
-    /// gone, so that it hosts and the others join it.
+    /// may): once the DHT had the time to find the lobby's players, the
+    /// ones it found answered or were given up on, and none of those
+    /// waiting with it goes first (the lowest id) or has just gone, so that
+    /// it hosts and the others join it.
     pub fn may_enter(&self) -> bool {
         if self.flags.load(Ordering::Relaxed) & PLAYING != 0 {
             return true;
@@ -510,11 +512,12 @@ impl P2p {
         let state = self.state.lock().unwrap();
         let Some(lobby) = state.lobbies.first() else { return true };
         let discovered = state.dht.settled(&lobby.key) || now - lobby.joined > DISCOVERY;
+        let reaching = state.trying.values().any(|(_, l)| *l == lobby.id);
         let first = state.peers.iter().filter(|(_, p)| p.direct(now)).all(|(id, p)| {
             let ahead = p.flags & WAITING != 0 && *id < self.id;
             !ahead && p.playing.is_none_or(|t| now - t > HOSTING)
         });
-        let go = discovered && first || now - since > PATIENCE;
+        let go = discovered && !reaching && first || now - since > PATIENCE;
         if go {
             self.flags.store(PLAYING, Ordering::Relaxed);
             log::info!("p2p: looking for a session, {} players known", state.peers.len());
@@ -668,15 +671,15 @@ impl P2p {
         let mut state = self.state.lock().unwrap();
         let mut new = Vec::new();
         let mut friends = Vec::new();
-        let external = state.dht.external();
+        // This player (its announces, under other ports when its NAT gives
+        // each node another), or players behind its NAT too: met on the
+        // local network.
+        let public = state.dht.public_ip();
         for (key, addr) in out.peers {
-            if state.own.contains(&addr) || external == Some(addr) {
+            if state.own.contains(&addr) || public == Some(*addr.ip()) {
                 continue;
             }
-            // Behind this player's NAT too: met on the local network.
-            if external.is_none_or(|e| e.ip() != addr.ip()) {
-                state.note_far(addr, now);
-            }
+            state.note_far(addr, now);
             let Some(lobby) = state.lobbies.iter().find(|l| l.key == key).map(|l| l.id) else {
                 friends.push((key, addr));
                 continue;
