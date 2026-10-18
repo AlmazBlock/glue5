@@ -2,9 +2,9 @@
 #MISE description="Prepare the third-party code with our patches (again only when patches/ change)"
 # wgpu, wgpu-core, wgpu-hal and sp-fidelity from crates.io in
 # third_party/<name> (ignored by git), where the workspace's [patch.crates-io]
-# takes them, and wasm2c built from third_party/wabt for the game's build
-# script. A stamp of the upstream version and the patches skips what is
-# already prepared.
+# takes them, wasm2c built from third_party/wabt for the game's build
+# script, and the natives' database for glue5-mods. A stamp of the
+# upstream version and the patches skips what is already prepared.
 set -euo pipefail
 
 # The crates.io releases the patches in patches/<name> apply to: name,
@@ -65,6 +65,23 @@ for crate in "${crates[@]}"; do
     rm -rf "$dest" && mv "$tmp/$name-$version" "$dest" && rm -rf "$tmp"
     echo "prepared $dest"
 done
+
+# The community's database of the natives (names of parameters, types,
+# documentation; it has no license, so it stays out of git): glue5-mods'
+# build script joins it with what game.wasm says about each native.
+nativedb_commit=424fb51b089049a9fbcebcc641500b1d44d255b4
+nativedb_sha=d13c7e8d627dfe4eab11ba1c25b3621562ceebfe68b0fb5cfc0644d47469b441
+nativedb=third_party/nativedb/natives.json
+if [ ! -f "$nativedb" ] || [ "$(sha256 "$nativedb")" != "$nativedb_sha" ]; then
+    mkdir -p "${nativedb%/*}"
+    curl -fsSL -o "$nativedb.tmp" \
+        "https://raw.githubusercontent.com/alloc8or/gta5-nativedb-data/$nativedb_commit/natives.json"
+    [ "$(sha256 "$nativedb.tmp")" = "$nativedb_sha" ] || { echo "$nativedb does not match its checksum" >&2; exit 1; }
+    mv "$nativedb.tmp" "$nativedb"
+    echo "downloaded $nativedb"
+else
+    echo "nativedb is up to date ($nativedb)"
+fi
 
 # wasm2c: only the nested submodules it needs (wabt also pulls large test suites).
 wabt=third_party/wabt

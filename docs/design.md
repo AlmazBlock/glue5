@@ -712,6 +712,89 @@ prompts, aim assist and menu behaviour:
   input methods: outside the box their accent menu (a held key on macOS),
   dead keys and IME windows would get in the way of play.
 
+## Mods
+
+Mods are Luau scripts (`crates/glue5-mods`) that call the game's script
+commands (natives). They run only when Settings › Game › Mods is on: each
+mod is a folder in the user directory's `mods` with a `main.luau` and an
+optional `mod.json` (`{"autostart": true}`).
+
+**Luau** is a typed Lua (gradual and `--!strict`), embedded with `mlua`. It
+was chosen because:
+
+- its interpreter is the fastest of the typed options without a JIT,
+  which iOS forbids. A call from Luau into Rust costs about 40 ns, against
+  about 76 ns for QuickJS;
+- it has a 3-component `vector` type, which matches the game's `Vector3`;
+- it has a sandbox, memory limits, and an interrupt that can suspend a
+  running script.
+
+**The natives come from the game module.** glue5-game's build script reads
+every `rage::scrThread::RegisterCommand(hash, handler, name, file,
+signature)` call in game.wasm: 8,561 natives with their name, group, hash
+and handler (a function table index). The hashes are this build's own, so
+everything is keyed by name. Where the handler calls a typed
+`<group>_commands::Command<Name>(...)`, the C++ parameter types come from
+its demangled name; vectors returned through a pointer show in its wasm
+signature.
+
+glue5-mods' build script joins that table with the community's natives
+database (`third_party/nativedb`, downloaded by `mise run setup`, pinned,
+not in git because it has no license). The database adds:
+
+- parameter names;
+- documentation;
+- handle types (`Ped`, `Vehicle`, ...);
+- which pointers are outputs.
+
+The binary keeps the final say on calling conventions. For example, the
+database's `x, y, z` floats become one `vector` where the C++ command takes
+an `rage::scrVector`.
+
+The build generates two things:
+
+- a compact table sorted by namespace and name;
+- `natives.d.luau`, the Luau definitions, named the Luau way:
+  `vehicle.createVehicle(model, coords, ...)`, with handle types.
+
+Output parameters come back as extra return values, and a handle of 0 comes
+back as `nil`.
+
+**Each mod runs in a script thread of its own**, as the game's scripts do.
+Its program is built in wasm memory: a copy of a loaded `scrProgram` with
+its own name, id and code (`ENTER; loop: PUSH_0; NATIVE WAIT; J loop`),
+registered with `scrProgramRegistry::Insert`. The thread is started with
+`CTheScripts::GtaStartNewThreadWithProgramId`.
+
+The engine calls WAIT every frame for every waiting thread, and a hook on
+`rage::scrThread::Wait` resumes the mod's Luau coroutine when the mod's
+thread is about to wait. Luau's `wait(ms)` becomes WAIT's argument. This
+gives every native a real script context, the same as a vanilla script's
+natives:
+
+- the active thread is the mod's;
+- entities the mod creates belong to its handler;
+- `scrThread::KillThread` cleans them up when the mod stops.
+
+Starting and stopping happen in the same hook, from whichever thread waits
+next, so all of it stays on the engine's script update. A mod's code starts
+once the player is in the game: no loading screen, screen faded in, player
+playing.
+
+**A mod must not take the game down.**
+
+- Errors stay in the mod's VM: the mod stops with the message and its
+  traceback.
+- Arguments are checked before the native runs. For an entity handle the
+  check is what `fwScriptGuid::GetBaseFromGuid` does, without its
+  `unreachable` for an index past the pool: a stale or made-up handle is an
+  error in the mod, not a trap.
+- Every native is called through `glue5_call_native`, which catches a trap
+  (`GLUE5_TRY`) and restores the wasm stack pointer. The trap becomes an
+  error in the mod, and the runtime is marked as possibly damaged.
+- A mod runs at most 4 ms before the interrupt suspends it until the next
+  frame. One that runs 2 s without calling `wait` is stopped.
+
 ## Known limits
 
 - The renderer handles missing mobile GPU features as follows:

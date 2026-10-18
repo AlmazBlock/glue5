@@ -8,6 +8,7 @@
 /third_party/wgpu-hal.tmp
 /third_party/sp-fidelity
 /third_party/sp-fidelity.tmp
+/third_party/nativedb
 .DS_Store
 # Personal mise settings (e.g. GLUE5_TEAM).
 /.mise/config.local.toml
