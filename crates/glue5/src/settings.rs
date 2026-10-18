@@ -70,6 +70,8 @@ pub struct Settings {
     pub online_name: String,
     /// Friends' notifications show (Social Club's "Hide Notifications").
     pub friend_notices: bool,
+    /// The mods in the user directory's `mods` folder can run (glue5-mods).
+    pub mods: bool,
     /// Settings saved before the render scale: the back buffer's height.
     #[serde(skip_serializing)]
     render_height: Option<u32>,
@@ -224,6 +226,7 @@ impl Default for Settings {
             online: false,
             online_name: String::new(),
             friend_notices: true,
+            mods: false,
             render_height: None,
             metalfx: None,
             metal_hud: None,

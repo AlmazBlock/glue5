@@ -964,6 +964,11 @@ fn settings_items(
             setting(ui, "Friends' notifications", Control::Toggle, Some("Online, requests, invites"), |ui| {
                 toggle(ui, &mut settings.friend_notices);
             });
+            let mods = next_start(status.started.as_ref().is_some_and(|s| s.mods != settings.mods))
+                .unwrap_or("Scripts from the mods folder");
+            setting(ui, "Mods", Control::Toggle, Some(mods), |ui| {
+                toggle(ui, &mut settings.mods);
+            });
             let version = concat!("Glue 5 ", env!("CARGO_PKG_VERSION"), " and the projects it builds on");
             setting(ui, "Credits", Control::Action, Some(version), |ui| {
                 if action_button(ui, "View").clicked() {

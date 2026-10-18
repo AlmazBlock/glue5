@@ -83,6 +83,10 @@ struct Args {
     /// turning; the run ends after the last (use with --sandbox).
     #[arg(long, num_args = 2, value_names = ["FILE", "S"])]
     tour: Vec<String>,
+    /// Run the mods of this folder (glue5-mods; those marked autostart
+    /// start with the game, stdin's `mods start <name>` the others).
+    #[arg(long, value_name = "DIR")]
+    mods: Option<PathBuf>,
     /// Saves, settings and the pipeline cache (default: glue5-headless in
     /// the temporary directory).
     #[arg(long, value_name = "DIR")]
@@ -225,6 +229,9 @@ fn main() -> Result<()> {
     if let Some(name) = &args.online {
         glue5_runtime::friends::start(&user_dir, name);
     }
+    if let Some(dir) = &args.mods {
+        glue5_mods::install(dir);
+    }
     let game = glue5_runtime::start(
         glue5_runtime::Config {
             game_dir,
@@ -321,9 +328,12 @@ fn command(line: &str, t: f64, game: &Game, presses: &mut Vec<(f64, u16)>, keys:
             game.input().context("no input yet")?.resize(w.parse()?, h.parse()?);
         }
         ["friends", ..] => friends(&line.split_whitespace().collect::<Vec<_>>()[1..])?,
+        ["mods", "list"] => log::info!("mods: {:?}", glue5_mods::mods()),
+        ["mods", "start", name] => glue5_mods::start(name),
+        ["mods", "stop", name] => glue5_mods::stop(name),
         _ => bail!(
             "expected `press <button>`, `key <key>`, `hold <key> <s>`, `text <text>`, `size <w>x<h>` or \
-             `friends code|ask <code>|accept|list|join|invite|play|add <name>`"
+             `friends code|ask <code>|accept|list|join|invite|play|add <name>` or `mods list|start <name>|stop <name>`"
         ),
     }
     Ok(())

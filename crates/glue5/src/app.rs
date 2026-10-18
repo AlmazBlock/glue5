@@ -858,6 +858,9 @@ impl App {
         log::info!("game: {}, user data: {}", game_dir.display(), self.user_dir.display());
         let s = &self.settings;
         let back_buffer = settings::render_size(self.window.size_in_pixels(), s.render_scale(), s.low_memory);
+        if s.mods {
+            glue5_mods::install(&self.user_dir.join("mods"));
+        }
         let game = glue5_runtime::start(
             glue5_runtime::Config {
                 game_dir: game_dir.clone(),
@@ -885,7 +888,8 @@ impl App {
                 None
             }
         };
-        let started = Started { game_dir, source: self.source, max_fps: s.max_fps, low_memory: s.low_memory };
+        let started =
+            Started { game_dir, source: self.source, max_fps: s.max_fps, low_memory: s.low_memory, mods: s.mods };
         self.game = Some(Running { game, input: None, started, back_buffer, _audio: audio });
         self.ui.game_started();
         Ok(())

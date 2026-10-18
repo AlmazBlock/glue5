@@ -146,6 +146,7 @@ pub struct Started {
     pub source: crate::settings::Source,
     pub max_fps: u32,
     pub low_memory: bool,
+    pub mods: bool,
 }
 
 /// What the pages show about the application.
