@@ -12,6 +12,7 @@ mod boot_screen;
 mod cloud;
 pub mod cpu;
 mod device_reset;
+mod draw_lists;
 mod dht;
 pub mod exit;
 mod files;
@@ -306,6 +307,7 @@ pub fn start(config: Config, gpu: gpu::GpuBackend) -> Result<Game> {
     boot_screen::hooks(&mut hooks);
     stream::hooks(&mut hooks);
     prompts::hooks(&mut hooks);
+    draw_lists::hooks(&mut hooks);
     for set in EXTRA_HOOKS.lock().unwrap().iter() {
         set(&mut hooks);
     }

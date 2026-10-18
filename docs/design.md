@@ -837,6 +837,12 @@ playing.
     object) is an error before the native runs;
   - natives that create entities are refused when the pool is nearly
     full;
+  - a frame draws skeletons within fixed budgets (400 matrix sets in the
+    command buffer, 512 dependencies in the draw list manager); past them
+    the engine stopped (some 114 peds in view). Peds and vehicles that
+    would not fit are now skipped for that frame through the engine's own
+    `CEntityDrawHandler::ShouldSkipEntity` (runtime `draw_lists.rs`), for
+    the game's crowds as well as mods';
   - mods' script threads get stacks of their own (gameconfig.xml's MICRO
     stacks, 20 → 52);
   - when the game stops working, the failure names the mod and the native

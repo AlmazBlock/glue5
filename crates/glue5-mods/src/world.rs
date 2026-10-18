@@ -81,20 +81,6 @@ fn vehicles(mem: Mem) -> Vec<u64> {
         .collect()
 }
 
-/// The peds the game draws at most: with ~114 in view its draw list runs
-/// out of room for their skeletons and the engine stops (measured with
-/// clones in one place; 106 were fine).
-pub const MAX_PEDS: u64 = 100;
-
-/// How many peds are alive.
-pub fn peds(mem: Mem) -> u64 {
-    let pool = mem.u64(PED_POOL);
-    if pool == 0 {
-        return 0;
-    }
-    (((mem.u32(pool + 48) << 2) as i32) >> 2).max(0) as u64
-}
-
 /// How many more entities of a kind the game takes.
 pub fn free(mem: Mem, pool: Pool) -> u64 {
     match pool {

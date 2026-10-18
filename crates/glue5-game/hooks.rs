@@ -42,5 +42,6 @@ pub const HOOKS: &[&[(&str, &str)]] = &[
     include!("hooks/boot_screen.rs"),
     include!("hooks/stream.rs"),
     include!("hooks/prompts.rs"),
+    include!("hooks/draw_lists.rs"),
     include!("hooks/mods.rs"),
 ];

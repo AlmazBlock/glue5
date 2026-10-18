@@ -324,12 +324,8 @@ pub fn call(lua: &Lua, index: usize, args: MultiValue) -> mlua::Result<MultiValu
                 Some(K::Handle(H::Object)) => Some(crate::world::Pool::Objects),
                 _ => None,
             };
-            let full = |pool| match pool {
-                crate::world::Pool::Peds => crate::world::peds(mem) >= crate::world::MAX_PEDS,
-                _ => false,
-            } || crate::world::free(mem, pool) < 8;
             if let Some(pool) = pool
-                && full(pool)
+                && crate::world::free(mem, pool) < 8
             {
                 return Err(mlua::Error::runtime(format!(
                     "{}: the game has no room for more ({pool:?} are full); delete some first",
