@@ -31,13 +31,18 @@ const METHODS: u64 = 64;
 /// The engine's switches for GTA Online without Rockstar's services: LAN
 /// sessions (the lobby is the LAN, vnet.rs), straight into freemode, no
 /// cloud files, catalog, shop transactions or online policies to wait for,
-/// and sessions for everyone whatever their aim (the game keeps players
-/// aiming freely, with a mouse, apart from assisted ones, as touch play on
-/// a phone is: they never met).
+/// sessions for everyone whatever their aim (the game keeps players aiming
+/// freely, with a mouse, apart from assisted ones, as touch play on a phone
+/// is: they never met), and the story's prologue taken as played (joining a
+/// friend's session asks for it: "GTA Online will be available once you
+/// have completed the prologue", and the game answered the friend's
+/// session every frame).
 pub(crate) const ENGINE_ARGS: &[&str] = &[
     "-lan",
     "-StraightIntoFreemode",
     "-netSessionIgnoreAim",
+    "-netSpPrologueComplete",
+    "-mpavailable",
     "-netMpSkipCloudFileRequirements",
     "-sc_noOnlinePolicy",
     "-netshoptransactionnull",
