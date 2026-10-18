@@ -80,6 +80,9 @@ const RATE_PER_ADDRESS: u32 = 10;
 const RATE_ALL: u32 = 60;
 /// DHT lookups: friends not connected are asked for often.
 const LOOKUP_ALONE: Duration = Duration::from_secs(30);
+/// A friend code is looked up often while asked with: the one asking and
+/// its owner find each other there.
+const LOOKUP_CODE: Duration = Duration::from_secs(10);
 const LOOKUP_CONNECTED: Duration = Duration::from_secs(300);
 /// An invite from a friend is shown this long, and one more from it is not
 /// heard before then.
@@ -823,10 +826,10 @@ impl Service {
         // NAT giving each address another port lets nothing in from them
         // before its player sends to them (`callers`).
         if let Some(code) = &self.code {
-            keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_ALONE }));
+            keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_CODE }));
         }
         for code in self.asked.iter().filter(|a| a.transport.is_none() && !a.declined).filter_map(Ask::code) {
-            keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_ALONE }));
+            keys.push((crypto::code_key(code), dht::Options { announce: true, refresh: LOOKUP_CODE }));
         }
         keys
     }

@@ -603,7 +603,7 @@ fn a_code_owner_out_of_reach_finds_the_asker_and_probes_it() {
     let (mut a, mut b) = (Player::new("Ann", 1), Player::new("Bob", 2));
     b.s.asked.push(Ask::new(a.code(), None));
     let code_key = crypto::code_key(&a.code());
-    assert!(b.s.lookups(unix()).contains(&(code_key, dht::Options { announce: true, refresh: LOOKUP_ALONE })));
+    assert!(b.s.lookups(unix()).contains(&(code_key, dht::Options { announce: true, refresh: LOOKUP_CODE })));
     let mut out = Out::default();
     b.s.found(code_key, nowhere(), now, &mut out);
     let from = b.addr;

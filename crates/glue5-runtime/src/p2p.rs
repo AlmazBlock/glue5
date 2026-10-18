@@ -98,9 +98,12 @@ const REBIND_AFTER: u32 = 20;
 /// and for how many players at a time.
 const SPRAY_AFTER: Duration = Duration::from_secs(4);
 const SPRAY_EVERY: Duration = Duration::from_secs(10);
-const SPRAY_PORTS: usize = 1024;
-/// On either side of each port handed out.
-const SPRAY_AROUND: u16 = 128;
+const SPRAY_PORTS: usize = 1536;
+/// Below and above each port handed out: the NAT hands out the next ones
+/// meanwhile (hundreds in seconds while the far player starts and looks
+/// up its keys).
+const SPRAY_BELOW: u16 = 64;
+const SPRAY_ABOVE: u16 = 640;
 /// Ports handed out for a far player kept, the latest.
 const FAR_PORTS: usize = 16;
 const SPRAYING: usize = 4;
@@ -202,9 +205,9 @@ struct Far {
 }
 
 /// The ports a far player's NAT may send from to this player, given the
-/// ones the DHT handed out: around each (its NAT hands them out in order,
-/// and greets this player in the same moments as it announces itself),
-/// the latest first while there is room. The DHT also keeps the ones of
+/// ones the DHT handed out: around each, mostly above (its NAT hands them
+/// out in order, and greets this player after announcing itself), the
+/// latest first while there is room. The DHT also keeps the ones of
 /// the player's earlier runs, and the NAT may have moved on elsewhere.
 fn spray_ports(ports: &[u16]) -> Vec<std::ops::RangeInclusive<u16>> {
     let mut ranges: Vec<std::ops::RangeInclusive<u16>> = Vec::new();
@@ -213,8 +216,8 @@ fn spray_ports(ports: &[u16]) -> Vec<std::ops::RangeInclusive<u16>> {
         if room == 0 {
             break;
         }
-        let start = port.saturating_sub(SPRAY_AROUND).max(1024);
-        let end = port.saturating_add(SPRAY_AROUND).max(start);
+        let start = port.saturating_sub(SPRAY_BELOW).max(1024);
+        let end = port.saturating_add(SPRAY_ABOVE).max(start);
         room = room.saturating_sub(usize::from(end - start) + 1);
         ranges.push(start..=end);
     }
@@ -988,18 +991,17 @@ mod tests {
     #[test]
     fn the_ports_opened_follow_the_ones_handed_out() {
         // Measured on a mobile network: announced at 31329, its greetings
-        // came from a port a few above.
-        assert_eq!(spray_ports(&[31329]), [31201..=31457]);
+        // came from 31435; announced at 25179-25362 while starting, its
+        // greetings came from 25864.
+        assert_eq!(spray_ports(&[31329]), [31265..=31969]);
+        assert_eq!(spray_ports(&[25179, 25362, 25349]), [25115..=26002]);
         // Announces of the player's earlier runs (31441...) and of this
         // one (3106x, the NAT moved on): around each, close ones merged.
-        assert_eq!(
-            spray_ports(&[31441, 31874, 31457, 31900, 31063, 31067]),
-            [30935..=31195, 31329..=31585, 31772..=32028]
-        );
+        assert_eq!(spray_ports(&[31441, 31874, 31457, 31900, 31063, 31067]), [30999..=31707, 31836..=32540]);
         // No room for more: the latest count.
-        assert_eq!(spray_ports(&[10000, 20000, 30000, 40000, 50000]), [20000 - 128..=20000 + 128, 29872..=30128, 39872..=40128, 49872..=50128]);
-        assert_eq!(spray_ports(&[1100]), [1024..=1228]);
-        assert_eq!(spray_ports(&[65500]), [65372..=65535]);
+        assert_eq!(spray_ports(&[10000, 20000, 30000, 40000, 50000]), [29936..=30640, 39936..=40640, 49936..=50640]);
+        assert_eq!(spray_ports(&[1050]), [1024..=1690]);
+        assert_eq!(spray_ports(&[65500]), [65436..=65535]);
     }
 
     #[test]
