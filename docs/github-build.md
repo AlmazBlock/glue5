@@ -1,75 +1,98 @@
-# Building on GitHub
+# Build the app on GitHub
 
-The app can be built by GitHub Actions in your own fork of this
-repository, with your own `game.wasm`, without installing anything. Nothing
-built from the game is published: the game's code goes into a **draft
-release** of your fork, and the apps come back into the same draft. A
-draft is seen only by you (and by anyone you give write access to the
-fork); to everyone else, logged in or not, it does not exist.
+GitHub builds the app for you, for free. You only need a GitHub account
+and your `game.wasm` file.
 
-## Once
+> ⚠️ **One rule:** never press **Publish release**. Always press **Save
+> draft**. A draft is private: only you can see it.
 
-1. **Fork** this repository (forks of a public repository are public:
-   that is what makes GitHub's macOS and Linux machines free). In the
-   fork's **Actions** tab, enable the workflows.
-2. In the fork, **Releases › Draft a new release**. Attach `game.wasm`
-   (the supported build, see the [README](../README.md)), give it any
-   title and press **Save draft**. Never **Publish release**.
+## The first time
 
-## Each build
+**1. Copy this project**
 
-**Actions › Build › Run workflow**, choose the platform, **Run
-workflow**. It checks `game.wasm` first and stops within a minute if the
-draft or the file is missing or wrong, saying what to do. When it ends,
-the app is in the draft, next to `game.wasm`:
+Press **Fork** at the top of this page, then **Create fork**.
 
-| Platform | File | Machine |
-|---|---|---|
-| iOS | `Glue5-ios.ipa`, unsigned | macOS |
-| Android | `Glue5-android.apk`; `Glue5-android.keystore` is its signing key | Linux |
-| macOS | `Glue5-macos.dmg`, unsigned | macOS |
-| Linux | `Glue5-linux-x86_64.AppImage`, `Glue5-linux-aarch64.AppImage` | Linux |
+**2. Turn on the builds**
 
-The workflow runs the same tasks as a build on a computer (`mise run
-ios:ipa`, `android:build`, `macos:package`, `linux:container`), with the
-toolchain in `.mise/config.toml`. A job may last up to six hours.
+In your copy, open the **Actions** tab and press the green button
+(**I understand my workflows, go ahead and enable them**).
 
-To build a newer version: **Sync fork** on the fork's page, then run the
-workflow again. `game.wasm` stays in the draft.
+**3. Add your game.wasm**
 
-## Installing
+In your copy, open **Releases** (on the right side of the main page),
+then **Draft a new release**.
 
-- **iOS:** sign and install the IPA with a sideloading tool (Sideloadly,
-  AltStore, SideStore) and your Apple ID. With a free Apple ID the app
-  runs for 7 days, then is installed again. The IPA asks for the
-  increased memory limit (`platform/ios/Glue5.entitlements`), which free
-  accounts may have.
-- **Android:** install the APK. The first build makes a signing key and
-  keeps it in the draft (`Glue5-android.keystore`); later builds sign
-  with it, so they install over the app. Do not delete it: an APK signed
-  with another key has to replace the app, and that deletes its game
-  folder.
-- **macOS:** the app is not signed for distribution: Gatekeeper blocks it
-  until you allow it (System Settings › Privacy & Security, or
-  `xattr -dr com.apple.quarantine "Glue 5.app"`).
-- **Linux:** make the AppImage executable and run it.
+- Title: anything, for example `game`.
+- Drag `game.wasm` into the box at the bottom.
+- Wait until it has finished uploading.
+- Press **Save draft**. ⚠️ Not **Publish release**.
 
-The game's files then go on the device as described in the
-[README](../README.md#platforms), or stream from a computer.
+## Build the app
 
-## If a release is published
+1. Open the **Actions** tab.
+2. On the left, press **Build**.
+3. On the right, press **Run workflow**, choose your device (`ios`,
+   `android`, `macos`, `linux-x86_64` or `linux-aarch64`), press the
+   green **Run workflow**.
+4. Wait. It takes a long time (more than an hour): you can close the
+   page and come back later. A green ✅ means it is done.
+5. Open **Releases**, then your draft: the app is there, next to
+   `game.wasm`. Download it.
 
-Published, a release's files can be downloaded by anyone. The **Release
-guard** workflow puts a release with a `.wasm` or a `Glue5-*` file back to
-draft as soon as it is published or edited (files added included), and
-fails, so that GitHub notifies you. That takes a few seconds (about 8 in
-our tests), during which the files are public. The Build workflow uploads
-only into a draft and refuses to start while a published release has
-them.
+If something is missing or wrong, the build stops and the red ❌ tells
+you what to do: open it and read the message.
 
-## Caches
+## Install the app
 
-The workflows keep no cache of the build: GitHub lets pull requests from
-other people's forks read the caches of a repository's default branch,
-and the build's objects are made from the game's code. Only the toolchain
-(mise's tools) is cached.
+- **iPhone / iPad** (`Glue5-ios.ipa`): install it with
+  [Sideloadly](https://sideloadly.io) or [AltStore](https://altstore.io)
+  and your Apple ID. With a free Apple ID you have to install it again
+  every 7 days.
+- **Android** (`Glue5-android.apk`): open the file on the phone and
+  install it. ⚠️ Do not delete `Glue5-android.keystore` from the draft:
+  without it, the next version cannot update the app.
+- **Mac** (`Glue5-macos.dmg`): open it and drag the app into
+  Applications. The first time, macOS blocks it: open **System Settings ›
+  Privacy & Security** and press **Open Anyway**.
+- **Linux** (`Glue5-linux-….AppImage`): make it executable and run it.
+
+Then put the game's files on the device: see the
+[README](../README.md#platforms).
+
+## Get a new version
+
+1. On the main page of your copy, press **Sync fork**, then **Update
+   branch**.
+2. Build the app again (see above). Your `game.wasm` is still there.
+
+## If you published by mistake
+
+Nothing to do: within a few seconds GitHub puts it back to draft by
+itself, and you get an email about it. In those few seconds anyone could
+have downloaded the files, so try not to do it.
+
+---
+
+### How it works
+
+- The **Build** workflow runs the same tasks as a build on a computer
+  (`mise run ios:ipa`, `android:build`, `macos:package`,
+  `linux:container`), on GitHub's macOS and Linux machines, free for
+  public repositories (forks of a public repository are public). It takes
+  `game.wasm` from the newest draft release, checks it is the supported
+  build, and uploads the result into the same draft. A job may last up to
+  six hours.
+- Drafts are seen only by those who can write to the repository and by
+  its workflows. The **Release guard** workflow puts a release with a
+  `.wasm` or a `Glue5-*` file back to draft when it is published or
+  edited (about 8 seconds in our tests), and fails so that GitHub sends
+  an email. Build refuses to start while a published release has them.
+- Android: the first build makes a signing key and keeps it in the draft
+  (`Glue5-android.keystore`); later builds sign with it, so they install
+  over the app (a new key would mean reinstalling, which deletes the
+  app's game folder).
+- iOS: the IPA is unsigned; it carries the increased memory limit
+  entitlement (`platform/ios/Glue5.entitlements`) in an ad-hoc signature.
+- No build cache: GitHub lets pull requests from other people's forks
+  read a repository's caches, and the build's objects are made from the
+  game's code. Only the toolchain (mise's tools) is cached.
