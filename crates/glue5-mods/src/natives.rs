@@ -315,16 +315,21 @@ pub fn call(lua: &Lua, index: usize, args: MultiValue) -> mlua::Result<MultiValu
             }
             slot += if p.kind == K::Vec3 && p.dir == D::In { 24 } else { 8 };
         }
-        // The engine fails when a pool is full: refused before that.
-        if n.name.starts_with("CREATE_") {
+        // The engine fails when a pool is full: refused before that
+        // (CREATE_PED, CLONE_PED, CREATE_VEHICLE...).
+        if n.name.starts_with("CREATE_") || n.name.starts_with("CLONE_") {
             let pool = match n.ret {
                 Some(K::Handle(H::Vehicle)) => Some(crate::world::Pool::Vehicles),
                 Some(K::Handle(H::Ped)) => Some(crate::world::Pool::Peds),
                 Some(K::Handle(H::Object)) => Some(crate::world::Pool::Objects),
                 _ => None,
             };
+            let full = |pool| match pool {
+                crate::world::Pool::Peds => crate::world::peds(mem) >= crate::world::MAX_PEDS,
+                _ => false,
+            } || crate::world::free(mem, pool) < 8;
             if let Some(pool) = pool
-                && crate::world::free(mem, pool) < 8
+                && full(pool)
             {
                 return Err(mlua::Error::runtime(format!(
                     "{}: the game has no room for more ({pool:?} are full); delete some first",
