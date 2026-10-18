@@ -112,6 +112,9 @@ struct Binary {
     signature: u64,
 }
 
+/// Natives whose handle is never none: the player's ped.
+const NEVER_NONE: &[&str] = &["PLAYER_PED_ID", "GET_PLAYER_PED", "GET_PLAYER_PED_SCRIPT_INDEX"];
+
 /// Natives the mods may not call: the script thread's own control (a mod's
 /// thread only waits through `wait`, and ends through `mod`).
 const RESERVED: &[&str] = &["WAIT", "TERMINATE_THIS_THREAD"];
@@ -221,6 +224,184 @@ fn run() -> Result<()> {
 
     fs::write(out.join("natives.rs"), rust_table(&natives, &reserved))?;
     fs::write(out.join("natives.d.luau"), definitions(&natives))?;
+    checker(&root)?;
+    let web = studio_files(&root, &out)?;
+    assets(&out, &web)?;
+    Ok(())
+}
+
+/// The Studio's files, published path and contents: crates/glue5-studio
+/// built for wasm (a cargo of its own, with its own target directory, then
+/// wasm-bindgen), its page and style, the editor's modules from
+/// `third_party/codemirror` (an import map in the page names them), the
+/// app's fonts.
+fn studio_files(root: &Path, out: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let studio = root.join("crates/glue5-studio");
+    let codemirror = root.join("third_party/codemirror");
+    for p in ["src", "js", "web", "Cargo.toml", "Cargo.lock", "packages.txt"] {
+        println!("cargo:rerun-if-changed={}", studio.join(p).display());
+    }
+    println!("cargo:rerun-if-changed={}", codemirror.join(".glue5-stamp").display());
+    anyhow::ensure!(codemirror.join(".glue5-stamp").exists(), "{} is missing: run `mise run setup`", codemirror.display());
+
+    // The wasm: a cargo of its own (the outer one holds this target
+    // directory), without this build's flags, which are for its target.
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"))
+        .join("glue5-tools/studio");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = std::process::Command::new(cargo);
+    command
+        .args(["build", "--release", "--target", "wasm32-unknown-unknown", "--manifest-path"])
+        .arg(studio.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target_dir);
+    for (key, _) in env::vars_os() {
+        let key = key.to_string_lossy();
+        if key.starts_with("CARGO_") && key != "CARGO_HOME" || key == "RUSTFLAGS" || key == "RUSTC_WORKSPACE_WRAPPER" {
+            command.env_remove(key.as_ref());
+        }
+    }
+    let status = command.status().context("building glue5-studio")?;
+    anyhow::ensure!(status.success(), "building glue5-studio (wasm) failed");
+    let wasm = target_dir.join("wasm32-unknown-unknown/release/glue5_studio.wasm");
+    let bindgen = out.join("studio");
+    let _ = fs::remove_dir_all(&bindgen);
+    wasm_bindgen_cli_support::Bindgen::new()
+        .input_path(&wasm)
+        .out_name("studio")
+        .web(true)?
+        .typescript(false)
+        .debug(false)
+        .keep_debug(false)
+        .generate(&bindgen)?;
+
+    let mut files = Vec::new();
+    let add_tree = |dir: &Path, prefix: &str, files: &mut Vec<(String, Vec<u8>)>| -> Result<()> {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d)? {
+                let p = e?.path();
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let rel = p.strip_prefix(dir)?.to_string_lossy().replace('\\', "/");
+                    files.push((format!("{prefix}/{rel}"), fs::read(&p)?));
+                }
+            }
+        }
+        Ok(())
+    };
+    add_tree(&bindgen, "", &mut files)?;
+    add_tree(&codemirror, "/cm", &mut files)?;
+    for f in ["style.css", "bg.jpg", "logo.png"] {
+        files.push((format!("/{f}"), fs::read(studio.join("web").join(f))?));
+    }
+    let fonts = root.join("crates/glue5/assets/ui");
+    for f in ["Barlow-SemiBold.ttf", "BarlowCondensed-Bold.ttf"] {
+        files.push((format!("/fonts/{f}"), fs::read(fonts.join(f))?));
+    }
+    // The page, with the import map of the editor's modules.
+    let mut imports = serde_json::Map::new();
+    for line in fs::read_to_string(studio.join("packages.txt"))?.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() == 4 && !line.starts_with('#') {
+            imports.insert(f[0].to_string(), format!("/cm/{}/{}", f[0], f[3]).into());
+        }
+    }
+    let map = serde_json::json!({ "imports": imports }).to_string();
+    let page = fs::read_to_string(studio.join("web/index.html"))?.replace("<!--IMPORTMAP-->", &map);
+    files.push(("/index.html".into(), page.into_bytes()));
+    files.retain(|(p, _)| !p.ends_with("LICENSE") && !p.ends_with(".d.ts"));
+    Ok(files)
+}
+
+/// Embeds `files` (assets.rs): each with a gzip copy when that is smaller.
+fn assets(out: &Path, files: &[(String, Vec<u8>)]) -> Result<()> {
+    use std::io::Write as _;
+    let dir = out.join("web");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut s = String::from("pub static ASSETS: &[(&str, Asset)] = &[\n");
+    for (i, (path, body)) in sorted.iter().enumerate() {
+        let raw = dir.join(format!("{i}"));
+        fs::write(&raw, body)?;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(body)?;
+        let gz = gz.finish()?;
+        let gzip = if gz.len() + 64 < body.len() {
+            let at = dir.join(format!("{i}.gz"));
+            fs::write(&at, &gz)?;
+            format!("Some(include_bytes!({:?}))", at.display().to_string())
+        } else {
+            "None".into()
+        };
+        let mime = match path.rsplit('.').next().unwrap_or("") {
+            "html" => "text/html; charset=utf-8",
+            "js" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "wasm" => "application/wasm",
+            "json" => "application/json",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "jpg" => "image/jpeg",
+            "ttf" => "font/ttf",
+            "woff2" => "font/woff2",
+            _ => "application/octet-stream",
+        };
+        // Revalidated every time: an ETag (the content's hash) makes that a
+        // 304 when nothing changed, and a new app never serves stale files.
+        let etag = {
+            use sha2::Digest as _;
+            let h = sha2::Sha256::digest(body);
+            format!("\"{}\"", h.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>())
+        };
+        let _ = writeln!(
+            s,
+            "    ({path:?}, Asset {{ body: include_bytes!({:?}), gzip: {gzip}, mime: {mime:?}, etag: {etag:?} }}),",
+            raw.display().to_string()
+        );
+    }
+    s.push_str("];\n");
+    fs::write(out.join("assets.rs"), s)?;
+    Ok(())
+}
+
+/// Luau's type checker (Luau.Analysis, from `third_party/luau`, the release
+/// mlua builds the rest of Luau from) and our C API over it.
+fn checker(root: &Path) -> Result<()> {
+    let luau = root.join("third_party/luau");
+    anyhow::ensure!(luau.join("Analysis").is_dir(), "{} is missing: run `mise run setup`", luau.display());
+    println!("cargo:rerun-if-changed=csrc");
+    println!("cargo:rerun-if-changed={}", luau.join(".glue5-stamp").display());
+    let mut sources: Vec<PathBuf> = fs::read_dir(luau.join("Analysis/src"))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    sources.retain(|p| p.extension().is_some_and(|e| e == "cpp"));
+    sources.sort();
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .std("c++17")
+        .warnings(false)
+        .opt_level(2)
+        .debug(false)
+        .define("LUA_API", "extern \"C\"")
+        .define("LUACODE_API", "extern \"C\"");
+    for dir in ["Analysis", "Ast", "Bytecode", "Common", "Config", "Compiler", "VM"] {
+        build.include(luau.join(dir).join("include"));
+    }
+    if env::var("CARGO_CFG_TARGET_ENV")? == "msvc" {
+        build.flag("/EHsc");
+    }
+    build.files(&sources).file("csrc/checker.cpp").compile("glue5_luau_analysis");
     Ok(())
 }
 
@@ -416,7 +597,11 @@ fn vector_name(x: &str) -> String {
         return format!("coords{rest}");
     }
     let stem = x.strip_suffix('X').or_else(|| x.strip_suffix('x')).unwrap_or(x);
-    if stem.is_empty() { "coords".into() } else { stem.to_string() }
+    match stem {
+        "" => "coords".into(),
+        k if KEYWORDS.contains(&k) => format!("{k}_"),
+        _ => stem.to_string(),
+    }
 }
 
 fn rust_kind(k: Kind) -> String {
@@ -443,12 +628,13 @@ fn rust_table(natives: &[Native], reserved: &[(String, u64)]) -> String {
         let ret = n.ret.map_or("None".to_string(), |k| format!("Some({})", rust_kind(k)));
         let _ = writeln!(
             s,
-            "    Native {{ ns: {ns}, lua: {:?}, name: {:?}, hash: {:#x}, handler: {}, params: &[{}], ret: {ret} }},",
+            "    Native {{ ns: {ns}, lua: {:?}, name: {:?}, hash: {:#x}, handler: {}, params: &[{}], ret: {ret}, doc: {:?} }},",
             n.lua,
             n.name,
             n.hash,
             n.handler,
-            params.join(", ")
+            params.join(", "),
+            n.doc.trim()
         );
     }
     s.push_str("];\n");
@@ -479,38 +665,43 @@ fn luau_result(k: Kind) -> String {
     }
 }
 
+/// What the mods' VM adds besides the natives (vm.rs).
+const GLOBALS: &str = "\
+type Hash = number
+
+-- Back to the game for `ms` milliseconds (0 or none: until the next frame).
+declare function wait(ms: number?): ()
+-- The hash the game uses for a name (GET_HASH_KEY).
+declare function joaat(name: string): Hash
+declare mod: { name: string }
+
+";
+
 fn definitions(natives: &[Native]) -> String {
     let mut s = String::new();
     s.push_str("--!strict\n-- The game's natives, generated from game.wasm and nativedb by glue5-mods. Do not edit.\n\n");
     for (name, _, base) in HANDLES {
-        match base {
-            Some(b) => {
-                let _ = writeln!(s, "declare class {name} extends {b} end");
-            }
-            None => {
-                let _ = writeln!(s, "declare class {name} end");
-            }
-        }
+        let base = base.map(|b| format!(" extends {b}")).unwrap_or_default();
+        let _ = writeln!(s, "declare extern type {name}{base} with end");
     }
-    s.push_str("type Hash = number\n\n");
+    s.push_str(GLOBALS);
     let mut i = 0;
     while i < natives.len() {
         let ns = &natives[i].namespace;
         let _ = writeln!(s, "declare {ns}: {{");
         while i < natives.len() && &natives[i].namespace == ns {
             let n = &natives[i];
-            let doc = n.doc.lines().map(str::trim).filter(|l| !l.is_empty()).take(6).collect::<Vec<_>>();
-            for line in &doc {
-                let _ = writeln!(s, "\t--- {line}");
-            }
-            let _ = writeln!(s, "\t--- `{}`", n.name);
             let inputs: Vec<String> = n
                 .params
                 .iter()
                 .filter(|p| p.dir != Dir::Out)
                 .map(|p| format!("{}: {}", p.name, luau_type(p.kind, true)))
                 .collect();
-            let mut outputs: Vec<String> = n.ret.into_iter().map(luau_result).collect();
+            let mut outputs: Vec<String> = n
+                .ret
+                .into_iter()
+                .map(|k| if NEVER_NONE.contains(&n.name.as_str()) { luau_type(k, false) } else { luau_result(k) })
+                .collect();
             outputs.extend(n.params.iter().filter(|p| p.dir != Dir::In).map(|p| luau_result(p.kind)));
             let result = match outputs.len() {
                 0 => "()".to_string(),

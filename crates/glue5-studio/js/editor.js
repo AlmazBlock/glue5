@@ -1,0 +1,314 @@
+// The Studio's code editor: CodeMirror 6 with Luau highlighting and the
+// game's type checker as a language server (over the /lsp WebSocket). One
+// view; each open file keeps its own state (text, undo history, cursor).
+// Used from Rust (src/editor.rs).
+
+import { EditorState, Compartment } from "@codemirror/state";
+import {
+  EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
+  drawSelection, rectangularSelection, crosshairCursor, highlightSpecialChars, dropCursor,
+} from "@codemirror/view";
+import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  StreamLanguage, HighlightStyle, syntaxHighlighting, bracketMatching, indentOnInput, indentUnit,
+} from "@codemirror/language";
+import { closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+import { lintGutter, lintKeymap, forEachDiagnostic } from "@codemirror/lint";
+import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import { LSPClient, languageServerExtensions } from "@codemirror/lsp-client";
+import { tags as t } from "@lezer/highlight";
+
+// ---- Luau ---------------------------------------------------------------
+
+const KEYWORDS = new Set(("and break do else elseif end false for function if in local nil not or repeat " +
+  "return then true until while continue").split(" "));
+const CONTEXTUAL = new Set(["type", "export", "typeof"]);
+const BUILTIN_TYPES = new Set(("number string boolean any unknown never nil vector thread buffer " +
+  "Entity Ped Vehicle Object Player Cam Blip Pickup Interior ScrHandle FireId Hash").split(" "));
+const GLOBALS = new Set(("print wait joaat require mod math string table coroutine bit32 utf8 os vector " +
+  "pairs ipairs next select type typeof tostring tonumber assert error pcall xpcall setmetatable getmetatable " +
+  "rawget rawset rawequal rawlen unpack").split(" "));
+
+function longBracket(stream) {
+  const m = stream.match(/^\[(=*)\[/);
+  return m ? m[1].length : -1;
+}
+
+function readLong(level, style) {
+  return (stream, state) => {
+    const close = "]" + "=".repeat(level) + "]";
+    while (!stream.eol()) {
+      if (stream.match(close)) { state.tokenize = null; return style; }
+      stream.next();
+    }
+    return style;
+  };
+}
+
+function readQuoted(quote) {
+  return (stream, state) => {
+    let escaped = false, ch;
+    while ((ch = stream.next()) != null) {
+      if (ch === quote && !escaped) { state.tokenize = null; return "string"; }
+      escaped = !escaped && ch === "\\";
+    }
+    if (!escaped && quote !== "`") state.tokenize = null;
+    return "string";
+  };
+}
+
+const luau = StreamLanguage.define({
+  name: "luau",
+  startState: () => ({ tokenize: null, typeContext: false, afterDot: false }),
+  token(stream, state) {
+    if (state.tokenize) return state.tokenize(stream, state);
+    if (stream.eatSpace()) return null;
+    if (stream.match("--")) {
+      const level = longBracket(stream);
+      if (level >= 0) { state.tokenize = readLong(level, "comment"); return state.tokenize(stream, state); }
+      stream.skipToEnd();
+      return "comment";
+    }
+    const level = longBracket(stream);
+    if (level >= 0) { state.tokenize = readLong(level, "string"); return state.tokenize(stream, state); }
+    const ch = stream.peek();
+    if (ch === '"' || ch === "'" || ch === "`") {
+      stream.next();
+      state.tokenize = readQuoted(ch);
+      return state.tokenize(stream, state);
+    }
+    if (stream.match(/^0x[\da-f_]+/i) || stream.match(/^0b[01_]+/i) || stream.match(/^\d[\d_]*(\.[\d_]*)?(e[+-]?\d+)?/i)) {
+      state.afterDot = false;
+      return "number";
+    }
+    if (stream.match(/^[A-Za-z_][A-Za-z0-9_]*/)) {
+      const word = stream.current();
+      const afterDot = state.afterDot;
+      state.afterDot = false;
+      if (KEYWORDS.has(word)) { state.typeContext = false; return word === "true" || word === "false" || word === "nil" ? "atom" : "keyword"; }
+      if (CONTEXTUAL.has(word) && !afterDot && /^\s+[A-Za-z_]/.test(stream.string.slice(stream.pos))) return "keyword";
+      if (state.typeContext || BUILTIN_TYPES.has(word) && /[:>|?]\s*$/.test(stream.string.slice(0, stream.start))) {
+        return "typeName";
+      }
+      if (afterDot) return /^\s*\(/.test(stream.string.slice(stream.pos)) ? "function" : "property";
+      if (stream.peek() === ".") return "namespace";
+      if (/^\s*\(/.test(stream.string.slice(stream.pos))) return GLOBALS.has(word) ? "builtin" : "function";
+      return GLOBALS.has(word) ? "builtin" : "variable";
+    }
+    if (stream.match("->")) { state.typeContext = true; return "operator"; }
+    const op = stream.next();
+    if (op === ".") { state.afterDot = true; return "punctuation"; }
+    if (op === ":") {
+      // `local x: Type`, `(a: T)`: a type follows (method calls `a:b()` do not).
+      state.typeContext = /^\s*[A-Za-z_][A-Za-z0-9_]*\s*[,)=?|]/.test(stream.string.slice(stream.pos)) ||
+        /^\s*[A-Za-z_][A-Za-z0-9_]*\s*$/.test(stream.string.slice(stream.pos));
+      if (!state.typeContext) state.afterDot = true;
+      return "punctuation";
+    }
+    if (/[,=)(\]{}]/.test(op)) state.typeContext = false;
+    return /[()[\]{},;]/.test(op) ? "punctuation" : "operator";
+  },
+  languageData: { commentTokens: { line: "--", block: { open: "--[[", close: "]]" } }, closeBrackets: { brackets: ["(", "[", "{", '"', "'", "`"] } },
+  tokenTable: { namespace: t.namespace, typeName: t.typeName, builtin: t.standard(t.variableName), function: t.function(t.variableName), property: t.propertyName },
+});
+
+// The app's palette: its status and overlay colours.
+const highlight = HighlightStyle.define([
+  { tag: t.keyword, color: "#f0b464" },
+  { tag: [t.string], color: "#97c459" },
+  { tag: [t.number, t.atom, t.bool], color: "#85b7eb" },
+  { tag: t.typeName, color: "#5dcaa5" },
+  { tag: t.namespace, color: "#b9bcc2" },
+  { tag: [t.function(t.variableName), t.propertyName], color: "#ffffff" },
+  { tag: t.standard(t.variableName), color: "#e3c9a0" },
+  { tag: t.comment, color: "#6b6f76", fontStyle: "italic" },
+  { tag: [t.operator, t.punctuation], color: "#9da0a6" },
+  { tag: t.variableName, color: "#d5d7db" },
+]);
+
+const theme = EditorView.theme({
+  "&": { color: "#d5d7db", backgroundColor: "transparent", height: "100%", fontSize: "var(--code-size)" },
+  ".cm-content": { fontFamily: "var(--mono)", caretColor: "#fff", padding: "8px 0" },
+  ".cm-scroller": { fontFamily: "var(--mono)", lineHeight: "1.65" },
+  ".cm-gutters": { backgroundColor: "transparent", color: "#4a4d53", border: "none" },
+  ".cm-activeLineGutter": { backgroundColor: "transparent", color: "#d5d7db" },
+  ".cm-activeLine": { backgroundColor: "rgba(255,255,255,0.035)" },
+  "&.cm-focused .cm-cursor": { borderLeftColor: "#fff", borderLeftWidth: "2px" },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": { backgroundColor: "rgba(255,255,255,0.14) !important" },
+  ".cm-selectionMatch": { backgroundColor: "rgba(255,255,255,0.07)" },
+  ".cm-matchingBracket": { backgroundColor: "rgba(255,255,255,0.12)", outline: "none" },
+  ".cm-tooltip": { backgroundColor: "#151619", border: "1px solid #4c4c4c", borderRadius: "10px", boxShadow: "0 14px 40px rgba(0,0,0,.5)", overflow: "hidden" },
+  ".cm-tooltip-autocomplete > ul": { fontFamily: "var(--mono)", maxHeight: "16em" },
+  ".cm-tooltip-autocomplete > ul > li": { padding: "4px 10px !important", lineHeight: "1.5" },
+  ".cm-tooltip-autocomplete > ul > li[aria-selected]": { backgroundColor: "rgba(255,255,255,0.10)", color: "#fff" },
+  ".cm-completionDetail": { color: "#6b6f76", fontStyle: "normal", marginLeft: "1em" },
+  ".cm-completionInfo": { padding: "10px 12px", maxWidth: "420px", fontFamily: "var(--ui)", color: "#9da0a6" },
+  ".cm-completionMatchedText": { textDecoration: "none", color: "#fff", fontWeight: "700" },
+  ".cm-lsp-documentation, .cm-tooltip-hover": { padding: "10px 12px", fontFamily: "var(--ui)", color: "#d5d7db", maxWidth: "520px" },
+  ".cm-lsp-documentation pre, .cm-tooltip-hover pre": { fontFamily: "var(--mono)", whiteSpace: "pre-wrap", margin: "0 0 8px" },
+  ".cm-diagnostic": { fontFamily: "var(--ui)", padding: "8px 12px" },
+  ".cm-diagnostic-error": { borderLeft: "3px solid #f09595" },
+  ".cm-diagnostic-warning": { borderLeft: "3px solid #f0b464" },
+  ".cm-lintRange-error": { backgroundImage: "none", textDecoration: "underline wavy #f09595", textUnderlineOffset: "4px" },
+  ".cm-lintRange-warning": { backgroundImage: "none", textDecoration: "underline wavy #f0b464", textUnderlineOffset: "4px" },
+  ".cm-lint-marker-error": { content: "none" },
+  ".cm-panels": { backgroundColor: "#151619", color: "#d5d7db" },
+  ".cm-panels input, .cm-panels button": { fontFamily: "var(--ui)" },
+  ".cm-searchMatch": { backgroundColor: "rgba(240,180,100,0.25)" },
+}, { dark: true });
+
+// ---- The language server ------------------------------------------------
+
+function webSocketTransport(url, onState) {
+  let handlers = [];
+  let socket = null;
+  let queue = [];
+  const transport = {
+    send(message) { if (socket && socket.readyState === 1) socket.send(message); else queue.push(message); },
+    subscribe(handler) { handlers.push(handler); },
+    unsubscribe(handler) { handlers = handlers.filter(h => h !== handler); },
+  };
+  return new Promise(resolve => {
+    let resolved = false;
+    const open = () => {
+      socket = new WebSocket(url);
+      socket.onmessage = e => { for (const h of handlers) h(String(e.data)); };
+      socket.onopen = () => {
+        onState(true);
+        for (const m of queue) socket.send(m);
+        queue = [];
+        if (!resolved) { resolved = true; resolve(transport); }
+      };
+      socket.onclose = () => { onState(false); setTimeout(open, 2000); };
+    };
+    open();
+  });
+}
+
+// ---- The editor ----------------------------------------------------------
+
+export class StudioEditor {
+  constructor(parent, lspUrl) {
+    this.files = new Map(); // path -> { state, saved, readOnly }
+    this.current = null;
+    this.changeHandler = () => {};
+    this.saveHandler = () => {};
+    this.diagnosticsHandler = () => {};
+    this.cursorHandler = () => {};
+    this.client = new LSPClient({ extensions: languageServerExtensions(), timeout: 5000 });
+    this.readOnly = new Compartment();
+    webSocketTransport(lspUrl, up => { this.lspUp = up; }).then(transport => this.client.connect(transport));
+    this.view = new EditorView({ parent, state: EditorState.create({ doc: "" }) });
+  }
+
+  extensions(path, readOnly) {
+    return [
+      lineNumbers(), highlightActiveLineGutter(), highlightSpecialChars(), history(), drawSelection(),
+      dropCursor(), EditorState.allowMultipleSelections.of(true), indentOnInput(), bracketMatching(),
+      closeBrackets(), rectangularSelection(), crosshairCursor(), highlightActiveLine(),
+      highlightSelectionMatches(), indentUnit.of("    "), EditorState.tabSize.of(4), lintGutter(),
+      luau, syntaxHighlighting(highlight), theme,
+      this.readOnly.of([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
+      keymap.of([
+        { key: "Mod-s", preventDefault: true, run: () => { this.saveHandler(path); return true; } },
+        ...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap,
+        ...lintKeymap, indentWithTab,
+      ]),
+      EditorView.updateListener.of(update => {
+        if (update.docChanged) this.changeHandler(path, this.isDirty(path, update.state));
+        if (update.selectionSet || update.docChanged) {
+          const head = update.state.selection.main.head, line = update.state.doc.lineAt(head);
+          this.cursorHandler(line.number, head - line.from + 1);
+        }
+        this.reportDiagnostics(path, update.state);
+      }),
+      readOnly ? [] : this.client.plugin("file:///mods/" + path, "luau"),
+    ];
+  }
+
+  reportDiagnostics(path, state) {
+    const list = [];
+    forEachDiagnostic(state, (d, from) => {
+      const line = state.doc.lineAt(from);
+      list.push({ line: line.number, column: from - line.from + 1, severity: d.severity, message: d.message });
+    });
+    const key = JSON.stringify(list);
+    const file = this.files.get(path);
+    if (file && file.diagnostics !== key) {
+      file.diagnostics = key;
+      this.diagnosticsHandler(path, key);
+    }
+  }
+
+  // Shows `path` (made from `text` the first time).
+  open(path, text, readOnly) {
+    if (this.current && this.files.has(this.current)) this.files.get(this.current).state = this.view.state;
+    let file = this.files.get(path);
+    if (!file) {
+      file = { state: EditorState.create({ doc: text, extensions: this.extensions(path, readOnly) }), saved: text, diagnostics: "" };
+      this.files.set(path, file);
+    }
+    this.current = path;
+    this.view.setState(file.state);
+    const head = file.state.selection.main.head, line = file.state.doc.lineAt(head);
+    this.cursorHandler(line.number, head - line.from + 1);
+  }
+
+  close(path) {
+    this.files.delete(path);
+    if (this.current === path) {
+      this.current = null;
+      this.view.setState(EditorState.create({ doc: "" }));
+    }
+  }
+
+  stateOf(path) {
+    return path === this.current ? this.view.state : this.files.get(path)?.state;
+  }
+
+  text(path) {
+    return this.stateOf(path)?.doc.toString() ?? "";
+  }
+
+  isDirty(path, state) {
+    const file = this.files.get(path);
+    return !!file && (state ?? this.stateOf(path)).doc.toString() !== file.saved;
+  }
+
+  saved(path, text) {
+    const file = this.files.get(path);
+    if (file) file.saved = text;
+    this.changeHandler(path, this.isDirty(path));
+  }
+
+  // Replaces the text (the file changed on disk).
+  replace(path, text) {
+    const file = this.files.get(path);
+    if (!file) return;
+    const state = this.stateOf(path);
+    const tr = state.update({ changes: { from: 0, to: state.doc.length, insert: text } });
+    if (path === this.current) this.view.dispatch(tr); else file.state = tr.state;
+    file.saved = text;
+    this.changeHandler(path, false);
+  }
+
+  reveal(line, column) {
+    const doc = this.view.state.doc;
+    const l = doc.line(Math.max(1, Math.min(line, doc.lines)));
+    const pos = Math.min(l.from + Math.max(0, column - 1), l.to);
+    this.view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: "center" }) });
+    this.view.focus();
+  }
+
+  insert(text) {
+    const { from, to } = this.view.state.selection.main;
+    this.view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length } });
+    this.view.focus();
+  }
+
+  focus() { this.view.focus(); }
+  onChange(f) { this.changeHandler = f; }
+  onSave(f) { this.saveHandler = f; }
+  onDiagnostics(f) { this.diagnosticsHandler = f; }
+  onCursor(f) { this.cursorHandler = f; }
+}

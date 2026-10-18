@@ -18,8 +18,11 @@ use std::time::Instant;
 use glue5_game::{Env, Hooks, orig};
 use glue5_runtime::memory::Mem;
 
-use crate::vm::{Step, Vm};
+use crate::vm::{Jobs, Step, Vm};
 use crate::{Command, LogLevel, ModState, SHARED, log_line, natives};
+
+/// The REPL's thread: `eval` runs there, as a mod of its own.
+const REPL: &str = "~eval";
 
 pub(crate) fn hooks(h: &mut Hooks) {
     h.script_wait = Some(script_wait);
@@ -52,6 +55,7 @@ struct Running {
     /// outside it.
     ending: bool,
     cpu: f32,
+    waiting: bool,
 }
 
 #[derive(Default)]
@@ -61,6 +65,8 @@ struct Engine {
     /// Program id by mod name.
     programs: HashMap<String, u32>,
     running: Vec<Running>,
+    /// The REPL's snippets.
+    jobs: Jobs,
 }
 
 thread_local! {
@@ -110,7 +116,13 @@ impl Engine {
         let step = natives::with_env(env, || r.vm.resume());
         r.cpu = r.cpu * 0.9 + start.elapsed().as_secs_f32() * 1000.0 * 0.1;
         let ms = match step {
-            Step::Wait(ms) => ms,
+            Step::Wait(ms) => {
+                if r.waiting != (ms > 0) {
+                    r.waiting = ms > 0;
+                    set_waiting(&r.name, r.waiting);
+                }
+                ms
+            }
             Step::Preempted => 0,
             Step::Finished => {
                 log_line(&r.name, LogLevel::Info, "finished");
@@ -147,6 +159,15 @@ impl Engine {
                     set_state(&name, ModState::Error, Some(e));
                 }
             }
+            Command::Eval(code, reply) => {
+                if !self.running.iter().any(|r| r.name == REPL && !r.ending)
+                    && let Err(e) = unsafe { self.start(env, REPL) }
+                {
+                    let _ = reply.send(Err(e));
+                    return;
+                }
+                self.jobs.borrow_mut().push_back((code, reply));
+            }
             Command::Stop(name) => {
                 if let Some(r) = self.running.iter_mut().find(|r| r.name == name) {
                     r.ending = true;
@@ -159,9 +180,10 @@ impl Engine {
 
     unsafe fn start(&mut self, env: *mut Env, name: &str) -> Result<(), String> {
         let dir = SHARED.dir.get().ok_or("no mods folder")?.join(name);
-        let log_name = name.to_string();
+        let log_name = if name == REPL { "eval".to_string() } else { name.to_string() };
         let log: Rc<dyn Fn(&str)> = Rc::new(move |text| log_line(&log_name, LogLevel::Info, text));
-        let vm = Vm::new(name, &dir, log).map_err(|e| e.to_string())?;
+        let vm = if name == REPL { Vm::repl(self.jobs.clone(), log) } else { Vm::new(name, &dir, log) }
+            .map_err(|e| e.to_string())?;
         let program = unsafe { self.program(env, name)? };
         let thread_name = unsafe { wasm_string(env, &format!("glue5:{name}")) };
         let thread_id = unsafe { orig::script_start_program(env, program, 0, 0, STACK as i32 as u32, thread_name) };
@@ -172,9 +194,19 @@ impl Engine {
         if thread == 0 {
             return Err("its script thread is gone".into());
         }
-        self.running.push(Running { name: name.to_string(), thread_id, thread, vm, ending: false, cpu: 0.0 });
-        log_line(name, LogLevel::Info, "started");
-        set_state(name, ModState::Running, None);
+        self.running.push(Running {
+            name: name.to_string(),
+            thread_id,
+            thread,
+            vm,
+            ending: false,
+            cpu: 0.0,
+            waiting: false,
+        });
+        if name != REPL {
+            log_line(name, LogLevel::Info, "started");
+            set_state(name, ModState::Running, None);
+        }
         Ok(())
     }
 
@@ -250,8 +282,19 @@ fn set_state(name: &str, state: ModState, error: Option<String>) {
     {
         m.state = state;
         m.error = error;
+        m.waiting = false;
         if state != ModState::Running {
             m.cpu_ms = 0.0;
         }
+        SHARED.generation.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn set_waiting(name: &str, waiting: bool) {
+    if let Ok(mut s) = SHARED.state.lock()
+        && let Some(m) = s.mods.iter_mut().find(|m| m.name == name)
+    {
+        m.waiting = waiting;
+        SHARED.generation.fetch_add(1, Ordering::Relaxed);
     }
 }

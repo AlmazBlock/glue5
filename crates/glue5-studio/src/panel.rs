@@ -1,0 +1,153 @@
+//! The bottom panel: console (log and REPL) and problems.
+
+use leptos::prelude::*;
+use wasm_bindgen::prelude::*;
+
+use crate::actions::{eval, open_file};
+use crate::icons;
+use crate::state::*;
+
+#[component]
+pub(crate) fn BottomPanel(s: S) -> impl IntoView {
+    let errors = move || s.diags.with(|d| d.values().flatten().filter(|d| d.severity == "error").count());
+    view! {
+        <div class="panel">
+            <div class="ptabs">
+                <button class=move || if s.panel.get() == Panel::Console { "ptab on" } else { "ptab" } on:click=move |_| s.panel.set(Panel::Console)>"CONSOLE"</button>
+                <button class=move || if s.panel.get() == Panel::Problems { "ptab on" } else { "ptab" } on:click=move |_| s.panel.set(Panel::Problems)>
+                    "PROBLEMS" <Show when=move || errors() != 0><span class="cnt">{errors}</span></Show>
+                </button>
+                <div class="grow"></div>
+                <Show when=move || s.panel.get() == Panel::Console>
+                    <div class="chips">
+                        <button class=move || if s.filter.get() == Filter::All { "chip on" } else { "chip" } on:click=move |_| s.filter.set(Filter::All)>"All"</button>
+                        <button class=move || if s.filter.get() == Filter::Current { "chip on" } else { "chip" } on:click=move |_| s.filter.set(Filter::Current)>
+                            {move || s.active.get().filter(|p| p.contains('/')).map(|p| mod_of(&p).to_string()).unwrap_or_else(|| "This mod".into())}
+                        </button>
+                        <button class=move || if s.filter.get() == Filter::Errors { "chip on" } else { "chip" } on:click=move |_| s.filter.set(Filter::Errors)>"Errors"</button>
+                        <button class="chip" title="Clear" on:click=move |_| s.rows.set(Vec::new())>"Clear"</button>
+                    </div>
+                </Show>
+            </div>
+            {move || match s.panel.get() {
+                Panel::Console => view! { <Console s=s/> }.into_any(),
+                Panel::Problems => view! { <Problems s=s/> }.into_any(),
+            }}
+        </div>
+    }
+}
+
+pub(crate) fn clock(ms: u64) -> String {
+    let d = js_sys::Date::new(&JsValue::from_f64(ms as f64));
+    format!("{:02}:{:02}:{:02}", d.get_hours(), d.get_minutes(), d.get_seconds())
+}
+
+/// A message with its `file.luau:line` as a link.
+pub(crate) fn linked(s: S, text: String) -> impl IntoView {
+    match file_location(&text) {
+        Some((path, line, a, b)) => {
+            let (before, link, after) = (text[..a].to_string(), text[a..b].to_string(), text[b..].to_string());
+            view! {
+                {before}
+                <a class="link" on:click=move |_| { open_file(s, path.clone()); let l = line; set_timeout(move || with_editor(|e| e.reveal(l, 1)), std::time::Duration::from_millis(150)); }>{link}</a>
+                {after}
+            }
+            .into_any()
+        }
+        None => text.into_any(),
+    }
+}
+
+#[component]
+pub(crate) fn Console(s: S) -> impl IntoView {
+    let log_ref = NodeRef::<leptos::html::Div>::new();
+    // Follow the end.
+    Effect::new(move |_| {
+        s.rows.track();
+        s.filter.track();
+        if let Some(el) = log_ref.get() {
+            set_timeout(move || el.set_scroll_top(el.scroll_height()), std::time::Duration::from_millis(0));
+        }
+    });
+    let shown = move || {
+        let filter = s.filter.get();
+        let current = s.active.get().map(|p| mod_of(&p).to_string());
+        s.rows.get().into_iter().filter(move |(_, r)| match (filter, r) {
+            (Filter::All, _) => true,
+            (Filter::Errors, Row::Log(l)) => l.level == "error",
+            (Filter::Errors, Row::Failure(_)) => true,
+            (Filter::Current, Row::Log(l)) => current.as_deref() == Some(l.module.as_str()),
+            _ => false,
+        }).collect::<Vec<_>>()
+    };
+    let history = move |up: bool| {
+        HISTORY.with(|h| {
+            let mut h = h.borrow_mut();
+            if h.0.is_empty() { return; }
+            let i = if up { h.1.saturating_sub(1) } else { (h.1 + 1).min(h.0.len()) };
+            h.1 = i;
+            s.repl.set(h.0.get(i).cloned().unwrap_or_default());
+        });
+    };
+    view! {
+        <div class="log" node_ref=log_ref>
+            <For each=shown key=|(n, _)| *n let((_, row))>
+                {match row {
+                    Row::Log(l) => view! {
+                        <div class=if l.level == "error" { "row err" } else { "row" }>
+                            <span class="time">{clock(l.time)}</span>
+                            <span class="src">{l.module.clone()}</span>
+                            <span class="msg">{linked(s, l.text.clone())}</span>
+                        </div>
+                    }.into_any(),
+                    Row::Input(code) => view! { <div class="row repl"><span class="time"></span><span class="src">"›"</span><span class="msg">{code}</span></div> }.into_any(),
+                    Row::Value(v) => view! { <div class="row result"><span class="time"></span><span class="src"></span><span class="msg">{v}</span></div> }.into_any(),
+                    Row::Failure(e) => view! { <div class="row err"><span class="time"></span><span class="src"></span><span class="msg">{e}</span></div> }.into_any(),
+                }}
+            </For>
+        </div>
+        <label class="prompt">
+            <span class="gt">"›"</span>
+            <input placeholder="Run Luau in the game: entity.getEntityCoords(player.playerPedId(), true)" spellcheck="false" autocomplete="off" autocapitalize="off"
+                prop:value=move || s.repl.get()
+                on:input=move |ev| s.repl.set(event_target_value(&ev))
+                on:keydown=move |ev| match ev.key().as_str() {
+                    "Enter" => eval(s, s.repl.get_untracked()),
+                    "ArrowUp" => { ev.prevent_default(); history(true) }
+                    "ArrowDown" => { ev.prevent_default(); history(false) }
+                    _ => {}
+                }/>
+            <button class="btn primary small" on:click=move |_| eval(s, s.repl.get_untracked())>"Run"</button>
+        </label>
+    }
+}
+
+#[component]
+pub(crate) fn Problems(s: S) -> impl IntoView {
+    let list = move || {
+        let mut all: Vec<(String, Diag)> = s.diags.get().into_iter().flat_map(|(p, d)| d.into_iter().map(move |d| (p.clone(), d))).collect();
+        all.sort_by(|a, b| (a.1.severity != "error", &a.0, a.1.line).cmp(&(b.1.severity != "error", &b.0, b.1.line)));
+        all
+    };
+    view! {
+        <div class="log problems">
+            {move || {
+                let l = list();
+                if l.is_empty() {
+                    return view! { <p class="empty">"No problems in the open files."</p> }.into_any();
+                }
+                l.into_iter().map(|(path, d)| {
+                    let (p, line, col) = (path.clone(), d.line, d.column);
+                    view! {
+                        <div class=if d.severity == "error" { "problem err" } else { "problem warn" }
+                            on:click=move |_| { open_file(s, p.clone()); set_timeout(move || with_editor(|e| e.reveal(line, col)), std::time::Duration::from_millis(150)); }>
+                            <span class="ico small" inner_html=if d.severity == "error" { icons::ERROR } else { icons::WARNING }></span>
+                            <span class="msg">{d.message.clone()}</span>
+                            <span class="where">{format!("{path}:{}:{}", d.line, d.column)}</span>
+                        </div>
+                    }
+                }).collect_view().into_any()
+            }}
+        </div>
+    }
+}

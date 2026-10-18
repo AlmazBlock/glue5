@@ -75,6 +75,8 @@ pub struct Native {
     pub handler: u64,
     pub params: &'static [Param],
     pub ret: Option<Kind>,
+    /// The natives database's notes.
+    pub doc: &'static str,
 }
 
 use {Dir as D, Handle as H, Kind as K, Param as P};

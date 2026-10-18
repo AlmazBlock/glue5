@@ -12,7 +12,15 @@ glue5-runtime.workspace = true
 log.workspace = true
 serde_json.workspace = true
 mlua = { version = "0.12", features = ["luau"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+httparse = "1"
+getrandom = "0.4"
 
 [build-dependencies]
 anyhow.workspace = true
+cc.workspace = true
+flate2 = "1"
+sha2.workspace = true
+# The same version as glue5-studio's wasm-bindgen.
+wasm-bindgen-cli-support = "=0.2.129"
 serde_json.workspace = true

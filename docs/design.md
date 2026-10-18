@@ -792,8 +792,53 @@ playing.
 - Every native is called through `glue5_call_native`, which catches a trap
   (`GLUE5_TRY`) and restores the wasm stack pointer. The trap becomes an
   error in the mod, and the runtime is marked as possibly damaged.
-- A mod runs at most 4 ms before the interrupt suspends it until the next
+- A mod runs at most 2 ms before the interrupt suspends it until the next
   frame. One that runs 2 s without calling `wait` is stopped.
+
+### GLUE 5 Studio
+
+The game serves an IDE for mods while mods are on and Settings › Game ›
+Mods and Studio says so. By default only a browser on the same device can
+use it; "Other devices" opens it to the network (the default on phones,
+whose own browser is no place to write mods).
+
+- **Server** (`glue5-mods/src/studio`): plain `std::net`, a thread per
+  connection; HTTP/1.1 for the page, WebSockets (`tungstenite`, no async)
+  for the Studio and the type checker.
+- **Pairing code**: 8 characters of Crockford base32 (40 bits), new each
+  time the Studio starts. The page carries it in its address (the QR code
+  of the Mods page), or asks for it. Every route but the page needs it.
+  After 10 wrong ones in a minute no code is taken for that minute.
+  WebSockets must come from the page's own origin, since a page elsewhere
+  in the same browser could otherwise drive the game through localhost.
+- **Type checker in the game**: Luau.Analysis is compiled from Luau's
+  sources (`third_party/luau`, the release mlua builds the rest from) with
+  a small C API (`csrc/checker.cpp`). It loads the natives' definitions in
+  about 80 ms; checking a file takes under a millisecond. It exists only
+  while an editor is connected (some 45 MB) and speaks LSP over a
+  WebSocket (`/lsp`). Completions are filtered by what is typed before
+  they are sent, so lists stay short on phones.
+- **The page** (`crates/glue5-studio`) is Leptos compiled to wasm, around
+  CodeMirror 6 with `@codemirror/lsp-client`. No node: the crate is its
+  own workspace, built for `wasm32-unknown-unknown` by glue5-mods' build
+  script (a cargo of its own, `wasm-bindgen` as a library). CodeMirror's
+  modules come from npm by `mise run setup` (pinned by their integrity
+  hashes) and load through an import map, without a bundler. Everything
+  is embedded in the app, gzipped; ETags make the browser revalidate.
+- **MCP** (`POST /mcp`, JSON-RPC without streams) gives coding agents the
+  same functions as the Studio:
+  - write a file and get its type errors back;
+  - start or restart a mod and get its first log lines back;
+  - read logs;
+  - evaluate Luau in the game;
+  - search the natives.
+
+  `claude mcp add --transport http glue5 http://<address>:47110/mcp
+  --header "Authorization: Bearer <code>"`; the Mods page copies it.
+- **Eval** runs in a mod of its own (`~eval`): a script thread whose Luau
+  takes snippets from a queue.
+- Files written by any client reach open editors (a WebSocket message).
+  Saving can restart the mod.
 
 ## Known limits
 

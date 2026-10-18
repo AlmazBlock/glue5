@@ -3,7 +3,8 @@ resolver = "3"
 members = ["crates/*"]
 # third_party/wgpu, wgpu-core, wgpu-hal and sp-fidelity are prepared by
 # `mise run setup`; this workspace needs them before it can load.
-exclude = ["third_party"]
+# glue5-studio is its own workspace (wasm only, built by glue5-mods).
+exclude = ["third_party", "crates/glue5-studio"]
 default-members = ["crates/glue5"]
 
 [workspace.package]
