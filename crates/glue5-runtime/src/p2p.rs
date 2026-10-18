@@ -25,9 +25,9 @@
 //! datagrams to another player come from, and a home router lets these in
 //! only from where it sent to. A player whose NAT keeps one port for all
 //! (the nodes agree on its address) and who does not hear from a far
-//! player sends to the ports around the ones handed out (`spray_ports`):
-//! its router then lets in the far player's greetings, whichever of them
-//! its NAT picked.
+//! player sends to the ports around each of the ones handed out
+//! (`spray_ports`): its router then lets in the far player's greetings,
+//! whichever port its NAT picked.
 //!
 //! The game looks for a session only for a moment (about a second) and
 //! hosts one when it finds none, so it waits for the others first
@@ -98,7 +98,11 @@ const REBIND_AFTER: u32 = 20;
 /// and for how many players at a time.
 const SPRAY_AFTER: Duration = Duration::from_secs(4);
 const SPRAY_EVERY: Duration = Duration::from_secs(10);
-const SPRAY_PORTS: u16 = 512;
+const SPRAY_PORTS: usize = 1024;
+/// On either side of each port handed out.
+const SPRAY_AROUND: u16 = 128;
+/// Ports handed out for a far player kept, the latest.
+const FAR_PORTS: usize = 16;
 const SPRAYING: usize = 4;
 
 /// A lobby's id in the players' datagrams, and its key on the DHT.
@@ -189,21 +193,40 @@ impl Peer {
 }
 
 /// A player on the Internet whose NAT may give its datagrams here another
-/// port than the DHT's: the ports handed out for its address, since when.
+/// port than the DHT's: the ports handed out for its address (the latest
+/// last), since when.
 struct Far {
-    low: u16,
-    high: u16,
+    ports: Vec<u16>,
     since: Instant,
     sprayed: Option<Instant>,
 }
 
 /// The ports a far player's NAT may send from to this player, given the
-/// ones the DHT handed out: a little before the lowest, and more after
-/// the highest (they come in order, and the far player greets this one
-/// after announcing itself).
-fn spray_ports(low: u16, high: u16) -> std::ops::RangeInclusive<u16> {
-    let start = low.saturating_sub(SPRAY_PORTS / 4).max(high.saturating_sub(SPRAY_PORTS / 2)).max(1024);
-    start..=start.saturating_add(SPRAY_PORTS - 1)
+/// ones the DHT handed out: around each (its NAT hands them out in order,
+/// and greets this player in the same moments as it announces itself),
+/// the latest first while there is room. The DHT also keeps the ones of
+/// the player's earlier runs, and the NAT may have moved on elsewhere.
+fn spray_ports(ports: &[u16]) -> Vec<std::ops::RangeInclusive<u16>> {
+    let mut ranges: Vec<std::ops::RangeInclusive<u16>> = Vec::new();
+    let mut room = SPRAY_PORTS;
+    for &port in ports.iter().rev() {
+        if room == 0 {
+            break;
+        }
+        let start = port.saturating_sub(SPRAY_AROUND).max(1024);
+        let end = port.saturating_add(SPRAY_AROUND).max(start);
+        room = room.saturating_sub(usize::from(end - start) + 1);
+        ranges.push(start..=end);
+    }
+    ranges.sort_by_key(|r| *r.start());
+    let mut merged: Vec<std::ops::RangeInclusive<u16>> = Vec::new();
+    for r in ranges {
+        match merged.last_mut() {
+            Some(last) if *r.start() <= last.end().saturating_add(1) => *last = *last.start()..=*last.end().max(r.end()),
+            _ => merged.push(r),
+        }
+    }
+    merged
 }
 
 /// How close an address is: this machine, this network, the Internet.
@@ -247,18 +270,20 @@ impl State {
         if nearness(addr) < 2 || PORTS.contains(&addr.port()) || self.heard.get(addr.ip()).is_some_and(|t| now - *t < GONE) {
             return;
         }
-        let port = addr.port();
-        let far = self.far.entry(*addr.ip()).or_insert(Far { low: port, high: port, since: now, sprayed: None });
+        let far = self.far.entry(*addr.ip()).or_insert(Far { ports: Vec::new(), since: now, sprayed: None });
         if now - far.since > PUNCH {
-            *far = Far { low: port, high: port, since: now, sprayed: None };
+            *far = Far { ports: Vec::new(), since: now, sprayed: None };
         }
-        far.low = far.low.min(port);
-        far.high = far.high.max(port);
+        far.ports.retain(|p| *p != addr.port());
+        far.ports.push(addr.port());
+        if far.ports.len() > FAR_PORTS {
+            far.ports.remove(0);
+        }
     }
 
     /// The far players whose ports around their own are due to be opened
     /// (only by a player whose NAT keeps one port for all: `easy`).
-    fn sprays(&mut self, easy: bool, now: Instant) -> Vec<(Ipv4Addr, std::ops::RangeInclusive<u16>)> {
+    fn sprays(&mut self, easy: bool, now: Instant) -> Vec<(Ipv4Addr, Vec<std::ops::RangeInclusive<u16>>)> {
         self.heard.retain(|_, t| now - *t < GONE);
         let heard = &self.heard;
         self.far.retain(|ip, f| now - f.since < PUNCH && heard.get(ip).is_none_or(|t| *t < f.since));
@@ -271,7 +296,7 @@ impl State {
             .take(SPRAYING)
             .map(|(ip, f)| {
                 f.sprayed = Some(now);
-                (*ip, spray_ports(f.low, f.high))
+                (*ip, spray_ports(&f.ports))
             })
             .collect()
     }
@@ -731,12 +756,12 @@ impl P2p {
         let easy = state.dht.external().is_some();
         let sprays = state.sprays(easy, now);
         drop(state);
-        for (ip, ports) in sprays {
-            log::debug!("p2p: opening the way from {ip}:{}-{}", ports.start(), ports.end());
+        for (ip, ranges) in sprays {
+            log::debug!("p2p: opening the way from {ip}: {ranges:?}");
             let socket = self.socket();
             let mut d = MAGIC.to_vec();
             d.push(OPEN);
-            for port in ports {
+            for port in ranges.into_iter().flatten() {
                 let _ = socket.send_to(&d, SocketAddrV4::new(ip, port));
             }
         }
@@ -964,11 +989,17 @@ mod tests {
     fn the_ports_opened_follow_the_ones_handed_out() {
         // Measured on a mobile network: announced at 31329, its greetings
         // came from a port a few above.
-        assert_eq!(spray_ports(31329, 31329), 31201..=31712);
-        // Ports far apart: the latest count.
-        assert_eq!(spray_ports(20000, 40000), 39744..=40255);
-        assert_eq!(spray_ports(1100, 1100), 1024..=1535);
-        assert_eq!(*spray_ports(65500, 65500).end(), 65535);
+        assert_eq!(spray_ports(&[31329]), [31201..=31457]);
+        // Announces of the player's earlier runs (31441...) and of this
+        // one (3106x, the NAT moved on): around each, close ones merged.
+        assert_eq!(
+            spray_ports(&[31441, 31874, 31457, 31900, 31063, 31067]),
+            [30935..=31195, 31329..=31585, 31772..=32028]
+        );
+        // No room for more: the latest count.
+        assert_eq!(spray_ports(&[10000, 20000, 30000, 40000, 50000]), [20000 - 128..=20000 + 128, 29872..=30128, 39872..=40128, 49872..=50128]);
+        assert_eq!(spray_ports(&[1100]), [1024..=1228]);
+        assert_eq!(spray_ports(&[65500]), [65372..=65535]);
     }
 
     #[test]
@@ -985,7 +1016,7 @@ mod tests {
         // Plain greetings first; never from behind a NAT changing ports.
         assert!(s.sprays(true, now + Duration::from_secs(1)).is_empty());
         assert!(s.sprays(false, now + SPRAY_AFTER).is_empty());
-        assert_eq!(s.sprays(true, now + SPRAY_AFTER), vec![(ip, spray_ports(31329, 31340))]);
+        assert_eq!(s.sprays(true, now + SPRAY_AFTER), vec![(ip, spray_ports(&[31329, 31340]))]);
         assert!(s.sprays(true, now + SPRAY_AFTER + Duration::from_secs(2)).is_empty());
         assert_eq!(s.sprays(true, now + SPRAY_AFTER + SPRAY_EVERY).len(), 1);
         // Heard from: done, and not noted again while it talks.
