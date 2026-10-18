@@ -7,6 +7,7 @@ mod actions;
 mod chrome;
 mod editor;
 mod icons;
+mod menus;
 mod net;
 mod panel;
 mod sidebar;
@@ -41,6 +42,7 @@ fn App() -> impl IntoView {
         connected: RwSignal::new(false),
         hello: RwSignal::new(Value::Null),
         mods: RwSignal::new(Vec::new()),
+        menus: RwSignal::new(Vec::new()),
         rows: RwSignal::new(Vec::new()),
         tabs: RwSignal::new(Vec::new()),
         active: RwSignal::new(None),
@@ -167,6 +169,7 @@ fn Shell(s: S) -> impl IntoView {
             Screen::Editor => "screen-editor",
             Screen::Console => "screen-console",
             Screen::Problems => "screen-problems",
+            Screen::Menus => "screen-menus",
         };
         format!("app {screen}{}", if s.drawer.get() { " drawer" } else { "" })
     };

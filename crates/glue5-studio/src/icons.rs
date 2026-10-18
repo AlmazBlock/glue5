@@ -15,6 +15,7 @@ icon!(BOOK, "21", "<path d=\"M5 4.5h9.5L19 9v10.5H5z\"/><path d=\"M14 4.5V9h5M8.
 icon!(WARNING, "21", "<path d=\"M12 4 3 19.5h18z\"/><path d=\"M12 10v4.5M12 17v.01\"/>");
 icon!(ERROR, "21", "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7.5v5M12 16v.01\"/>");
 icon!(TERMINAL, "21", "<rect x=\"3.5\" y=\"5\" width=\"17\" height=\"14\" rx=\"2\"/><path d=\"m7.5 10 3 2.5-3 2.5M12.5 15.5h4\"/>");
+icon!(SLIDERS, "21", "<path d=\"M4 7h9M17 7h3M4 17h3M11 17h9\"/><circle cx=\"15\" cy=\"7\" r=\"2\"/><circle cx=\"9\" cy=\"17\" r=\"2\"/>");
 icon!(CODE, "21", "<path d=\"m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14\"/>");
 icon!(SEARCH, "15", "<circle cx=\"11\" cy=\"11\" r=\"7\"/><path d=\"m20 20-3.5-3.5\"/>");
 icon!(PLUS, "15", "<path d=\"M12 5v14M5 12h14\"/>");

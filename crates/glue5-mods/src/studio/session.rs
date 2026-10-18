@@ -1,7 +1,7 @@
 //! The Studio's WebSocket: requests `{id, method, params}` answered with
 //! `{id, result}` or `{id, error}`; the server sends `{method: "mods"}`
-//! when a mod's state changes, `{method: "log"}` with new log lines, and
-//! `{method: "hello"}` first.
+//! when a mod's state changes, `{method: "menus"}` when the mods' menus do,
+//! `{method: "log"}` with new log lines, and `{method: "hello"}` first.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -34,6 +34,7 @@ pub fn run(mut ws: Socket) -> std::io::Result<()> {
     }
     let (_, mut changes) = crate::changes(u64::MAX);
     let mut figures = Instant::now();
+    let mut menus = Value::Null;
     // Evaluations run on their own threads; their answers come back here.
     let (done_tx, done_rx) = mpsc::channel::<Value>();
     loop {
@@ -80,6 +81,13 @@ pub fn run(mut ws: Socket) -> std::io::Result<()> {
             figures = Instant::now();
             if send(&mut ws, &json!({ "method": "mods", "params": api::mods() })).is_err() {
                 return Ok(());
+            }
+            let now = api::menus();
+            if now != menus {
+                if send(&mut ws, &json!({ "method": "menus", "params": now })).is_err() {
+                    return Ok(());
+                }
+                menus = now;
             }
         }
         let (paths, next) = crate::changes(changes);
@@ -137,6 +145,11 @@ fn handle(method: &str, p: &Value) -> Result<Value, String> {
         }
         "files.rename" => {
             files::rename(s("from")?, s("to")?)?;
+            Value::Null
+        }
+        "menus.input" => {
+            let item = p["item"].as_u64().ok_or("menus.input: missing item")? as u32;
+            api::menu_input(s("mod")?, item, &p["value"])?;
             Value::Null
         }
         "natives.search" => Value::Array(api::search(s("query")?, p["limit"].as_u64().unwrap_or(30) as usize)),

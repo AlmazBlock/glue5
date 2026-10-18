@@ -38,7 +38,7 @@ pub fn handle(request: &Request) -> (u16, String, Vec<(&'static str, String)>) {
                 "instructions": "Mods for GTA V running in GLUE 5. Read the resource glue5://guide first. \
                     Write files with write_file (it answers with type errors), run with start_mod or restart_mod \
                     (they answer with the first log lines), try natives live with eval, look them up with \
-                    search_natives.",
+                    search_natives, and use a mod's menus with menus and menu_input.",
             }))
         }
         "ping" => Ok(json!({})),
@@ -93,6 +93,10 @@ fn tools() -> Value {
         tool("stop_mod", "Stops a mod; what it created goes with it.", json!({ "name": string("the mod") }), &["name"]),
         tool("logs", "Log lines (prints, starts, errors with file:line) after a cursor; answers with the next cursor.", json!({ "since": { "type": "integer", "description": "cursor from the last call (0: all kept)" }, "mod": string("only this mod's lines") }), &[]),
         tool("eval", "Runs Luau in the game now (in a script thread, natives available) and answers with the values: e.g. entity.getEntityCoords(player.playerPedId(), true).", json!({ "code": string("an expression, or statements") }), &["code"]),
+        tool("menus", "The running mods' menus (ui.menu): each item's id, kind and value.", json!({}), &[]),
+        tool("menu_input", "Does what a player would to a mod's menu item, and answers with the mod's log after half a second: \
+            value true/false sets a toggle (none flips it), a number a slider, 1-based or the option's text a choice; none presses a button.",
+            json!({ "mod": string("the mod"), "item": { "type": "integer", "description": "the item's id (from menus)" }, "value": { "description": "see above; leave out for buttons" } }), &["mod", "item"]),
         tool("search_natives", "Finds natives by words of their name or notes; answers with signatures.", json!({ "query": string("e.g. vehicle colour"), "limit": { "type": "integer", "description": "at most this many (20)" } }), &["query"]),
         tool("native_doc", "A native's signature and notes.", json!({ "name": string("namespace.name (vehicle.createVehicle) or the game's name (CREATE_VEHICLE)") }), &["name"]),
     ])
@@ -148,6 +152,16 @@ fn call(name: &str, a: &Value) -> Value {
                 Ok(v) => Value::String(v),
                 Err(e) => return Err(e),
             },
+            "menus" => api::menus(),
+            "menu_input" => {
+                let module = s("mod")?;
+                let item = a["item"].as_u64().ok_or("missing argument item")? as u32;
+                let (_, cursor) = crate::logs(u64::MAX);
+                api::menu_input(module, item, &a["value"])?;
+                std::thread::sleep(Duration::from_millis(500));
+                let (lines, next) = api::logs(cursor, Some(module));
+                json!({ "log": lines.iter().map(line).collect::<Vec<_>>(), "next": next })
+            }
             "search_natives" => Value::Array(api::search(s("query")?, a["limit"].as_u64().unwrap_or(20).min(100) as usize)),
             "native_doc" => api::find(s("name")?).map(|n| api::describe(n, true)).ok_or("no such native")?,
             _ => return Err(format!("unknown tool {name}")),
@@ -176,10 +190,14 @@ fn settle(name: &str, cursor: u64) -> Value {
             return json!({
                 "state": state,
                 "error": m.and_then(|m| m.error),
-                "log": lines.iter().map(|l| format!("[{}] {}", l["level"].as_str().unwrap_or(""), l["text"].as_str().unwrap_or(""))).collect::<Vec<_>>(),
+                "log": lines.iter().map(line).collect::<Vec<_>>(),
                 "next": next,
                 "note": if state == "running" && lines.is_empty() { "running; a mod starts once the player is in the game" } else { "" },
             });
         }
     }
+}
+
+fn line(l: &Value) -> String {
+    format!("[{}] {}", l["level"].as_str().unwrap_or(""), l["text"].as_str().unwrap_or(""))
 }

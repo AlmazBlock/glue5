@@ -108,6 +108,66 @@ pub fn mods() -> Value {
     )
 }
 
+/// The mods' menus: `{mod, id, title, items}`, an item `{id, label, note,
+/// kind, ...}` with `value` (toggle, slider, choice: 1-based), `min`,
+/// `max`, `step` (slider), `options` (choice).
+pub fn menus() -> Value {
+    use crate::MenuKind;
+    let item = |i: &crate::MenuItem| {
+        let mut v = json!({ "id": i.id, "label": i.label, "note": i.note });
+        let extra = match &i.kind {
+            MenuKind::Toggle(on) => json!({ "kind": "toggle", "value": on }),
+            MenuKind::Slider { value, min, max, step } => {
+                json!({ "kind": "slider", "value": value, "min": min, "max": max, "step": step })
+            }
+            MenuKind::Choice { options, index } => json!({ "kind": "choice", "value": index + 1, "options": options }),
+            MenuKind::Button => json!({ "kind": "button" }),
+            MenuKind::Label => json!({ "kind": "label" }),
+        };
+        v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        v
+    };
+    Value::Array(
+        crate::menus()
+            .iter()
+            .map(|m| json!({ "mod": m.module, "id": m.id, "title": m.title, "items": m.items.iter().map(item).collect::<Vec<_>>() }))
+            .collect(),
+    )
+}
+
+/// Does to a menu's item what a player would: `value` sets a toggle
+/// (true/false), a slider (a number) or a choice (1-based, or the option's
+/// text); none presses a button.
+pub fn menu_input(module: &str, item: u32, value: &Value) -> Result<(), String> {
+    use crate::{MenuInput, MenuKind};
+    let menus = crate::menus();
+    let found = menus.iter().filter(|m| m.module == module).flat_map(|m| m.items.iter()).find(|i| i.id == item);
+    let Some(found) = found else { return Err(format!("{module} has no menu item {item}")) };
+    let input = match (&found.kind, value) {
+        (MenuKind::Toggle(on), Value::Null) => MenuInput::Toggle(!on),
+        (MenuKind::Toggle(_), Value::Bool(b)) => MenuInput::Toggle(*b),
+        (MenuKind::Slider { .. }, Value::Number(n)) => MenuInput::Value(n.as_f64().unwrap_or(0.0)),
+        (MenuKind::Choice { options, .. }, Value::Number(n)) => match n.as_u64() {
+            Some(n) if (1..=options.len() as u64).contains(&n) => MenuInput::Choose(n as usize - 1),
+            _ => return Err(format!("a choice from 1 to {}", options.len())),
+        },
+        (MenuKind::Choice { options, .. }, Value::String(o)) => match options.iter().position(|x| x == o) {
+            Some(i) => MenuInput::Choose(i),
+            None => return Err(format!("no option {o:?}; there are {options:?}")),
+        },
+        (MenuKind::Button, Value::Null) => MenuInput::Press,
+        (MenuKind::Label, _) => return Err("a label does nothing".into()),
+        (kind, v) => return Err(format!("{v} does not fit a {}", match kind {
+            MenuKind::Toggle(_) => "toggle (true or false)",
+            MenuKind::Slider { .. } => "slider (a number)",
+            MenuKind::Choice { .. } => "choice (1-based or the option's text)",
+            _ => "button (no value)",
+        })),
+    };
+    crate::menu_input(module, item, input);
+    Ok(())
+}
+
 /// Diagnostics of `path` as the checker sees it; `text` replaces the file
 /// on disk (an editor's unsaved text). The mod's other files are read from
 /// disk when the checker has not got them.

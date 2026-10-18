@@ -71,6 +71,11 @@ pub(crate) fn connect(s: S) {
                     s.mods.set(mods);
                 }
             }
+            Some("menus") => {
+                if let Ok(menus) = serde_json::from_value::<Vec<crate::menus::MenuInfo>>(msg["params"].clone()) {
+                    s.menus.set(menus);
+                }
+            }
             Some("log") => {
                 if let Ok(lines) = serde_json::from_value::<Vec<LogLine>>(msg["params"].clone()) {
                     for l in lines {

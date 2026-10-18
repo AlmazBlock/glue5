@@ -238,6 +238,24 @@ kbd { font: 600 11px/1 var(--ui); color: var(--muted); padding: 3px 6px; border-
 .problem.warn .ico { color: var(--warn); }
 .problem .msg { color: var(--text-2); white-space: pre-wrap; }
 .problem .where { color: var(--faint); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.menus { overflow: auto; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 12px; padding: 12px 16px; }
+.menus .empty { padding: 0; }
+.mcard { flex: 0 1 340px; min-width: 0; padding: 4px 0 6px; border-radius: 10px; background: rgba(255,255,255,.04); border: 1px solid var(--line); }
+.mcard header { display: flex; align-items: baseline; gap: 8px; padding: 8px 14px 6px; }
+.mcard header b { font: 700 16px/1 "Barlow Condensed"; letter-spacing: .05em; text-transform: uppercase; color: var(--text); }
+.mcard header span { color: var(--faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mitem { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; padding: 4px 14px; }
+.mitem:hover { background: var(--hover); }
+.mitem.label { min-height: 28px; color: var(--muted); }
+.mtext { display: grid; min-width: 0; }
+.mtext span { color: var(--text-2); overflow-wrap: anywhere; }
+.mitem.label .mtext span { color: var(--muted); }
+.mtext small { color: var(--faint); font-size: 12px; }
+.mslider { display: flex; align-items: center; gap: 8px; flex: 0 1 180px; min-width: 120px; }
+.mslider input { flex: 1; min-width: 0; accent-color: #fff; }
+.mslider span { min-width: 36px; text-align: right; font: 400 12px/1 var(--mono); color: var(--text-2); }
+.mchoice { max-width: 55%; height: 30px; padding: 0 8px; border-radius: 7px; background: rgba(36,36,36,.9); border: 1px solid var(--line); color: var(--text); font: inherit; }
+.cnt.n { background: rgba(255,255,255,.18); color: var(--text); }
 .prompt { display: flex; align-items: center; gap: 10px; margin: 0 10px 8px; padding: 0 5px 0 12px; height: 40px; border-radius: 9px; background: rgba(36,36,36,.85); border: 1px solid var(--line); font: 400 12.5px/1 var(--mono); color: var(--text); }
 .prompt:focus-within { border-color: rgba(255,255,255,.3); }
 .prompt .gt { color: var(--muted); }
@@ -277,10 +295,14 @@ kbd { font: 600 11px/1 var(--ui); color: var(--muted); padding: 3px 6px; border-
   .app.screen-mods .sidebar { display: flex; }
   .app.screen-mods .work { display: none; }
   .app.screen-editor .panel { display: none; }
-  .app.screen-console .work, .app.screen-problems .work { grid-template-rows: minmax(0, 1fr); }
+  .app.screen-console .work, .app.screen-problems .work, .app.screen-menus .work { grid-template-rows: minmax(0, 1fr); }
   .app.screen-console .tabs, .app.screen-console .toolbar, .app.screen-console .code,
-  .app.screen-problems .tabs, .app.screen-problems .toolbar, .app.screen-problems .code { display: none; }
-  .app.screen-console .panel, .app.screen-problems .panel { display: grid; border-top: 0; }
+  .app.screen-problems .tabs, .app.screen-problems .toolbar, .app.screen-problems .code,
+  .app.screen-menus .tabs, .app.screen-menus .toolbar, .app.screen-menus .code { display: none; }
+  .app.screen-console .panel, .app.screen-problems .panel, .app.screen-menus .panel { display: grid; border-top: 0; }
+  .menus { padding: 10px; }
+  .mcard { flex-basis: 100%; }
+  .mitem { min-height: 48px; }
   .row { display: block; padding: 5px 14px; border-bottom: 1px solid rgba(255,255,255,.04); }
   .row .time, .row .src { display: inline; font: 600 11.5px/1.3 var(--ui); margin-right: 8px; }
   .row .msg { display: block; }
@@ -292,7 +314,7 @@ kbd { font: 600 11px/1 var(--ui); color: var(--muted); padding: 3px 6px; border-
   .toolbar .crumbs, .toolbar .switch { display: none; }
   .toolbar { gap: 8px; padding: 0 10px; }
   .phone-nav {
-    display: grid; grid-template-columns: repeat(4, 1fr); padding-bottom: env(safe-area-inset-bottom);
+    display: grid; grid-template-columns: repeat(5, 1fr); padding-bottom: env(safe-area-inset-bottom);
     background: var(--glass-strong); border-top: 1px solid var(--line); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
   }
   .phone-nav button { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: var(--faint); font-size: 11px; }

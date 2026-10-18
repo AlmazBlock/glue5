@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::editor::StudioEditor;
+use crate::menus::MenuInfo;
 
 #[derive(Clone, Deserialize, PartialEq, Debug)]
 pub(crate) struct ModInfo {
@@ -64,6 +65,7 @@ pub(crate) enum Side {
 pub(crate) enum Panel {
     Console,
     Problems,
+    Menus,
 }
 
 /// What a phone shows (one at a time).
@@ -73,6 +75,7 @@ pub(crate) enum Screen {
     Editor,
     Console,
     Problems,
+    Menus,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -96,6 +99,7 @@ pub(crate) struct S {
     pub(crate) connected: RwSignal<bool>,
     pub(crate) hello: RwSignal<Value>,
     pub(crate) mods: RwSignal<Vec<ModInfo>>,
+    pub(crate) menus: RwSignal<Vec<MenuInfo>>,
     pub(crate) rows: RwSignal<Vec<(u64, Row)>>,
     pub(crate) tabs: RwSignal<Vec<Tab>>,
     pub(crate) active: RwSignal<Option<String>>,

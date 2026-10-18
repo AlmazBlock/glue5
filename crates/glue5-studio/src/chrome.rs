@@ -132,7 +132,12 @@ pub(crate) fn PhoneNav(s: S) -> impl IntoView {
             <button class=move || if s.screen.get() == screen { "on" } else { "" }
                 on:click=move |_| {
                     s.screen.set(screen);
-                    match screen { Screen::Console => s.panel.set(Panel::Console), Screen::Problems => s.panel.set(Panel::Problems), _ => {} }
+                    match screen {
+                        Screen::Console => s.panel.set(Panel::Console),
+                        Screen::Problems => s.panel.set(Panel::Problems),
+                        Screen::Menus => s.panel.set(Panel::Menus),
+                        _ => {}
+                    }
                 }>
                 <span class="ico" inner_html=icon></span>{label}
                 {(screen == Screen::Problems).then(|| view! { <Show when=move || errors() != 0><span class="badge">{errors}</span></Show> })}
@@ -145,6 +150,7 @@ pub(crate) fn PhoneNav(s: S) -> impl IntoView {
             {item(Screen::Editor, "Editor", icons::CODE)}
             {item(Screen::Console, "Console", icons::TERMINAL)}
             {item(Screen::Problems, "Problems", icons::WARNING)}
+            {item(Screen::Menus, "Menus", icons::SLIDERS)}
         </nav>
     }
 }

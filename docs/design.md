@@ -856,9 +856,9 @@ whose own browser is no place to write mods).
   sources (`third_party/luau`, the release mlua builds the rest from) with
   a small C API (`csrc/checker.cpp`). It loads the natives' definitions in
   about 80 ms; checking a file takes under a millisecond. It exists only
-  while an editor is connected (some 45 MB) and speaks LSP over a
-  WebSocket (`/lsp`). Completions are filtered by what is typed before
-  they are sent, so lists stay short on phones.
+  while an editor is connected (some 30 MB, which the log reports) and
+  speaks LSP over a WebSocket (`/lsp`). Completions are filtered by what
+  is typed before they are sent, so lists stay short on phones.
 - **The page** (`crates/glue5-studio`) is Leptos compiled to wasm, around
   CodeMirror 6 with `@codemirror/lsp-client`. No node: the crate is its
   own workspace, built for `wasm32-unknown-unknown` by glue5-mods' build
@@ -872,7 +872,8 @@ whose own browser is no place to write mods).
   - start or restart a mod and get its first log lines back;
   - read logs;
   - evaluate Luau in the game;
-  - search the natives.
+  - search the natives;
+  - use a mod's menus (`menus`, `menu_input`) as a player would.
 
   `claude mcp add --transport http glue5 http://<address>:47110/mcp
   --header "Authorization: Bearer <code>"`; the Mods page copies it.
@@ -880,6 +881,9 @@ whose own browser is no place to write mods).
   takes snippets from a queue.
 - Files written by any client reach open editors (a WebSocket message).
   Saving can restart the mod.
+- The mods' menus show in the Studio too (the MENUS panel, a screen of
+  their own on phones): the same items the game draws, sent again when
+  they change; what is done there reaches the mod as from the game.
 
 ## Known limits
 
