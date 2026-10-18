@@ -41,9 +41,15 @@ impl Checker {
     pub fn with<R>(f: impl FnOnce(&mut Checker) -> R) -> Result<R, String> {
         let mut slot = CHECKER.lock().unwrap();
         if slot.is_none() {
-            let started = std::time::Instant::now();
+            let (started, before) = (std::time::Instant::now(), glue5_runtime::memory::footprint().0);
             *slot = Some(Checker::new()?);
-            log::info!("mods: type checker ready in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+            // What it costs, on phones above all.
+            let grew = glue5_runtime::memory::footprint().0.zip(before).map(|(a, b)| a.saturating_sub(b) >> 20);
+            log::info!(
+                "mods: type checker ready in {:.0} ms, +{} MiB",
+                started.elapsed().as_secs_f64() * 1000.0,
+                grew.map_or("?".into(), |m| m.to_string())
+            );
         }
         Ok(f(slot.as_mut().unwrap()))
     }
