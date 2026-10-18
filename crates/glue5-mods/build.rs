@@ -753,8 +753,28 @@ declare world: {
 \tweapons: () -> { WeaponName },
 }
 
+declare json: {
+	-- The value as JSON text: a table with keys 1..n (or none) is an array, another an object
+	-- (string keys; number keys written as strings); a vector is [x, y, z]. `pretty` indents it.
+	encode: (value: any, pretty: boolean?) -> string,
+	-- JSON text as Luau values; null is nil.
+	decode: (text: string) -> any,
+}
+
+-- What the mod keeps between sessions, by key (JSON values, 1 MB at most); written within a
+-- couple of seconds of a change and when the mod stops. Kept for this player, not in the mod's folder.
+declare storage: {
+	-- The value kept under `key` (a copy), or nil.
+	get: (key: string) -> any,
+	-- Keeps a copy of `value` under `key`; nil removes it.
+	set: (key: string, value: any) -> (),
+	keys: () -> { string },
+	clear: () -> (),
+}
+
 declare ui: {
-	-- A menu the app shows (Settings › Mods and Studio › Menus, or F7); a mod with one stays running.
+	-- A menu the app shows (the Mods page's MENUS: F7, or the button beside the settings
+	-- button on touch screens); a mod with one stays running.
 	menu: (title: string) -> Menu,
 	-- A notification over the game.
 	notify: (text: string) -> (),

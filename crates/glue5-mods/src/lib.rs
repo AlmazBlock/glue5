@@ -10,8 +10,10 @@
 mod checker;
 mod engine;
 pub mod files;
+mod json;
 mod menus;
 pub mod natives;
+mod storage;
 pub mod studio;
 mod vm;
 pub mod world;

@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Thread, Value, VmState};
 
 use crate::world::Pool;
-use crate::{EvalResult, menus, natives};
+use crate::storage::Storage;
+use crate::{EvalResult, json, menus, natives};
 
 /// How long a mod may run before it yields to the game for this frame.
 const SLICE: Duration = Duration::from_millis(2);
@@ -35,6 +36,8 @@ pub struct Vm {
     /// Tasks: `task.spawn`/`task.delay`, menus' callbacks.
     sched: Sched,
     deadline: Rc<Cell<Instant>>,
+    /// The mod's `storage` (none for the REPL).
+    storage: Option<Rc<Storage>>,
 }
 
 /// What `task.*` and the menus share with the VM.
@@ -77,6 +80,8 @@ impl Vm {
         let sched = Sched::default();
         let (lua, deadline) = base(name, log, &sched)?;
         lua.globals().set("require", require(&lua, name, dir)?)?;
+        let storage = Storage::open(name);
+        storage.install(&lua)?;
         // The mod's code starts once the player is in the game (not on
         // the loading screens, where the player's ped is a stand-in).
         let ready: Function = lua
@@ -96,7 +101,16 @@ impl Vm {
             .map_err(|e| mlua::Error::runtime(format!("reading {}: {e}", path.display())))?;
         let chunk = lua.load(source).set_name(format!("@{name}/main.luau")).into_function()?;
         let main = lua.create_thread(ready.call::<Function>(chunk)?)?;
-        Ok(Vm { lua, module: name.to_string(), main: Some(main), main_wake: 0, main_busy: Duration::ZERO, sched, deadline })
+        Ok(Vm {
+            lua,
+            module: name.to_string(),
+            main: Some(main),
+            main_wake: 0,
+            main_busy: Duration::ZERO,
+            sched,
+            deadline,
+            storage: Some(storage),
+        })
     }
 
     /// The REPL: runs `jobs`' snippets, as expressions when they are.
@@ -156,7 +170,7 @@ impl Vm {
             .call((take, reply))?;
         lua.sandbox(true)?;
         let main = lua.create_thread(main)?;
-        Ok(Vm { lua, module: "~eval".into(), main: Some(main), main_wake: 0, main_busy: Duration::ZERO, sched, deadline })
+        Ok(Vm { lua, module: "~eval".into(), main: Some(main), main_wake: 0, main_busy: Duration::ZERO, sched, deadline, storage: None })
     }
 
     /// A turn at game time `now` (ms): what the player did with the menus
@@ -164,6 +178,9 @@ impl Vm {
     /// they wait, end, fail or run out of time.
     pub fn step(&mut self, now: u64) -> Step {
         self.sched.now.set(now);
+        if let Some(storage) = &self.storage {
+            storage.flush(false);
+        }
         for (item, input) in menus::take_inputs(&self.module) {
             match menus::apply(&self.lua, &self.sched.handlers, item, input) {
                 Ok(Some((f, args))) => match self.lua.create_thread(f) {
@@ -281,6 +298,7 @@ fn base(name: &str, log: Rc<dyn Fn(&str)>, sched: &Sched) -> mlua::Result<(Lua, 
             | StdLib::MATH
             | StdLib::BIT
             | StdLib::VECTOR
+            | StdLib::BUFFER
             | StdLib::OS,
         LuaOptions::default(),
     )?;
@@ -323,6 +341,7 @@ fn base(name: &str, log: Rc<dyn Fn(&str)>, sched: &Sched) -> mlua::Result<(Lua, 
         })?,
     )?;
     menus::install(&lua, name, sched.handlers.clone())?;
+    json::install(&lua)?;
     // `world.vehicles()`..., the catalog's lists.
     let world = lua.create_table()?;
     for (key, pool) in [("vehicles", Pool::Vehicles), ("peds", Pool::Peds), ("objects", Pool::Objects)] {
@@ -470,4 +489,13 @@ fn describe_plain(v: &Value) -> String {
 fn short(x: f32) -> String {
     let s = format!("{x:.2}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+impl Drop for Vm {
+    /// The mod stops: its storage is written now.
+    fn drop(&mut self) {
+        if let Some(storage) = &self.storage {
+            storage.flush(true);
+        }
+    }
 }

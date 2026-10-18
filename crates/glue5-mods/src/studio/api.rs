@@ -87,6 +87,18 @@ files with `--!strict` to have every type checked.
 - Natives that create entities are refused when the game's pool is nearly
   full; an entity of the wrong kind (a Ped where a Vehicle is wanted) is
   an error before the native runs.
+
+## Data
+- `json.encode(value, pretty?)` and `json.decode(text)`: tables with keys
+  1..n (or none) are arrays, others objects; JSON's null is nil.
+- `storage.get(key)`, `storage.set(key, value)` (nil removes),
+  `storage.keys()`, `storage.clear()`: what the mod keeps between
+  sessions, JSON values, 1 MB at most. Values are copies: change a table
+  and `set` it again. Written within a couple of seconds and when the mod
+  stops; kept for this player, not in the mod's folder.
+- Luau's own libraries are there (math, string, table, coroutine, bit32,
+  utf8, buffer, vector, os.clock/time/date); files and the network are
+  not.
 "#;
 
 /// The mods with their state and files.

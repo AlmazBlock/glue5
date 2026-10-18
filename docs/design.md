@@ -801,7 +801,7 @@ playing.
 - A mod runs at most 2 ms before the interrupt suspends it until the next
   frame. One that runs 2 s without calling `wait` is stopped.
 
-### Menus, tasks, the world
+### Menus, tasks, the world, data
 
 - **Menus**: `ui.menu(title)` with toggles, sliders, choices, buttons and
   labels. The application draws them with its own widgets (touch and
@@ -832,6 +832,13 @@ playing.
   parameter is a vehicle's or ped's model or a weapon, so a misspelt name
   is a type error ("did you mean ...?"). The names come from the assets
   the game loaded, whatever their version; none is in the build.
+- **Data**: `json.encode`/`json.decode` (json.rs: arrays are tables with
+  keys 1..n or none, null is nil, functions and cycles are errors) and
+  `storage` (storage.rs): a mod's values by key, JSON, 1 MB, written
+  within two seconds and when it stops, in the mods folder's
+  `.glue5/storage/<mod>.json`, so a mod handed on carries no player's
+  data. Luau's `buffer` is there too; files and the network are not
+  (HTTP, with sites a mod declares and the player approves, is planned).
 - **Stability**:
   - an entity of the wrong kind (`CEntity` +40: 3 vehicle, 4 ped, 5
     object) is an error before the native runs;
