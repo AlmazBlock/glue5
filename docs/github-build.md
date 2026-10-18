@@ -32,8 +32,8 @@ then **Draft a new release**.
 1. Open the **Actions** tab.
 2. On the left, press **Build**.
 3. On the right, press **Run workflow**, choose your device (`ios`,
-   `android`, `macos`, `linux-x86_64` or `linux-aarch64`), press the
-   green **Run workflow**.
+   `android`, `windows`, `macos`, `linux-x86_64` or `linux-aarch64`),
+   press the green **Run workflow**.
 4. Wait. It takes a long time (more than an hour): you can close the
    page and come back later. A green ✅ means it is done.
 5. Open **Releases**, then your draft: the app is there, next to
@@ -51,6 +51,11 @@ you what to do: open it and read the message.
 - **Android** (`Glue5-android.apk`): open the file on the phone and
   install it. ⚠️ Do not delete `Glue5-android.keystore` from the draft:
   without it, the next version cannot update the app.
+- **Windows** (`Glue5-windows.exe`): put it in a folder of its own and
+  run it. The first time, Windows warns about it: press **More info**,
+  then **Run anyway**. If it says `VCRUNTIME140.dll` is missing, install
+  Microsoft's
+  [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 - **Mac** (`Glue5-macos.dmg`): open it and drag the app into
   Applications. The first time, macOS blocks it: open **System Settings ›
   Privacy & Security** and press **Open Anyway**.
@@ -71,28 +76,3 @@ Nothing to do: within a few seconds GitHub puts it back to draft by
 itself, and you get an email about it. In those few seconds anyone could
 have downloaded the files, so try not to do it.
 
----
-
-### How it works
-
-- The **Build** workflow runs the same tasks as a build on a computer
-  (`mise run ios:ipa`, `android:build`, `macos:package`,
-  `linux:container`), on GitHub's macOS and Linux machines, free for
-  public repositories (forks of a public repository are public). It takes
-  `game.wasm` from the newest draft release, checks it is the supported
-  build, and uploads the result into the same draft. A job may last up to
-  six hours.
-- Drafts are seen only by those who can write to the repository and by
-  its workflows. The **Release guard** workflow puts a release with a
-  `.wasm` or a `Glue5-*` file back to draft when it is published or
-  edited (about 8 seconds in our tests), and fails so that GitHub sends
-  an email. Build refuses to start while a published release has them.
-- Android: the first build makes a signing key and keeps it in the draft
-  (`Glue5-android.keystore`); later builds sign with it, so they install
-  over the app (a new key would mean reinstalling, which deletes the
-  app's game folder).
-- iOS: the IPA is unsigned; it carries the increased memory limit
-  entitlement (`platform/ios/Glue5.entitlements`) in an ad-hoc signature.
-- No build cache: GitHub lets pull requests from other people's forks
-  read a repository's caches, and the build's objects are made from the
-  game's code. Only the toolchain (mise's tools) is cached.

@@ -10,7 +10,7 @@ on:
       platform:
         description: Platform
         type: choice
-        options: [ios, android, macos, linux-x86_64, linux-aarch64]
+        options: [ios, android, windows, macos, linux-x86_64, linux-aarch64]
         default: ios
 
 permissions:
@@ -22,8 +22,11 @@ concurrency:
 jobs:
   build:
     name: ${{ inputs.platform }}
-    runs-on: ${{ fromJSON('{"ios":"macos-26","macos":"macos-26","android":"ubuntu-24.04","linux-x86_64":"ubuntu-24.04","linux-aarch64":"ubuntu-24.04-arm"}')[inputs.platform] }}
+    runs-on: ${{ fromJSON('{"ios":"macos-26","macos":"macos-26","android":"ubuntu-24.04","linux-x86_64":"ubuntu-24.04","linux-aarch64":"ubuntu-24.04-arm","windows":"windows-2025"}')[inputs.platform] }}
     timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
     env:
       GH_TOKEN: ${{ github.token }}
       PLATFORM: ${{ inputs.platform }}
@@ -39,8 +42,17 @@ jobs:
       - name: game.wasm from the draft release
         id: game
         run: |
-          .github/scripts/draft.sh fetch "$RUNNER_TEMP/game"
-          echo "GLUE5_GAME_DIR=$RUNNER_TEMP/game" >>"$GITHUB_ENV"
+          game=$RUNNER_TEMP/game
+          # Windows: D:/a/_temp/game, a path for Git's bash and for cargo alike.
+          if [ "$RUNNER_OS" = Windows ]; then game=$(cygpath -m "$game"); fi
+          .github/scripts/draft.sh fetch "$game"
+          echo "GLUE5_GAME_DIR=$game" >>"$GITHUB_ENV"
+
+      # Windows: the tasks run in Git's bash (see the README's Windows
+      # section); Visual Studio and LLVM's clang-cl come with the machine.
+      - name: Git's bash for mise
+        if: runner.os == 'Windows'
+        run: echo "MISE_BASH_PATH=$(cygpath -w /)bin\\bash.exe" >>"$GITHUB_ENV"
 
       - name: Room on the disk
         if: runner.os == 'Linux'
@@ -50,7 +62,7 @@ jobs:
         with:
           version: 2026.7.5
           install: ${{ !startsWith(inputs.platform, 'linux') }}
-          install_args: ${{ fromJSON('{"ios":"rust cmake xcodegen","macos":"rust cmake cargo:cargo-packager","android":"rust cmake java gradle android-sdk cargo:cargo-ndk"}')[inputs.platform] }}
+          install_args: ${{ fromJSON('{"ios":"rust cmake xcodegen","macos":"rust cmake cargo:cargo-packager","android":"rust cmake java gradle android-sdk cargo:cargo-ndk","windows":"rust cmake"}')[inputs.platform] }}
           cache_key_prefix: mise-${{ inputs.platform }}
 
       # The APK's key, kept in the draft: an update signed with another one
@@ -69,6 +81,10 @@ jobs:
           ios)
               mise run ios:ipa
               mv target/ios/Glue5.ipa Glue5-ios.ipa
+              ;;
+          windows)
+              mise run build
+              mv target/release/glue5.exe Glue5-windows.exe
               ;;
           macos)
               mise run macos:package
