@@ -78,6 +78,10 @@ NDK: versions in `platform/android/gradle.properties`) with sdkmanager.
 mise run play          # the first build compiles ~1 GB of generated C
 ```
 
+Without a computer set up for it, GitHub Actions can build the app in
+your fork from your own `game.wasm`, which stays private:
+[docs/github-build.md](docs/github-build.md).
+
 Every task first runs `mise run setup`, which prepares wgpu-core, wgpu-hal
 and wasm2c with our patches (only when they change). Run cargo by hand
 through mise too: in a shell with `mise activate`, or `mise exec -- cargo ...`.
