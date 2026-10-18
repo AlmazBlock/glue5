@@ -177,6 +177,7 @@ pub fn run() -> Result<()> {
         source: Source::Folder,
         stream_for: None,
         sharing: None,
+        studio: None,
         servers: Arc::default(),
         stream_waiting: None,
         last_failure: None,
@@ -328,6 +329,9 @@ struct App {
     stream_for: Option<(String, bool)>,
     /// This computer sharing its game folder (desktop).
     sharing: Option<crate::sharing::Sharing>,
+    /// GLUE 5 Studio, served while the game runs with mods and the setting
+    /// is on, and what the mods page shows of it.
+    studio: Option<(glue5_mods::studio::Studio, ui::StudioInfo)>,
     /// Servers found on the network by the last search, and whether one runs.
     servers: Arc<Mutex<(bool, Vec<ui::FoundServer>)>>,
     /// Engine reads have waited for the server since then.
@@ -513,6 +517,7 @@ impl App {
     /// it asks for. True to quit.
     fn update(&mut self, page_before: Option<Page>) -> Result<bool> {
         self.keep_sources();
+        self.update_studio();
         let in_game = self.game.is_some();
         // Touch controls: a virtual pad in slot 0 unless a controller has it.
         let show = in_game
@@ -639,6 +644,8 @@ impl App {
                 source: self.settings.source,
                 stream: stream.as_ref().map(|(server, status)| (*server, status)),
                 sharing: self.sharing.as_ref().map(crate::sharing::Sharing::state),
+                mods: glue5_mods::dir().is_some(),
+                studio: self.studio.as_ref().map(|(_, info)| info),
                 servers: &servers.1,
                 searching: servers.0,
                 stream_alert,
@@ -1077,6 +1084,39 @@ impl App {
                 self.ui.repaint_in(Duration::from_millis(500));
             }
         }
+    }
+
+    /// GLUE 5 Studio follows its settings: served while the game runs
+    /// with mods and the setting is on, for this device or the network.
+    fn update_studio(&mut self) {
+        let wanted = (glue5_mods::dir().is_some() && self.settings.studio).then_some(self.settings.studio_lan);
+        if self.studio.as_ref().map(|(s, _)| s.lan()) == wanted {
+            return;
+        }
+        self.studio = None;
+        if let Some(lan) = wanted {
+            // The usual port, else any (another app has it).
+            let started = glue5_mods::studio::Studio::start(glue5_mods::studio::PORT, lan)
+                .or_else(|_| glue5_mods::studio::Studio::start(0, lan));
+            match started {
+                Ok(studio) => {
+                    let host = if lan {
+                        glue5_stream::lan_addresses().first().map_or("127.0.0.1".into(), |ip| ip.to_string())
+                    } else {
+                        "127.0.0.1".into()
+                    };
+                    let info = ui::StudioInfo {
+                        url: studio.url(&host),
+                        code: studio.pairing_code(),
+                        mcp: format!("http://{host}:{}/mcp", studio.port()),
+                        lan,
+                    };
+                    self.studio = Some((studio, info));
+                }
+                Err(e) => log::warn!("studio: {e}"),
+            }
+        }
+        self.ui.repaint();
     }
 
     /// (Re)starts the stream from `server` (none: stops it), its copy where

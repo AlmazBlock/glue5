@@ -87,6 +87,10 @@ struct Args {
     /// start with the game, stdin's `mods start <name>` the others).
     #[arg(long, value_name = "DIR")]
     mods: Option<PathBuf>,
+    /// With --mods: serve GLUE 5 Studio and the MCP endpoint on this port,
+    /// for this device only.
+    #[arg(long, value_name = "PORT", requires = "mods")]
+    studio: Option<u16>,
     /// Saves, settings and the pipeline cache (default: glue5-headless in
     /// the temporary directory).
     #[arg(long, value_name = "DIR")]
@@ -232,6 +236,14 @@ fn main() -> Result<()> {
     if let Some(dir) = &args.mods {
         glue5_mods::install(dir);
     }
+    let _studio = match args.studio {
+        Some(port) => {
+            let studio = glue5_mods::studio::Studio::start(port, false)?;
+            log::info!("studio: {} (code {})", studio.url("127.0.0.1"), studio.pairing_code());
+            Some(studio)
+        }
+        None => None,
+    };
     let game = glue5_runtime::start(
         glue5_runtime::Config {
             game_dir,

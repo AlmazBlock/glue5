@@ -24,6 +24,7 @@ use crate::settings::{PerfOverlay, Settings};
 mod chip;
 mod credits;
 mod friends;
+mod mods;
 mod pages;
 mod perf;
 mod servers;
@@ -31,6 +32,8 @@ mod theme;
 mod widgets;
 use credits::credits_page;
 use friends::{FriendsPage, friends_page};
+use mods::{ModsPage, mods_page};
+pub use mods::StudioInfo;
 use pages::{settings_page, start_page};
 use servers::{ServersPage, servers_page};
 
@@ -49,6 +52,8 @@ pub enum Page {
     /// Where the game's files stream from: the server in use, the ones on
     /// the network, one by its address, this device's copy.
     Servers,
+    /// The mods, GLUE 5 Studio, the mods' log.
+    Mods,
 }
 
 /// How the game starts.
@@ -190,6 +195,10 @@ pub struct Status<'a> {
     pub stream: Option<(&'a str, &'a glue5_stream::Status)>,
     /// This computer sharing its game folder (desktop).
     pub sharing: Option<crate::sharing::State>,
+    /// The game runs with mods.
+    pub mods: bool,
+    /// GLUE 5 Studio, serving.
+    pub studio: Option<&'a StudioInfo>,
     /// Servers found on the network, and whether a search runs.
     pub servers: &'a [FoundServer],
     pub searching: bool,
@@ -233,6 +242,7 @@ pub struct Ui {
     behind: Option<Page>,
     friends: FriendsPage,
     servers: ServersPage,
+    mods: ModsPage,
     /// The last submission drew something (an empty one clears it).
     drawn: bool,
     note: Option<String>,
@@ -300,6 +310,7 @@ impl Ui {
             behind: Some(Page::Start),
             friends: FriendsPage::default(),
             servers: ServersPage::default(),
+            mods: ModsPage::default(),
             drawn: false,
             note: None,
             scale_edit: None,
@@ -390,13 +401,13 @@ impl Ui {
                 self.repaint();
             }
             Some(Page::Settings) => self.show(self.home),
-            Some(Page::Credits | Page::Friends | Page::Servers) => self.show(self.behind),
+            Some(Page::Credits | Page::Friends | Page::Servers | Page::Mods) => self.show(self.behind),
             _ => {}
         }
     }
 
     fn show(&mut self, page: Option<Page>) {
-        if matches!(page, Some(Page::Credits | Page::Friends | Page::Servers)) && self.page != page {
+        if matches!(page, Some(Page::Credits | Page::Friends | Page::Servers | Page::Mods)) && self.page != page {
             self.behind = self.page;
             if page == Some(Page::Servers) {
                 self.servers.opened();
@@ -688,6 +699,7 @@ impl Ui {
                 back = friends_page(&ctx, &mut self.friends, game, &mut actions);
             }
             Some(Page::Servers) => back = servers_page(&ctx, &mut self.servers, settings, status, &mut actions),
+            Some(Page::Mods) => back = mods_page(&ctx, &mut self.mods, settings, status),
             None => {}
         }
         let mut output = ctx.end_pass();

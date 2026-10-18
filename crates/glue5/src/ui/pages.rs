@@ -969,6 +969,13 @@ fn settings_items(
             setting(ui, "Mods", Control::Toggle, Some(mods), |ui| {
                 toggle(ui, &mut settings.mods);
             });
+            if status.mods {
+                setting(ui, "Mods and Studio", Control::Action, Some("Start and stop mods; edit them in a browser"), |ui| {
+                    if action_button(ui, "Open").clicked() {
+                        *go = Some(Some(Page::Mods));
+                    }
+                });
+            }
             let version = concat!("Glue 5 ", env!("CARGO_PKG_VERSION"), " and the projects it builds on");
             setting(ui, "Credits", Control::Action, Some(version), |ui| {
                 if action_button(ui, "View").clicked() {
