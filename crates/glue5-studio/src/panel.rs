@@ -111,11 +111,19 @@ pub(crate) fn Console(s: S) -> impl IntoView {
                 }}
             </For>
         </div>
-        <label class="prompt">
+        // A div, not a label: a label's click goes to its first control
+        // (the Run button), taking the focus from the input.
+        <div class="prompt" on:mousedown=move |ev| {
+            // The box's margins focus the input too.
+            if ev.target() == ev.current_target() {
+                ev.prevent_default();
+                with_editor(|e| e.focus_repl());
+            }
+        }>
             <span class="gt">"›"</span>
             <div class="repl-host" node_ref=input_ref></div>
             <button class="btn primary small" on:click=move |_| with_editor(|e| e.run_repl())>"Run"</button>
-        </label>
+        </div>
     }
 }
 

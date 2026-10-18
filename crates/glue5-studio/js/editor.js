@@ -338,6 +338,10 @@ export class StudioEditor {
     });
   }
 
+  focusRepl() {
+    this.replView?.focus();
+  }
+
   runRepl() {
     if (!this.replView) return;
     const view = this.replView, code = view.state.doc.toString().trim();

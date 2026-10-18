@@ -29,6 +29,8 @@ extern "C" {
     pub fn repl(this: &StudioEditor, parent: &web_sys::HtmlElement, on_run: &Closure<dyn FnMut(String)>);
     #[wasm_bindgen(method, js_name = runRepl)]
     pub fn run_repl(this: &StudioEditor);
+    #[wasm_bindgen(method, js_name = focusRepl)]
+    pub fn focus_repl(this: &StudioEditor);
 
     #[wasm_bindgen(method, js_name = onChange)]
     pub fn on_change(this: &StudioEditor, f: &Closure<dyn FnMut(String, bool)>);
