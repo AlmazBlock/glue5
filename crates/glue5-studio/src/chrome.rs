@@ -118,7 +118,7 @@ pub(crate) fn StatusBar(s: S) -> impl IntoView {
             <span class="it">{move || {
                 let mods = s.mods.get();
                 let running: Vec<_> = mods.iter().filter(|m| m.state == "running").collect();
-                format!("{} running · {:.1} ms/frame", running.len(), running.iter().map(|m| m.cpu_ms).sum::<f64>())
+                format!("{} running · {:.1} ms/frame", running.len(), running.iter().map(|m| m.cpu_ms).fold(0.0, |a, b| a + b))
             }}</span>
         </footer>
     }

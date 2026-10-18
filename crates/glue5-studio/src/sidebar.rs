@@ -102,7 +102,7 @@ pub(crate) fn ModsView(s: S) -> impl IntoView {
         <Show when=move || !running().is_empty()>
             <div class="section">"Running"<span class="count">{move || {
                 let r = running();
-                format!("{} · {:.1} ms/frame", r.len(), r.iter().map(|m| m.cpu_ms).sum::<f64>())
+                format!("{} · {:.1} ms/frame", r.len(), r.iter().map(|m| m.cpu_ms).fold(0.0, |a, b| a + b))
             }}</span></div>
             <div class="running">
                 <For each=running key=|m| format!("{}|{}", m.name, m.waiting) let(m)>{{
