@@ -146,6 +146,7 @@ The game is looked for in `game/` beside the AppImage, as beside the Mac app.
 | Record pipelines on automated runs (benchmark, map tours, graphics settings) into the seed | `mise run shaders:collect [default low min mid high max]` |
 | iOS: build, sign, install, launch on the connected device | `mise run ios [device]` |
 | iOS: only check that the app builds | `mise run ios:build` |
+| iOS: an unsigned IPA, for a sideloading tool to sign | `mise run ios:ipa` |
 | iOS: launch the installed app again, with its console | `mise run ios:run [device]` |
 | iOS: copy the game into the app's Documents/game | `mise run ios:game [device]` |
 | Apple TV: build, sign, install, launch on the paired Apple TV | `mise run tvos [device]` |
