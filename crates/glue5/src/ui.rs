@@ -278,6 +278,8 @@ pub struct Ui {
 /// friends' tab it opens; until when it shows.
 struct Toast {
     toast: friends::Toast,
+    /// A mod's: tapped, it opens the mods' menus (else the friends).
+    from_mod: bool,
     since: Instant,
     until: Instant,
 }
@@ -352,8 +354,30 @@ impl Ui {
         // Each leaves its time after the one before it: they go one at a time.
         let after = self.toasts.back().map_or(now, |t| t.until.max(now));
         let toast = friends::toast(notice);
-        self.toasts.push_back(Toast { toast, since: now, until: after + TOAST_FOR });
+        self.toasts.push_back(Toast { toast, from_mod: false, since: now, until: after + TOAST_FOR });
         self.repaint();
+    }
+
+    /// A mod's notification (`ui.notify`).
+    pub fn notify_mod(&mut self, module: &str, text: &str) {
+        let now = Instant::now();
+        while self.toasts.len() >= TOASTS {
+            self.toasts.pop_front();
+        }
+        let after = self.toasts.back().map_or(now, |t| t.until.max(now));
+        let toast = friends::Toast { title: "Mod", name: module.to_owned(), text: text.to_owned(), tab: Default::default() };
+        self.toasts.push_back(Toast { toast, from_mod: true, since: now, until: after + TOAST_FOR });
+        self.repaint();
+    }
+
+    /// The mods' menus (F7); again, back.
+    pub fn toggle_mod_menus(&mut self) {
+        if self.page == Some(Page::Mods) {
+            self.back();
+        } else {
+            self.mods.show_menus();
+            self.show(Some(Page::Mods));
+        }
     }
 
     /// The friends (the Home key, Back + RB); again, back.
@@ -367,11 +391,17 @@ impl Ui {
 
     /// The friends at the tab of the newest notification (one was tapped).
     pub fn open_toast(&mut self) {
+        let from_mod = self.toasts.back().is_some_and(|t| t.from_mod);
         if let Some(t) = self.toasts.back() {
             self.friends.tab = t.toast.tab;
         }
         self.toasts.clear();
-        self.show(Some(Page::Friends));
+        if from_mod {
+            self.mods.show_menus();
+            self.show(Some(Page::Mods));
+        } else {
+            self.show(Some(Page::Friends));
+        }
     }
 
     /// Whether a finger at `x`, `y` (0..1, as SDL gives them) is on a

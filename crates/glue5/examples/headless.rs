@@ -343,9 +343,21 @@ fn command(line: &str, t: f64, game: &Game, presses: &mut Vec<(f64, u16)>, keys:
         ["mods", "list"] => log::info!("mods: {:?}", glue5_mods::mods()),
         ["mods", "start", name] => glue5_mods::start(name),
         ["mods", "stop", name] => glue5_mods::stop(name),
+        ["mods", "menus"] => log::info!("mods: menus {:?}", glue5_mods::menus()),
+        ["mods", "input", module, item, what, ref rest @ ..] => {
+            use glue5_mods::MenuInput;
+            let input = match (what, rest) {
+                ("press", []) => MenuInput::Press,
+                ("toggle", [v]) => MenuInput::Toggle(*v == "on"),
+                ("value", [v]) => MenuInput::Value(v.parse()?),
+                ("choose", [v]) => MenuInput::Choose(v.parse()?),
+                _ => bail!("mods input <mod> <item> press|toggle on/off|value <n>|choose <i>"),
+            };
+            glue5_mods::menu_input(module, item.parse()?, input);
+        }
         _ => bail!(
             "expected `press <button>`, `key <key>`, `hold <key> <s>`, `text <text>`, `size <w>x<h>` or \
-             `friends code|ask <code>|accept|list|join|invite|play|add <name>` or `mods list|start <name>|stop <name>`"
+             `friends code|ask <code>|accept|list|join|invite|play|add <name>` or `mods list|start|stop|menus|input`"
         ),
     }
     Ok(())

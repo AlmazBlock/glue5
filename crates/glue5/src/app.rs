@@ -483,6 +483,14 @@ impl App {
             self.ui.toggle_settings();
             return false;
         }
+        // F7: the mods' menus (with mods on).
+        if let Event::KeyDown { scancode: Some(Scancode::F7), repeat: false, .. } = event
+            && glue5_mods::dir().is_some()
+            && !self.ui.wants_text()
+        {
+            self.ui.toggle_mod_menus();
+            return false;
+        }
         // Home, as it opened Social Club's overlay: the friends.
         if let Event::KeyDown { scancode: Some(Scancode::Home), repeat: false, .. } = event
             && !self.ui.wants_text()
@@ -726,6 +734,10 @@ impl App {
                 self.ui.notify(&notice);
             }
         }
+        // What mods notify (`ui.notify`).
+        for (module, text) in glue5_mods::take_notices() {
+            self.ui.notify_mod(&module, &text);
+        }
         // The name friends see follows the player's.
         if self.friend_name != self.settings.online_name {
             self.friend_name.clone_from(&self.settings.online_name);
@@ -928,6 +940,11 @@ impl App {
     /// start page, which offers the way out of a graphics setting the engine
     /// cannot run with; on desktop it opens again on that page.
     fn stopped(&mut self, why: &str) {
+        let why = match glue5_mods::note_failure() {
+            Some(note) => format!("{why} {note}"),
+            None => why.to_string(),
+        };
+        let why = why.as_str();
         if let Err(e) = std::fs::write(self.user_dir.join(FAILURE_FILE), why) {
             log::warn!("cannot record the failure: {e}");
         }
