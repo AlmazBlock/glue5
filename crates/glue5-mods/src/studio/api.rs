@@ -15,9 +15,10 @@ use crate::{files, natives};
 pub const GUIDE: &str = r#"# GLUE 5 mods
 
 A mod is a folder in the mods folder: `main.luau` runs when the mod starts,
-other `.luau` files load with `require("./name")`, and `mod.json` holds
-`{"autostart": true|false}`. Mods are Luau (typed Lua); start files with
-`--!strict` to have every type checked.
+other `.luau` files load with `require("./name")`, and `mod.json`, if there
+is one, is a JSON object: `{"autostart": true}` starts the mod with the game
+(false or no mod.json: started by hand). Mods are Luau (typed Lua); start
+files with `--!strict` to have every type checked.
 
 ## Running
 - A mod runs in a script thread of the game's own, once the player is in
@@ -168,11 +169,62 @@ pub fn menu_input(module: &str, item: u32, value: &Value) -> Result<(), String> 
     Ok(())
 }
 
+/// What mod.json may hold, and of which JSON type.
+const MOD_JSON_KEYS: &[(&str, &str)] = &[("autostart", "true or false")];
+
+/// Diagnostics of a mod.json (`text`, or as saved): JSON, an object, the
+/// keys it knows with values of their type.
+fn mod_json(path: &str, text: Option<&str>) -> Value {
+    let text = match text {
+        Some(t) => t.to_owned(),
+        None => files::read(path).unwrap_or_default(),
+    };
+    let diag = |line: usize, col: usize, len: usize, severity: &str, message: String| {
+        json!({ "range": [line, col, line, col + len], "severity": severity, "code": "mod.json", "message": message })
+    };
+    // Where `"key"` is (0-based line and column).
+    let at = |key: &str| {
+        let quoted = format!("\"{key}\"");
+        text.lines().enumerate().find_map(|(i, l)| l.find(&quoted).map(|c| (i, c, quoted.len()))).unwrap_or((0, 0, 1))
+    };
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            let (line, col) = (e.line().saturating_sub(1), e.column().saturating_sub(1));
+            return json!([diag(line, col, 1, "error", format!("not JSON: {e}"))]);
+        }
+    };
+    let Some(map) = v.as_object() else {
+        return json!([diag(0, 0, 1, "error", "mod.json is an object: {\"autostart\": true}".into())]);
+    };
+    let mut out = Vec::new();
+    for (key, value) in map {
+        let (line, col, len) = at(key);
+        match MOD_JSON_KEYS.iter().find(|(k, _)| k == key) {
+            Some((_, "true or false")) if !value.is_boolean() => {
+                out.push(diag(line, col, len, "error", format!("{key} is true or false")));
+            }
+            Some(_) => {}
+            None => {
+                let known: Vec<&str> = MOD_JSON_KEYS.iter().map(|(k, _)| *k).collect();
+                out.push(diag(line, col, len, "warning", format!("unknown key {key}: mod.json knows {}", known.join(", "))));
+            }
+        }
+    }
+    Value::Array(out)
+}
+
 /// Diagnostics of `path` as the checker sees it; `text` replaces the file
 /// on disk (an editor's unsaved text). The mod's other files are read from
 /// disk when the checker has not got them.
 pub fn diagnostics(path: &str, text: Option<&str>) -> Value {
     let module = path.trim_start_matches('/');
+    if module.ends_with(".json") {
+        return mod_json(module, text);
+    }
+    if !module.ends_with(".luau") {
+        return json!([]);
+    }
     let result = Checker::with(|c| {
         match text {
             Some(t) => c.set(module, Some(t)),
@@ -186,9 +238,8 @@ pub fn diagnostics(path: &str, text: Option<&str>) -> Value {
         result.unwrap_or_else(|e| json!([{ "range": [0, 0, 0, 0], "severity": "error", "code": "checker", "message": e }]));
     if let Some(list) = found.as_array_mut() {
         for d in list {
-            if let Some(m) = d["message"].as_str().and_then(name_message) {
-                d["message"] = m.into();
-            }
+            let message = d["message"].as_str().unwrap_or("");
+            d["message"] = name_message(message).unwrap_or_else(|| crate::world::shorten(message)).into();
         }
     }
     found

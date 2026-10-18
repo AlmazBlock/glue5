@@ -85,15 +85,15 @@ pub(crate) fn Console(s: S) -> impl IntoView {
             _ => false,
         }).collect::<Vec<_>>()
     };
-    let history = move |up: bool| {
-        HISTORY.with(|h| {
-            let mut h = h.borrow_mut();
-            if h.0.is_empty() { return; }
-            let i = if up { h.1.saturating_sub(1) } else { (h.1 + 1).min(h.0.len()) };
-            h.1 = i;
-            s.repl.set(h.0.get(i).cloned().unwrap_or_default());
-        });
-    };
+    // The input is a small editor (highlighting, completions), made once
+    // and moved here whenever the console shows.
+    let input_ref = NodeRef::<leptos::html::Div>::new();
+    Effect::new(move |_| {
+        let Some(el) = input_ref.get() else { return };
+        let on_run = Closure::<dyn FnMut(String)>::new(move |code: String| eval(s, code));
+        with_editor(|e| e.repl(&el, &on_run));
+        on_run.forget();
+    });
     view! {
         <div class="log" node_ref=log_ref>
             <For each=shown key=|(n, _)| *n let((_, row))>
@@ -113,16 +113,8 @@ pub(crate) fn Console(s: S) -> impl IntoView {
         </div>
         <label class="prompt">
             <span class="gt">"›"</span>
-            <input placeholder="Run Luau in the game: entity.getEntityCoords(player.playerPedId(), true)" spellcheck="false" autocomplete="off" autocapitalize="off"
-                prop:value=move || s.repl.get()
-                on:input=move |ev| s.repl.set(event_target_value(&ev))
-                on:keydown=move |ev| match ev.key().as_str() {
-                    "Enter" => eval(s, s.repl.get_untracked()),
-                    "ArrowUp" => { ev.prevent_default(); history(true) }
-                    "ArrowDown" => { ev.prevent_default(); history(false) }
-                    _ => {}
-                }/>
-            <button class="btn primary small" on:click=move |_| eval(s, s.repl.get_untracked())>"Run"</button>
+            <div class="repl-host" node_ref=input_ref></div>
+            <button class="btn primary small" on:click=move |_| with_editor(|e| e.run_repl())>"Run"</button>
         </label>
     }
 }

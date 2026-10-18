@@ -115,7 +115,6 @@ pub(crate) struct S {
     pub(crate) query: RwSignal<String>,
     pub(crate) found: RwSignal<Vec<Value>>,
     pub(crate) palette: RwSignal<bool>,
-    pub(crate) repl: RwSignal<String>,
     pub(crate) notice: RwSignal<Option<String>>,
 }
 
@@ -126,7 +125,6 @@ thread_local! {
     pub(crate) static NEXT_ID: Cell<u64> = const { Cell::new(1) };
     pub(crate) static EDITOR: RefCell<Option<StudioEditor>> = const { RefCell::new(None) };
     pub(crate) static NEXT_ROW: Cell<u64> = const { Cell::new(1) };
-    pub(crate) static HISTORY: RefCell<(Vec<String>, usize)> = RefCell::default();
 }
 
 pub(crate) fn with_editor(f: impl FnOnce(&StudioEditor)) {

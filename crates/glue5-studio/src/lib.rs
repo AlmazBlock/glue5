@@ -58,7 +58,6 @@ fn App() -> impl IntoView {
         query: RwSignal::new(String::new()),
         found: RwSignal::new(Vec::new()),
         palette: RwSignal::new(false),
-        repl: RwSignal::new(String::new()),
         notice: RwSignal::new(None),
     };
     // The code: from the address (the game's QR code), else remembered.

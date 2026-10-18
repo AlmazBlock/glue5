@@ -56,7 +56,6 @@ pub(crate) fn TitleBar(s: S) -> impl IntoView {
                 <div class=move || if s.connected.get() { "device" } else { "device off" }>
                     <span class="dot"></span>
                     {move || s.hello.with(|h| h["device"].as_str().unwrap_or("Game").to_string())}
-                    <small>{move || if s.connected.get() { " · connected" } else { " · reconnecting…" }}</small>
                 </div>
             </div>
         </header>
@@ -65,35 +64,22 @@ pub(crate) fn TitleBar(s: S) -> impl IntoView {
 
 #[component]
 pub(crate) fn Activity(s: S) -> impl IntoView {
-    let errors = move || s.diags.with(|d| d.values().flatten().filter(|d| d.severity == "error").count());
-    let item = move |side: Option<Side>, panel: Option<Panel>, title: &'static str, icon: &'static str| {
-        let on = move || match (side, panel) {
-            (Some(sd), _) => s.side.get() == sd,
-            (_, Some(p)) => s.panel.get() == p,
-            _ => false,
-        };
+    // What the sidebar shows (the console and problems are the panel's tabs).
+    let item = move |side: Side, title: &'static str, icon: &'static str| {
         view! {
-            <button class=move || if on() { "act on" } else { "act" } title=title
+            <button class=move || if s.side.get() == side { "act on" } else { "act" } title=title
                 on:click=move |_| {
-                    if let Some(sd) = side {
-                        if s.side.get_untracked() == sd { s.drawer.update(|d| *d = !*d) } else { s.drawer.set(true) }
-                        s.side.set(sd);
-                    }
-                    if let Some(p) = panel { s.panel.set(p) }
+                    if s.side.get_untracked() == side { s.drawer.update(|d| *d = !*d) } else { s.drawer.set(true) }
+                    s.side.set(side);
                 }>
                 <span class="ico" inner_html=icon></span>
-                {(panel == Some(Panel::Problems)).then(|| view! {
-                    <Show when=move || errors() != 0><span class="badge">{errors}</span></Show>
-                })}
             </button>
         }
     };
     view! {
         <nav class="activity">
-            {item(Some(Side::Mods), None, "Mods", icons::FOLDER)}
-            {item(Some(Side::Natives), None, "Natives", icons::BOOK)}
-            {item(None, Some(Panel::Problems), "Problems", icons::WARNING)}
-            {item(None, Some(Panel::Console), "Console", icons::TERMINAL)}
+            {item(Side::Mods, "Mods", icons::FOLDER)}
+            {item(Side::Natives, "Natives", icons::BOOK)}
         </nav>
     }
 }

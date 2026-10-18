@@ -3,18 +3,19 @@
 // view; each open file keeps its own state (text, undo history, cursor).
 // Used from Rust (src/editor.rs).
 
-import { EditorState, Compartment } from "@codemirror/state";
+import { EditorState, Compartment, Prec } from "@codemirror/state";
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
   drawSelection, rectangularSelection, crosshairCursor, highlightSpecialChars, dropCursor,
+  placeholder, tooltips,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import {
   StreamLanguage, HighlightStyle, syntaxHighlighting, bracketMatching, indentOnInput, indentUnit,
 } from "@codemirror/language";
-import { closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+import { closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus } from "@codemirror/autocomplete";
 import { lintGutter, lintKeymap, forEachDiagnostic } from "@codemirror/lint";
-import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import { searchKeymap, highlightSelectionMatches, search } from "@codemirror/search";
 import { LSPClient, languageServerExtensions } from "@codemirror/lsp-client";
 import { tags as t } from "@lezer/highlight";
 
@@ -112,6 +113,21 @@ const luau = StreamLanguage.define({
   tokenTable: { namespace: t.namespace, typeName: t.typeName, builtin: t.standard(t.variableName), function: t.function(t.variableName), property: t.propertyName },
 });
 
+// ---- JSON (a mod's mod.json) --------------------------------------------
+
+const json = StreamLanguage.define({
+  name: "json",
+  token(stream) {
+    if (stream.eatSpace()) return null;
+    if (stream.match(/^"(?:[^"\\]|\\.)*"?/)) return /^\s*:/.test(stream.string.slice(stream.pos)) ? "property" : "string";
+    if (stream.match(/^-?\d+(\.\d+)?([eE][+-]?\d+)?/)) return "number";
+    if (stream.match(/^(true|false|null)\b/)) return "atom";
+    stream.next();
+    return "punctuation";
+  },
+  tokenTable: { property: t.propertyName },
+});
+
 // The app's palette: its status and overlay colours.
 const highlight = HighlightStyle.define([
   { tag: t.keyword, color: "#f0b464" },
@@ -137,12 +153,16 @@ const theme = EditorView.theme({
   "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": { backgroundColor: "rgba(255,255,255,0.14) !important" },
   ".cm-selectionMatch": { backgroundColor: "rgba(255,255,255,0.07)" },
   ".cm-matchingBracket": { backgroundColor: "rgba(255,255,255,0.12)", outline: "none" },
-  ".cm-tooltip": { backgroundColor: "#151619", border: "1px solid #4c4c4c", borderRadius: "10px", boxShadow: "0 14px 40px rgba(0,0,0,.5)", overflow: "hidden" },
-  ".cm-tooltip-autocomplete > ul": { fontFamily: "var(--mono)", maxHeight: "16em" },
+  // No overflow clipping here: the completion's notes open beside the list.
+  ".cm-tooltip": { backgroundColor: "#151619", border: "1px solid #4c4c4c", borderRadius: "10px", boxShadow: "0 14px 40px rgba(0,0,0,.5)" },
+  ".cm-tooltip-autocomplete > ul": { fontFamily: "var(--mono)", maxHeight: "16em", borderRadius: "9px" },
   ".cm-tooltip-autocomplete > ul > li": { padding: "4px 10px !important", lineHeight: "1.5" },
   ".cm-tooltip-autocomplete > ul > li[aria-selected]": { backgroundColor: "rgba(255,255,255,0.10)", color: "#fff" },
   ".cm-completionDetail": { color: "#6b6f76", fontStyle: "normal", marginLeft: "1em" },
-  ".cm-completionInfo": { padding: "10px 12px", maxWidth: "420px", fontFamily: "var(--ui)", color: "#9da0a6" },
+  ".cm-tooltip.cm-completionInfo": {
+    padding: "10px 12px", maxWidth: "420px", fontFamily: "var(--ui)", color: "#9da0a6",
+    backgroundColor: "#151619", border: "1px solid #4c4c4c", borderRadius: "10px", boxShadow: "0 14px 40px rgba(0,0,0,.5)",
+  },
   ".cm-completionMatchedText": { textDecoration: "none", color: "#fff", fontWeight: "700" },
   ".cm-lsp-documentation, .cm-tooltip-hover": { padding: "10px 12px", fontFamily: "var(--ui)", color: "#d5d7db", maxWidth: "520px" },
   ".cm-lsp-documentation pre, .cm-tooltip-hover pre": { fontFamily: "var(--mono)", whiteSpace: "pre-wrap", margin: "0 0 8px" },
@@ -152,10 +172,45 @@ const theme = EditorView.theme({
   ".cm-lintRange-error": { backgroundImage: "none", textDecoration: "underline wavy #f09595", textUnderlineOffset: "4px" },
   ".cm-lintRange-warning": { backgroundImage: "none", textDecoration: "underline wavy #f0b464", textUnderlineOffset: "4px" },
   ".cm-lint-marker-error": { content: "none" },
-  ".cm-panels": { backgroundColor: "#151619", color: "#d5d7db" },
-  ".cm-panels input, .cm-panels button": { fontFamily: "var(--ui)" },
+  // The search bar (Ctrl/Cmd+F), in the Studio's look.
+  ".cm-panels": { backgroundColor: "rgba(20,21,24,0.96)", color: "#d5d7db", fontFamily: "var(--ui)" },
+  ".cm-panels-top": { borderBottom: "1px solid rgba(255,255,255,0.08)" },
+  ".cm-panel.cm-search": { display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px", padding: "8px 40px 8px 12px", fontSize: "12.5px" },
+  ".cm-panel.cm-search br": { flexBasis: "100%", height: 0, content: "''" },
+  ".cm-panel.cm-search input.cm-textfield": {
+    font: "400 12.5px var(--mono)", color: "#fff", backgroundColor: "rgba(36,36,36,0.9)", border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: "7px", padding: "5px 8px", margin: 0, minWidth: "180px", outline: "none",
+  },
+  ".cm-panel.cm-search input.cm-textfield:focus": { borderColor: "rgba(255,255,255,0.3)" },
+  ".cm-panel.cm-search button.cm-button": {
+    font: "600 12px var(--ui)", color: "#d5d7db", backgroundImage: "none", backgroundColor: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.08)", borderRadius: "7px", padding: "5px 10px", margin: 0, textTransform: "none",
+  },
+  ".cm-panel.cm-search button.cm-button:hover": { backgroundColor: "rgba(255,255,255,0.11)" },
+  ".cm-panel.cm-search label": { display: "inline-flex", alignItems: "center", gap: "5px", color: "#9da0a6", margin: "0 4px", whiteSpace: "nowrap" },
+  ".cm-panel.cm-search input[type=checkbox]": { accentColor: "#fff", margin: 0 },
+  ".cm-panel.cm-search button[name=close]": { top: "8px", right: "10px", fontSize: "18px", color: "#9da0a6", cursor: "pointer" },
   ".cm-searchMatch": { backgroundColor: "rgba(240,180,100,0.25)" },
+  ".cm-searchMatch-selected": { backgroundColor: "rgba(240,180,100,0.5)" },
 }, { dark: true });
+
+// The console's input: one line (more with Shift-Enter), no gutters, its
+// problems not shown (an expression is not a statement).
+const replTheme = EditorView.theme({
+  "&": { height: "auto", fontSize: "12.5px" },
+  ".cm-content": { padding: "9px 0" },
+  ".cm-scroller": { lineHeight: "1.5" },
+  ".cm-activeLine": { backgroundColor: "transparent" },
+  "& .cm-lintRange-error, & .cm-lintRange-warning": { backgroundImage: "none", textDecoration: "none" },
+  ".cm-placeholder": { color: "#6b6f76" },
+});
+
+// The search bar's words, as the Studio writes them.
+const phrases = EditorState.phrases.of({
+  "Find": "Find", "Replace": "Replace", "next": "Next", "previous": "Previous", "all": "All",
+  "match case": "Match case", "regexp": "Regex", "by word": "Whole word", "replace": "Replace",
+  "replace all": "Replace all", "close": "Close",
+});
 
 // ---- The language server ------------------------------------------------
 
@@ -202,12 +257,15 @@ export class StudioEditor {
   }
 
   extensions(path, readOnly) {
+    const isJson = path.endsWith(".json");
     return [
       lineNumbers(), highlightActiveLineGutter(), highlightSpecialChars(), history(), drawSelection(),
       dropCursor(), EditorState.allowMultipleSelections.of(true), indentOnInput(), bracketMatching(),
       closeBrackets(), rectangularSelection(), crosshairCursor(), highlightActiveLine(),
       highlightSelectionMatches(), indentUnit.of("    "), EditorState.tabSize.of(4), lintGutter(),
-      luau, syntaxHighlighting(highlight), theme,
+      // Over the page: the panes' edges would clip them.
+      tooltips({ parent: document.body }),
+      isJson ? json : luau, syntaxHighlighting(highlight), theme, search({ top: true }), phrases,
       this.readOnly.of([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
       keymap.of([
         { key: "Mod-s", preventDefault: true, run: () => { this.saveHandler(path); return true; } },
@@ -222,9 +280,72 @@ export class StudioEditor {
         }
         this.reportDiagnostics(path, update.state);
       }),
-      readOnly ? [] : this.client.plugin("file:///mods/" + path, "luau"),
+      readOnly ? [] : this.client.plugin("file:///mods/" + path, isJson ? "json" : "luau"),
     ];
   }
+
+  // The console's input: Luau with highlighting and completions (the same
+  // language server, a document of its own), Enter runs it, Up and Down
+  // go through what ran. Made once; moved into `parent` when the console
+  // shows again.
+  repl(parent, onRun) {
+    if (this.replView) {
+      parent.appendChild(this.replView.dom);
+      this.replRun = onRun;
+      return;
+    }
+    this.replRun = onRun;
+    const past = [];
+    let back = 0;
+    const set = (view, text) => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, selection: { anchor: text.length } });
+    const run = view => {
+      const code = view.state.doc.toString().trim();
+      if (!code) return true;
+      if (past[past.length - 1] !== code) past.push(code);
+      back = past.length;
+      set(view, "");
+      this.replRun(code);
+      return true;
+    };
+    const walk = (view, by) => {
+      if (completionStatus(view.state) === "active" || !past.length) return false;
+      back = Math.max(0, Math.min(past.length, back + by));
+      set(view, past[back] ?? "");
+      return true;
+    };
+    this.replView = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: "",
+        extensions: [
+          history(), drawSelection(), closeBrackets(), bracketMatching(), luau, syntaxHighlighting(highlight), theme,
+          Prec.highest(replTheme),
+          // Over the page: the panel's blur would clip them.
+          tooltips({ parent: document.body }),
+          Prec.highest(keymap.of([
+            ...completionKeymap,
+            { key: "Enter", run },
+            { key: "Shift-Enter", run: view => { view.dispatch(view.state.replaceSelection("\n")); return true; } },
+            { key: "ArrowUp", run: view => view.state.doc.lines === 1 && walk(view, -1) },
+            { key: "ArrowDown", run: view => view.state.doc.lines === 1 && walk(view, 1) },
+          ])),
+          keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
+          EditorView.contentAttributes.of({ "aria-label": "Run Luau in the game", autocapitalize: "off", autocorrect: "off", spellcheck: "false" }),
+          placeholder("Run Luau in the game: entity.getEntityCoords(player.playerPedId(), true)"),
+          this.client.plugin("file:///mods/~console/input.luau", "luau"),
+        ],
+      }),
+    });
+  }
+
+  runRepl() {
+    if (!this.replView) return;
+    const view = this.replView, code = view.state.doc.toString().trim();
+    if (!code) return;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "" } });
+    this.replRun(code);
+  }
+
 
   reportDiagnostics(path, state) {
     const list = [];

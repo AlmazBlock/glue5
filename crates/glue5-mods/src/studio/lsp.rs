@@ -51,7 +51,9 @@ pub fn run(mut ws: Socket) -> std::io::Result<()> {
             "textDocument/didClose" => {
                 docs.remove(&uri);
                 let module = module(&uri);
-                let _ = Checker::with(|c| c.set(&module, crate::files::read(&module).ok().as_deref()));
+                if module.ends_with(".luau") {
+                    let _ = Checker::with(|c| c.set(&module, crate::files::read(&module).ok().as_deref()));
+                }
                 None
             }
             "textDocument/completion" => Some(completion(&uri, p, &docs)),
@@ -132,6 +134,9 @@ fn prefix(text: &str, line: u32, character: u32) -> String {
 
 fn completion(uri: &str, p: &Value, docs: &HashMap<String, String>) -> Value {
     let module = module(uri);
+    if !module.ends_with(".luau") {
+        return json!({ "isIncomplete": false, "items": [] });
+    }
     let (line, character) = position(p);
     let typed = docs.get(uri).map(|t| prefix(t, line, character)).unwrap_or_default().to_ascii_lowercase();
     let items = Checker::with(|c| c.complete(&module, line, character)).unwrap_or(Value::Null);
@@ -160,7 +165,7 @@ fn completion(uri: &str, p: &Value, docs: &HashMap<String, String>) -> Value {
             // The signature without the name the label already shows.
             let label = i["label"].as_str().unwrap_or("");
             let detail = i["detail"].as_str().unwrap_or("");
-            let detail = detail.strip_prefix(label).unwrap_or(detail);
+            let detail = crate::world::shorten(detail.strip_prefix(label).unwrap_or(detail));
             let kind = match i["kind"].as_u64().unwrap_or(0) {
                 0 if detail.contains('(') => 2, // Method
                 0 => 10,                        // Property
@@ -190,10 +195,13 @@ fn completion(uri: &str, p: &Value, docs: &HashMap<String, String>) -> Value {
 
 fn hover(uri: &str, p: &Value, _docs: &HashMap<String, String>) -> Value {
     let module = module(uri);
+    if !module.ends_with(".luau") {
+        return Value::Null;
+    }
     let (line, character) = position(p);
     let h = Checker::with(|c| c.hover(&module, line, character)).unwrap_or(Value::Null);
     let Some(ty) = h["type"].as_str() else { return Value::Null };
-    let mut value = format!("```luau\n{ty}\n```");
+    let mut value = format!("```luau\n{}\n```", crate::world::shorten(ty));
     if let Some(doc) = h["doc"].as_str().filter(|d| !d.is_empty()).and_then(api::documentation) {
         value.push_str("\n\n");
         value.push_str(&doc);

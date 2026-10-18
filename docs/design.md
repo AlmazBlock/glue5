@@ -864,7 +864,11 @@ whose own browser is no place to write mods).
   about 80 ms; checking a file takes under a millisecond. It exists only
   while an editor is connected (some 30 MB, which the log reports) and
   speaks LSP over a WebSocket (`/lsp`). Completions are filtered by what
-  is typed before they are sent, so lists stay short on phones.
+  is typed before they are sent, so lists stay short on phones. Types are
+  printed in full and the host writes the catalog's unions as their
+  names (`VehicleModel`...), so a signature stays one line. On an iPhone
+  16 Pro it loads in 1.5 s and takes 76 MiB. A mod's `mod.json` is
+  checked by the host (JSON, an object, `autostart` true or false).
 - **The page** (`crates/glue5-studio`) is Leptos compiled to wasm, around
   CodeMirror 6 with `@codemirror/lsp-client`. No node: the crate is its
   own workspace, built for `wasm32-unknown-unknown` by glue5-mods' build
@@ -882,9 +886,12 @@ whose own browser is no place to write mods).
   - use a mod's menus (`menus`, `menu_input`) as a player would.
 
   `claude mcp add --transport http glue5 http://<address>:47110/mcp
-  --header "Authorization: Bearer <code>"`; the Mods page copies it.
+  --header "Authorization: Bearer <code>"`; the Studio's welcome page
+  shows it.
 - **Eval** runs in a mod of its own (`~eval`): a script thread whose Luau
-  takes snippets from a queue.
+  takes snippets from a queue. The console's input is a one-line
+  CodeMirror with the same language server (a document of its own,
+  `~console/input.luau`): highlighting and completions as in a file.
 - Files written by any client reach open editors (a WebSocket message).
   Saving can restart the mod.
 - The mods' menus show in the Studio too (the MENUS panel, a screen of

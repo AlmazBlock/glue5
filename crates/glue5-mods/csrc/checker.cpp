@@ -172,6 +172,17 @@ char* glue5_checker_check(Glue5Checker* c, const char* name) {
 }
 
 // [{"label":"...","kind":n,"detail":"...","doc":"@glue5/global/...","deprecated":bool,"correct":bool,"call":bool}]
+// Types in full: the host writes the catalog's long unions of names as
+// their aliases (VehicleModel...), which a truncated union would not match.
+static std::string typeText(const std::string& label, Luau::TypeId type) {
+  Luau::ToStringOptions opts;
+  opts.maxTypeLength = 0;
+  if (auto* f = Luau::get<Luau::FunctionType>(Luau::follow(type)); f && !label.empty()) {
+    return Luau::toStringNamedFunction(label, *f, opts);
+  }
+  return Luau::toString(type, opts);
+}
+
 char* glue5_checker_complete(Glue5Checker* c, const char* name, unsigned line, unsigned column) {
   try {
     Luau::FrontendOptions o = options();
@@ -182,11 +193,7 @@ char* glue5_checker_complete(Glue5Checker* c, const char* name, unsigned line, u
     for (const auto& [label, entry] : result.entryMap) {
       std::string detail;
       if (entry.type) {
-        if (auto* f = Luau::get<Luau::FunctionType>(Luau::follow(*entry.type))) {
-          detail = Luau::toStringNamedFunction(label, *f);
-        } else {
-          detail = Luau::toString(*entry.type);
-        }
+        detail = typeText(Luau::get<Luau::FunctionType>(Luau::follow(*entry.type)) ? label : "", *entry.type);
       }
       if (out.size() > 1) out += ",";
       out += "{\"label\":" + quote(label) + ",\"kind\":" + std::to_string(int(entry.kind)) + ",\"detail\":" + quote(detail) +
@@ -217,10 +224,10 @@ char* glue5_checker_hover(Glue5Checker* c, const char* name, unsigned line, unsi
     if (auto* index = expr->as<Luau::AstExprIndexName>()) label = index->index.value;
     if (auto* global = expr->as<Luau::AstExprGlobal>()) label = global->name.value;
     if (auto* local = expr->as<Luau::AstExprLocal>()) label = local->local->name.value;
-    if (auto* f = Luau::get<Luau::FunctionType>(Luau::follow(*type)); f && !label.empty()) {
-      text = Luau::toStringNamedFunction(label, *f);
+    if (Luau::get<Luau::FunctionType>(Luau::follow(*type)) && !label.empty()) {
+      text = typeText(label, *type);
     } else {
-      text = (label.empty() ? "" : label + ": ") + Luau::toString(*type);
+      text = (label.empty() ? "" : label + ": ") + typeText("", *type);
     }
     auto doc = Luau::getDocumentationSymbolAtPosition(*source, *module, at);
     return owned("{\"type\":" + quote(text) + ",\"doc\":" + quote(doc.value_or("")) + ",\"range\":" +

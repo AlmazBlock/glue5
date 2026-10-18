@@ -216,6 +216,7 @@ pub fn set_catalog(c: Catalog) {
     let text = definitions_of(Some(&c));
     *slot = Some(c);
     drop(slot);
+    *ALIASES.lock().unwrap() = None;
     if let Some(dir) = crate::dir() {
         let _ = std::fs::create_dir_all(dir.join(".glue5"));
         let _ = std::fs::write(dir.join(".glue5/world.d.luau"), text);
@@ -235,7 +236,87 @@ pub fn load_saved(dir: &std::path::Path) {
     let c = Catalog { vehicles: list("VehicleModel"), peds: list("PedModel"), weapons: list("WeaponName") };
     if !c.vehicles.is_empty() {
         *CATALOG.lock().unwrap() = Some(c);
+        *ALIASES.lock().unwrap() = None;
     }
+}
+
+/// The catalog's types as sets of names, for [`shorten`] (the largest
+/// first: a model is a vehicle's or a ped's).
+static ALIASES: Mutex<Option<Vec<(&'static str, std::collections::HashSet<String>)>>> = Mutex::new(None);
+
+fn aliases() -> Vec<(&'static str, std::collections::HashSet<String>)> {
+    let mut slot = ALIASES.lock().unwrap();
+    if slot.is_none() {
+        let c = catalog().unwrap_or_default();
+        let set = |lists: &[&Vec<String>]| lists.iter().flat_map(|l| l.iter().cloned()).collect();
+        *slot = Some(vec![
+            ("Model", set(&[&c.vehicles, &c.peds])),
+            ("VehicleModel", set(&[&c.vehicles])),
+            ("PedModel", set(&[&c.peds])),
+            ("WeaponName", set(&[&c.weapons])),
+        ]);
+    }
+    slot.clone().unwrap()
+}
+
+/// `text` (a type or a message of the checker's) with the catalog's
+/// unions of names written as their types (`VehicleModel`...) and other
+/// long unions of strings cut short: the checker spells them out, a few
+/// thousand characters for a vehicle's model.
+pub fn shorten(text: &str) -> String {
+    if !text.contains("\" | \"") {
+        return text.to_owned();
+    }
+    let aliases = aliases();
+    let mut out = String::with_capacity(text.len().min(4096));
+    let mut rest = text;
+    while let Some(start) = rest.find('"') {
+        out.push_str(&rest[..start]);
+        // A run of string literals joined by " | ".
+        let mut names = Vec::new();
+        let mut at = start;
+        loop {
+            let Some(len) = rest[at + 1..].find('"') else { break };
+            names.push(&rest[at + 1..at + 1 + len]);
+            let after = at + len + 2;
+            if rest[after..].starts_with(" | \"") {
+                at = after + 3;
+            } else {
+                at = after;
+                break;
+            }
+        }
+        if names.is_empty() {
+            out.push_str(&rest[start..]);
+            return out;
+        }
+        if names.len() < 6 {
+            out.push_str(&rest[start..at]);
+        } else {
+            let mut left: std::collections::HashSet<&str> = names.iter().copied().collect();
+            let mut parts: Vec<String> = Vec::new();
+            for (alias, set) in &aliases {
+                if !set.is_empty() && set.iter().all(|n| left.contains(n.as_str())) {
+                    left.retain(|n| !set.contains(*n));
+                    parts.push((*alias).to_owned());
+                }
+            }
+            let mut rest_names: Vec<&str> = names.iter().copied().filter(|n| left.contains(n)).collect();
+            rest_names.dedup();
+            let more = rest_names.len().saturating_sub(3);
+            if more > 1 {
+                rest_names.truncate(3);
+            }
+            parts.extend(rest_names.iter().map(|n| format!("\"{n}\"")));
+            if more > 1 {
+                parts.push(format!("… {more} more"));
+            }
+            out.push_str(&parts.join(" | "));
+        }
+        rest = &rest[at..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The world's types for the checker: the catalog's names as string
@@ -264,4 +345,26 @@ fn definitions_of(c: Option<&Catalog>) -> String {
         union(p),
         union(w)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_unions_get_their_names() {
+        let names = |p: &str, n: usize| (0..n).map(|i| format!("{p}{i}")).collect::<Vec<_>>();
+        let c = Catalog { vehicles: names("car", 8), peds: names("ped", 7), weapons: names("WEAPON_", 6) };
+        *CATALOG.lock().unwrap() = Some(c.clone());
+        *ALIASES.lock().unwrap() = None;
+        let union = |l: &[String]| l.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(" | ");
+        let both: Vec<String> = c.vehicles.iter().chain(&c.peds).cloned().collect();
+        assert_eq!(
+            shorten(&format!("(modelHash: {}, x: number) -> Vehicle?", union(&c.vehicles))),
+            "(modelHash: VehicleModel, x: number) -> Vehicle?"
+        );
+        assert_eq!(shorten(&format!("(m: ({})?)", union(&both))), "(m: (Model)?)");
+        assert_eq!(shorten(&union(&names("x", 9))), "\"x0\" | \"x1\" | \"x2\" | … 6 more");
+        assert_eq!(shorten("(a: \"one\" | \"two\")"), "(a: \"one\" | \"two\")");
+    }
 }

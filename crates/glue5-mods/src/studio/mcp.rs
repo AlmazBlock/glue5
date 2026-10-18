@@ -116,7 +116,7 @@ fn call(name: &str, a: &Value) -> Value {
             "write_file" => {
                 let path = s("path")?;
                 files::write(path, s("content")?)?;
-                if path.ends_with(".luau") {
+                if path.ends_with(".luau") || path.ends_with(".json") {
                     json!({ "written": path, "diagnostics": api::diagnostics(path, None) })
                 } else {
                     json!({ "written": path })

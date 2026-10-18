@@ -24,6 +24,12 @@ extern "C" {
     pub fn insert(this: &StudioEditor, text: &str);
     #[wasm_bindgen(method)]
     pub fn focus(this: &StudioEditor);
+    /// The console's input, made in (or moved to) `parent`; `on_run` gets what runs.
+    #[wasm_bindgen(method)]
+    pub fn repl(this: &StudioEditor, parent: &web_sys::HtmlElement, on_run: &Closure<dyn FnMut(String)>);
+    #[wasm_bindgen(method, js_name = runRepl)]
+    pub fn run_repl(this: &StudioEditor);
+
     #[wasm_bindgen(method, js_name = onChange)]
     pub fn on_change(this: &StudioEditor, f: &Closure<dyn FnMut(String, bool)>);
     #[wasm_bindgen(method, js_name = onSave)]

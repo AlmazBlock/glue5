@@ -69,13 +69,7 @@ pub(crate) fn eval(s: S, code: String) {
     if code.trim().is_empty() {
         return;
     }
-    HISTORY.with(|h| {
-        let mut h = h.borrow_mut();
-        h.0.push(code.clone());
-        h.1 = h.0.len();
-    });
     push_row(s, Row::Input(code.clone()));
-    s.repl.set(String::new());
     request("eval", json!({ "code": code }), move |r| match r {
         Ok(v) => push_row(s, Row::Value(v.as_str().unwrap_or("").to_string())),
         Err(e) => push_row(s, Row::Failure(e)),
