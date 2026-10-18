@@ -34,8 +34,8 @@ then **Draft a new release**.
 3. On the right, press **Run workflow**, choose your device (`ios`,
    `android`, `windows`, `macos`, `linux-x86_64` or `linux-aarch64`),
    press the green **Run workflow**.
-4. Wait. It takes a long time (more than an hour): you can close the
-   page and come back later. A green ✅ means it is done.
+4. Wait: you can close the page and come back later. A green ✅
+   means it is done.
 5. Open **Releases**, then your draft: the app is there, next to
    `game.wasm`. Download it.
 
