@@ -93,7 +93,9 @@ jobs:
           android)
               mise run android:build
               mv target/android/gradle/outputs/apk/release/Glue5-release.apk Glue5-android.apk
-              cp ~/.android/debug.keystore Glue5-android.keystore
+              if [ -f ~/.android/debug.keystore ]; then
+                cp ~/.android/debug.keystore Glue5-android.keystore
+              fi
               ;;
           linux-*)
               mise run linux:container "${PLATFORM#linux-}"
